@@ -1,0 +1,7 @@
+Useful References
+=================
+
+- Kafka Protocol official guide: https://kafka.apache.org/protocol.html
+- Kafka Protocol work-in-progress guide: https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol
+- Individual message schema JSON in Kafka source code: https://github.com/apache/kafka/tree/trunk/clients/src/main/resources/common/message
+- Kafka protocol internal insights: https://github.com/tombentley/kafka-internals
