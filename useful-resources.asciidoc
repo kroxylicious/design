@@ -5,3 +5,4 @@ Useful References
 - Kafka Protocol work-in-progress guide: https://cwiki.apache.org/confluence/display/KAFKA/A+Guide+To+The+Kafka+Protocol
 - Individual message schema JSON in Kafka source code: https://github.com/apache/kafka/tree/trunk/clients/src/main/resources/common/message
 - Kafka protocol internal insights: https://github.com/tombentley/kafka-internals
+- Tagged fields in Kafka protocol: https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields
