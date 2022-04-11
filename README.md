@@ -12,7 +12,7 @@ tbd.
 This effort is currently being bootstrapped, take a look at the following resources to learn more about the current state of discussions, thinking and first PoC:
 
 * [Discussions](https://github.com/kroxylicous/design/discussions): Ideas and other discussions
-* [Resources](tbd.): A collection of useful resources
+* [Resources](useful-resources.asciidoc): A collection of useful resources
 * [kproxy](https://github.com/kroxylicous/kproxy): A basic PoC for a Kafka protocol proxy based on Netty
 
 ## License
