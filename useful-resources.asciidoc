@@ -6,3 +6,4 @@ Useful References
 - Individual message schema JSON in Kafka source code: https://github.com/apache/kafka/tree/trunk/clients/src/main/resources/common/message
 - Kafka protocol internal insights: https://github.com/tombentley/kafka-internals
 - Tagged fields in Kafka protocol: https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields
+- Some Netty performance considerations: https://www.alibabacloud.com/blog/how-is-netty-used-to-write-a-high-performance-distributed-service-framework_598081
