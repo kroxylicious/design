@@ -1,0 +1,24 @@
+= Proxy Use Cases
+
+There are a number of potential use cases which have been identified which could be solved through a proxy at the Kafka protocol level.
+The list below isn't exhaustive and there is an ongoing exercise to estimate the complexity of each use case.
+
+1. _Configuration Policy enforcement._ For instance enforcing limits on the total number of partitions within a cluster. There are open questions whether this is strictly enforceable and whether or not we should try to do it in upstream Kafka before resorting to a proxy
+1. _Topic Encryption._ Enable certain topics to be encrypted to avoid SREs who have access to the underlying disks to be able to read the data.
+1. _Tar Pit._ Slow down malicious or badly behaved users. The ability to disconnect individual connections might allow us more options wrt reauthentication.  
+1. _Multitenancy._ Enable topic and user isolation within a single Kafka cluster
+1. _Authentication._ Performing authentication in a proxy reduces load from the Kafka brokers
+1. _Schema validation._ Ensure that all messages on a given topic adhere to a particular schema
+1. _Audit logging._ Keep track of who created a topic, how much did they produce, etc. Getting client IP Addresses (not currently possible)
+
+== Other Benefits
+
+1. _Security._ If the proxy uses a different network stack then there is a reduced attack vector if CVE are discovered in Apache Kafka. With kproxy only the serialization code is shared.
+
+== Other Potential Use cases
+
+* Broker migration
+* Claim Check Pattern
+* Generally SMTs, e.g. content-based routing
+* "Kafka Firewall"
+* Logging IP address conveyed via http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt[proxy protocol] when establishing a connection; facilitating audit logging
