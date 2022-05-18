@@ -22,3 +22,4 @@ The list below isn't exhaustive and there is an ongoing exercise to estimate the
 * Generally SMTs, e.g. content-based routing
 * "Kafka Firewall"
 * Logging IP address conveyed via http://www.haproxy.org/download/1.8/doc/proxy-protocol.txt[proxy protocol] when establishing a connection; facilitating audit logging
+* Protocol bridging (e.g. AMQP/Kafka)
