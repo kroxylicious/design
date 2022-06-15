@@ -1,0 +1,28 @@
+= Kroxylicious Concepts
+
+This page describes some concepts/ideas/patterns used in Kroxylicous. It will later on be merged into some more formal kind of documentation probably.
+
+== "Upstream" vs. "Downstream"
+
+Upstream:: towards the broker
+Downstream:: towards the client
+
+Thus each connection has:
+
+* an "upstream pipeline" (for processing requests on their way to the broker). The upstream pipeline begins with the request decoder, and ends with the request encoder.
+* a "downstream pipeline" (for processing responses on their way to the client). The downstream pipeline begins with the response decoder and ends with the response encoder.
+
+From the PoV of a filter F within a chain there might be:
+* "downstream filters" (i.e. filters that are downstream of F), which will see requests _before_ F and will process responses _after_ F. 
+* "upstream filters" (i.e. filters which are upstream of F), which will see requests _after_ this F, and see responses _before_ F.
+
+== Pipelines
+
+Pipeline is a Netty concept, invoking several "handlers" in a row.
+
+== Filter chain
+
+A concept for our API.
+The filter chain happens to be implemented using a Netty pipeline, having one netty handler per filter, but that is an implementation detail.
+We could equally have a single handler for all the filters in a chain.
+Or (in theory) we could implement the proxy on a different stack entirely (e.g. Vert.X).
