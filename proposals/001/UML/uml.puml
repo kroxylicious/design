@@ -1,0 +1,11 @@
+@startuml
+
+DownstreamCluster - UpstreamCluster
+
+DownstreamCluster *--{ "n" DownstreamBroker
+UpstreamCluster *--{ "n" UpstreamBroker
+
+DownstreamBroker }-- EndPoint
+DownstreamCluster --- FilterChain
+UpstreamCluster --- FilterChain
+@enduml
