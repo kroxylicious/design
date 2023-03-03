@@ -1,0 +1,11 @@
+@startuml
+
+VirtualCluster - PhysicalCluster
+
+VirtualCluster *--{ "n" VirtualBroker
+PhysicalCluster *--{ "n" PhysicalBroker
+
+VirtualBroker }-- EndPoint
+VirtualCluster ---{ Filters
+PhysicalCluster ---{ Filter
+@enduml
