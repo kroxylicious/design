@@ -165,6 +165,7 @@ The upstream cluster and downstream broker provide the filter chain.
 
 The handler chain connects to the upstream broker.
 
+The system must reload chnages to the model dynammically, without dropping established connections.
 
 ### Broker Address Filter
 
