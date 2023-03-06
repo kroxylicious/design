@@ -49,7 +49,7 @@ Currently `KafkaProxy` uses the `ProxyConfig` object to get a single address to 
 
 `ProxyConfig` will be replaced by an list of _Endpoint_ objects.  
 
-```
+```yaml
 - name: endpoint name
   address: bind address/port
   type: PLAIN|TLS
