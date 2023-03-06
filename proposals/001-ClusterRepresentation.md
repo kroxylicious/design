@@ -114,7 +114,7 @@ Each upstream broker specifies the address of the physical broker and whether TL
 
 TLS trust material may be provided at the upstream broker level or at the individual broker level.
 
-```
+```yaml
 - name: my-private-cluster
   filterChainRef: my-downstream-filter-chain
   tls:
