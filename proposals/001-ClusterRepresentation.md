@@ -63,7 +63,8 @@ all the kafka clusters are being presented by Kroxylicious.
 
 A _virtual clusster_ references exactly one _physical cluster_. 
 
-A _virtual cluster_ may reference a `filter chain`.  This provides zero or more filters that the RPCs will pass through before arriving at the physical cluster.
+A _virtual cluster_ may define a chain of filters.  This provides zero or more filters that the RPCs will pass through as they traverse the virtual cluster,
+before they reach the physical cluster.
 
 A _virtual cluster_ enumerates the virtual brokers that comprise the virtual cluster.
 
@@ -81,7 +82,11 @@ TLS key material may be provided either at the virtual cluster level or at the i
 ```yaml
 - name: my-public-cluster
   physicalClusterRef: my-private-cluster
-  filterChainRef: my-upstream-filter-chain
+  filters:
+  - type: Filter1
+    config:
+       foo: bar
+  - type: Filter2
   brokers:
   - name: broker-1
     endpointRef: my-tls-endpoint
@@ -104,8 +109,9 @@ TLS key material may be provided either at the virtual cluster level or at the i
 
 An _physical cluster_ is the in-model representation of a running kafka cluster.   The physical clusters list specifies all the kafka clusters that known to Kroxylicious.
 
-An _physical cluster_ may reference a `filter chain`.  This provides zero or more *additional* filters that the RPCs will pass through before passing to the brokers
-of the physical cluster.  
+A physical cluster_ may define a chain of filters.  This provides zero or more filters that the RPCs will pass through as they traverse the physical cluster.
+(Note that it is possible for both a filter chain to be define at both the virtual cluster and physical cluster level.  RPCs pass through both sets of filters
+in the order they are defined).
 
 An _physical cluster_ enumerates the brokers that comprise the physical cluster.
 
@@ -117,7 +123,11 @@ TLS trust material may be provided at the upstream broker level or at the indivi
 
 ```yaml
 - name: my-private-cluster
-  filterChainRef: my-downstream-filter-chain
+  filters:
+  - type: Filter1
+    config:
+       foo: bar
+  - type: Filter2
   tls:
     trust:
     ...
@@ -135,54 +145,58 @@ TLS trust material may be provided at the upstream broker level or at the indivi
       trust:
 ```
 
-#### Filter Chain
 
-Currently kroxylicious provide a single filter chain.  It will refactored so that we can support many filter chains, each identified by name. The `virtual cluster` and `physical cluster` may reference a filter chain. 
+### High Level Responsibilities
 
-```yaml
-filterChains:
-- name: my-upstream-filter-chain
-  filters:
-  - type: ApiVersions
-  - type: BrokerAddress
-
-```
+#### Connection Handling
 
 
-### Responsibilities
-
-All specified endpoints will be bound.
+All declared endpoints will be bound.
 
 When a connection is made to an endpoint,  the system must resolve that connection to a virtual broker and hence a virtual cluster.
 
-To do this, it resolves the endpoint and any SNI information against the model.   This should yield exactly one broker belonging to a virtual cluster.
+To do this, it resolves the endpoint (and any SNI information) against the model.   This should yield exactly one broker belonging to a virtual cluster.
 It is an error otherwise and the connnection must be closed.
 
 If TLS is in use, the SSLContext can be generated from the virtual cluster definition.  This will be passed to Netty to let it complete the TLS handshake.
 
 The virtual broker and virtual cluster is used to identify the physical broker and physical cluster.
 
-The physical cluster and downstream broker provide the filter chain.
+The filter chains are constructed.
 
-The handler chain connects to the upstream broker.
+The handler chain connects to the physical broker.
+
+#### Model Changes
 
 The system must reload chnages to the model dynammically, without dropping established connections.
 
-### Broker Address Filter
+#### Broker Address Filter
 
-How will broker address filter map the RPCs that contain the upstream broker address to the downstream broker addresss that are resolveable to the client?
+The BrokerAddressFilter must map the RPC reponses that contain the physical broker address to the virtual broker addresses that are resolveable to the client.  DescribeCluster response is an example of an RPC that needs to be mapped.
 
-In the case where kroxy is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to
-*connect* to brokers in the other AZs.  However, BrokerAddressFilter will be to be capable of rewriting the the broker address for the whole cluster.
-This leads us to the conclusion that Broker Address filter need separate configuration independent of that what could be derived from the upstream/virtual cluster mapping.
+In the case where Kroxylicious is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to *connect* to brokers in the other AZs.  However, BrokerAddressFilter must be capable of rewriting the the broker address for the whole cluster.
+This leads us to the conclusion that Broker Address filter need separate configuration, independent of that what could be derived from the virtual/physical cluster mapping.
 
-TODO: Maybe used a regexp based mapping would be sufficient
+The BrokerAddressFilter will accept a mapping, which will map the upstream broker addresses to routable addresses that correspond to the virtual brokers of the
+cluster in question.
+
+To do this, we can use the existing filter configuration mechanism.
+
+```
+  - type: BrokerAddress
+    config:
+      brokerAddressMapping:
+        broker-1.azA.internal.svc:19080: broker-A.myvanitydomain.com:9092
+        broker-2.azB.internal.svc:19080: broker-B.myvanitydomain.com:9092
+        broker-3.azC.internal.svc:19080: broker-C.myvanitydomain.com:9092
+```       
+
 
 ### Example Config Files
 
 #### One to one case.
 
-# 3 broker cluster, exposed via kroxy
+# Single Cluster with 3 broker cluster, exposed via kroxy
 
 ```yaml
 endpoints:
@@ -192,44 +206,49 @@ endpoints:
 virtualClusters:
 - name: my-public-cluster
   upstreamClusterRef: my-private-cluster
-  filterChainRef: my-downstream--filter-chain
+  filters:
+  - type: ApiVersions
+  - type: BrokerAddress
+    config:
+      brokerAddressMapping:
+        broker-1.azA.internal.svc:19080: broker-A.myvanitydomain.com:9092
+        broker-2.azB.internal.svc:19080: broker-B.myvanitydomain.com:9092
+        broker-3.azC.internal.svc:19080: broker-C.myvanitydomain.com:9092
+  - type: MyFunkyFilter
   tls:
     key:
     cert:
   brokers:
   - name: broker-1
-    sniMatchAddress: broker-1.public.kafka.com
+    sniMatchAddress: broker-A.myvanitydomain.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-1
+    physicalBrokerRef: private-broker-1
   - name: broker-2
-    sniMatchAddress: broker-2.public.kafka.com
+    sniMatchAddress: broker-B.myvanitydomain.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-2
+    physicalBrokerRef: private-broker-2
   - name: broker-3
-    sniMatchAddress: broker-3.public.kafka.com
+    sniMatchAddress: broker-C.myvanitydomain.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-3 
+    physicalBrokerRef: private-broker-3
 physicalClusters:
 - name: my-private-cluster
   brokers:
   - name: private-broker-1
-    address: broker-1-private:9092
+    address: broker-1.azA.internal.svc:19080
   - name: private-broker-2
-    address: broker-2-private:9092
+    address: broker-2.azB.internal.svc:19080
   - name: private-broker-3
-    address: broker-3-private:9092
-filterChains:
-- name: my-downstream--filter-chain
-  filters:
-  - type: ApiVersions
-  - type: BrokerAddress
-  - type: MyFunkyServiceFilter
+    address: broker-3.azC.internal.svc:19080
 ```
 
 #### Many-to-one case (multi tenancy)
 
-# Single cluster, exposed to to two tenants.
+# Single cluster, exposed to two tenants.
 
+Note that in this case we've define two separate virtual clusters, one for each tenant.  We leveraged the fact that filters can be define at the
+virtual cluster level to pass in tenant specific information to the filter. Specifically, this is how we pass in the tenant key (prefix) and the
+broker address mapping.
 
 ```yaml
 endpoints:
@@ -238,10 +257,21 @@ endpoints:
   bindAddress: 0.0.0.0:9092
 virtualClusters:
 - name: my-tenant1
-  upstreamClusterRef: my-private-cluster
+  physicalClusterRef: my-big-cluster
   tls:
     key:
     cert:
+  filters:
+  - type: ApiVersions
+  - type: BrokerAddress
+    config:
+      brokerAddressMapping:
+        broker-1.azA.internal.svc:19080: broker-1.my-tenant1.kafka.com:9092
+        broker-2.azB.internal.svc:19080: broker-2.my-tenant1.kafka.com:9092
+        broker-3.azC.internal.svc:19080: broker-3.my-tenant1.kafka.com:9092
+  - type: MultiTenantFilter
+    config:
+      tenantKey: z4de # prefix used to prefix objects owned by the tenant.
   brokers:
   - name: broker-1
     sniMatchAddress: broker-1.my-tenant1.kafka.com
@@ -250,16 +280,27 @@ virtualClusters:
   - name: broker-2
     sniMatchAddress: broker-2.my-tenant1.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-2
+    upstreamBrokerRef: private-broker-2
   - name: broker-3
     sniMatchAddress: broker-3.my-tenant1.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-3 
+    upstreamBrokerRef: private-broker-3
 - name: my-tenant2
-  upstreamClusterRef: my-private-cluster
+  upstreamClusterRef: my-big-cluster
   tls:
     key:
     cert:
+  filters:
+  - type: ApiVersions
+  - type: BrokerAddress
+    config:
+      brokerAddressMapping:
+        broker-1.azA.internal.svc:19080: broker-1.my-tenant2.kafka.com:9092
+        broker-2.azB.internal.svc:19080: broker-2.my-tenant2.kafka.com:9092
+        broker-3.azC.internal.svc:19080: broker-3.my-tenant2.kafka.com:9092
+  - type: MultiTenantFilter
+    config:
+      tenantKey: ab7ge
   brokers:
   - name: broker-1
     sniMatchAddress: broker-1.my-tenant2.kafka.com
@@ -268,26 +309,20 @@ virtualClusters:
   - name: broker-2
     sniMatchAddress: broker-2.my-tenant2.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-2
+    upstreamBrokerRef: private-broker-2
   - name: broker-3
     sniMatchAddress: broker-3.my-tenant2.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: broker-3 
+    upstreamBrokerRef: private-broker-3
 physicalClusters:
 - name: my-big-cluster
   brokers:
-  - name: broker-1
+  - name: private-broker-1
     address: beefy:9092
-  - name: broker-2
+  - name: private-broker-2
     address: chunky:9092
-  - name: broker-3
-    address: hunky:9092
-filterChains:
-- name: my-upstream-filter-chain
-  filters:
-  - type: ApiVersions
-  - type: BrokerAddress
-  - type: MultiTenantFilter
+  - name: private-broker-3
+    address: stocky:9092
 ```
 
 
