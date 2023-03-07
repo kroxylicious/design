@@ -4,14 +4,14 @@
 
 This proposal introduces the concept of _cluster_ into the model.
 
-A _downstream cluster_ is a kafka cluster that the clients connect to.   The downstream cluster can be thought of as a 'virtual' cluster or a 'facade' to
-one or more _upstream clusters_.    An _upstream cluster_ represents the physical kafka cluster.  There is a one to one correspondance between
-a _upstream cluster_ and a physical cluster in the world.
+A _virtual cluster_ is a kafka cluster that the clients connect to.   The virtual cluster can be thought of as a 'virtual' cluster or a 'facade' to
+one or more _physical clusters_.    An _physical cluster_ represents the physical kafka cluster.  There is a one to one correspondance between
+a _physical cluster_ and a physical cluster in the world.
 
 There will be a mechansim to route flexibly between downstreams and upstreams.  This will allow building useful topologies to serve different use-cases.
 
 - *one to one* - the simple exposure of a physical cluster 
-- *many to one* - kroxy presents many downstream clusters which route to a single upstream - this would support a multitenant use-cases 
+- *many to one* - kroxy presents many virtual clusters which route to a single upstream - this would support a multitenant use-cases 
 
 (There's a possiblity of *one-to-many* which a single downstream routes to several upstreams as if they were one, which might be useful for presenting several
 kafka clusters as if they were one, however, supporting transactions across two clusters would be difficult.  We won't consider this use-case further).
@@ -57,24 +57,24 @@ Currently `KafkaProxy` uses the `ProxyConfig` object to get a single address to 
 
 #### Downstream Clusters
 
-Conceptually the _downstream cluster_ represents the cluster that the kafka client connects to.  The downstream clusters list specifies
+Conceptually the _virtual cluster_ represents the cluster that the kafka client connects to.  The virtual clusters list specifies
 all the kafka clustsers are being presented by Kroxylicious. 
 
-A _downstream clustser_ references exactly one _upstream cluster_. 
+A _downstream clustser_ references exactly one _physical cluster_. 
 
-A _downstream cluster_ may reference a `filter chain`.  This provides zero or more filters that the RPCs will pass through before arriving at the upstream cluster.
+A _virtual cluster_ may reference a `filter chain`.  This provides zero or more filters that the RPCs will pass through before arriving at the physical cluster.
 
-A _downstream cluster_ enumerates the downstream brokers that comprise the downstream cluster.
+A _virtual cluster_ enumerates the downstream brokers that comprise the virtual cluster.
 
 ##### Downstream Brokers
 
 Each broker has a reference to an endpoint that will provide the way in to the broker.   For the SNI case, there is also an addresses matcher.  It is an error
 for more than one broker to share an endpoint unless the endpoint type is TLS and the SNI matching address is defined.
 
-Each downstream broker references exactly one upstream broker which must exist within the referenced upstream cluster.  It is an error if there is not a
+Each downstream broker references exactly one upstream broker which must exist within the referenced physical cluster.  It is an error if there is not a
 one-to-one correspondence between downstream and upstream brokers.
 
-TLS key material may be provided either at the downstream cluster level or at the individual broker level.
+TLS key material may be provided either at the virtual cluster level or at the individual broker level.
 
 
 ```yaml
@@ -101,12 +101,12 @@ TLS key material may be provided either at the downstream cluster level or at th
 
 #### Upstream Clusters
 
-An _upstream cluster_ represents a physical kafka cluster.   The upstream clusters list specifies all the kafka clustsers that are being exposed through Kroxylicious.  
+An _physical cluster_ represents a physical kafka cluster.   The physical clusters list specifies all the kafka clustsers that are being exposed through Kroxylicious.  
 
-An _upstream cluster_ may reference a `filter chain`.  This provides zero or more *additional* filters that the RPCs will pass through before passing to the brokers
+An _physical cluster_ may reference a `filter chain`.  This provides zero or more *additional* filters that the RPCs will pass through before passing to the brokers
 of the physical cluster.  
 
-An _upstream cluster_ enumerates the upstream brokers that comprise the physical cluster.
+An _physical cluster_ enumerates the upstream brokers that comprise the physical cluster.
 
 #### Upstream Brokers
 
@@ -136,7 +136,7 @@ TLS trust material may be provided at the upstream broker level or at the indivi
 
 #### Filter Chain
 
-Currently kroxylicious provide a single filter chain.  It will refactored so that we can support many filter chains, each identified by name. The `downstream cluster` and `upstream cluster` may reference a filter chain. 
+Currently kroxylicious provide a single filter chain.  It will refactored so that we can support many filter chains, each identified by name. The `virtual cluster` and `physical cluster` may reference a filter chain. 
 
 ```yaml
 filterChains:
@@ -152,16 +152,16 @@ filterChains:
 
 All specified endpoints will be bound.
 
-When a connection is made to an endpoint,  the system must resolve that connection to a downstream broker and hence a downstream cluster.
+When a connection is made to an endpoint,  the system must resolve that connection to a downstream broker and hence a virtual cluster.
 
-To do this, it resolves the endpoint and any SNI information against the model.   This should yield exactly one broker belonging to a downstream cluster.
+To do this, it resolves the endpoint and any SNI information against the model.   This should yield exactly one broker belonging to a virtual cluster.
 It is an error otherwise and the connnection must be closed.
 
-If TLS is in use, the SSLContext can be generated from the downstream cluster definition.  This will be passed to Netty to let it complete the TLS handshake.
+If TLS is in use, the SSLContext can be generated from the virtual cluster definition.  This will be passed to Netty to let it complete the TLS handshake.
 
-The downstream broker and downstream cluster is used to identify the upstream broker and upstream cluster.
+The downstream broker and virtual cluster is used to identify the upstream broker and physical cluster.
 
-The upstream cluster and downstream broker provide the filter chain.
+The physical cluster and downstream broker provide the filter chain.
 
 The handler chain connects to the upstream broker.
 
@@ -173,7 +173,7 @@ How will broker address filter map the RPCs that contain the upstream broker add
 
 In the case where kroxy is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to
 *connect* to brokers in the other AZs.  However, BrokerAddressFilter will be to be capable of rewriting the the broker address for the whole cluster.
-This leads us to the conclusion that Broker Address filter need separate configuration independent of that what could be derived from the upstream/downstream cluster mapping.
+This leads us to the conclusion that Broker Address filter need separate configuration independent of that what could be derived from the upstream/virtual cluster mapping.
 
 TODO: Maybe used a regexp based mapping would be sufficient
 
