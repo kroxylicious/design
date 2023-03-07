@@ -32,7 +32,7 @@ There will be a mechansim to map between virtual and physical clusters.  This wi
 
 ## Current situation
 
-Kroxyliciousis currently limited to exposing a single broker of a single cluster.
+Kroxylicious is currently limited to exposing a single broker of a single cluster.
 
 
 ## Proposal
