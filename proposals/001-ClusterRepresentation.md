@@ -45,7 +45,7 @@ The proposal will change some existing concepts and introduce some new ones.  Th
 Currently `KafkaProxy` uses the `ProxyConfig` object to get a single address to bind to.  
 
 * For the non-TLS case, multiple endpoints are required to support >1 brokers. 
-* For TLS case, SNI gives a mechanism to route the traffic to a >1 brokers even when a single endpoint is used, however there may be performance or operational reasons to favour the ability to define endpoints.
+* For TLS case, SNI gives a mechanism to route the traffic to >1 brokers even when a single endpoint is used, however there may be performance or operational reasons to favour the ability to define endpoints.
 
 `ProxyConfig` will be replaced by an list of _Endpoint_ objects.  
 
