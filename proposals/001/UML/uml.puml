@@ -1,11 +1,11 @@
 @startuml
 
-DownstreamCluster - UpstreamCluster
+VirtualCluster - PhysicalCluster
 
-DownstreamCluster *--{ "n" DownstreamBroker
-UpstreamCluster *--{ "n" UpstreamBroker
+VirtualCluster *--{ "n" VirtualBroker
+PhysicalCluster *--{ "n" PhysicalBroker
 
-DownstreamBroker }-- EndPoint
-DownstreamCluster --- FilterChain
-UpstreamCluster --- FilterChain
+VirtualBroker }-- EndPoint
+VirtualCluster --- FilterChain
+PhysicalCluster --- FilterChain
 @enduml
