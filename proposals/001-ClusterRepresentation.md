@@ -201,7 +201,7 @@ To do this, we can use the existing filter configuration mechanism.
 
 #### One to one case.
 
-# Single Cluster with 3 brokers, exposed via kroxylicious
+##### Single Cluster with 3 brokers, exposed via kroxylicious
 
 ```yaml
 endpoints:
@@ -249,10 +249,8 @@ physicalClusters:
 
 #### Many-to-one case (multi tenancy)
 
-# Single cluster, exposed to two tenants.
-
-Note that in this case we've define two separate virtual clusters, one for each tenant.  We leveraged the fact that filters can be define at the
-virtual cluster level to pass in tenant specific information to the filter. Specifically, this is how we pass in the tenant key (prefix) and the
+Note that in this case we've defined two separate virtual clusters, one for each tenant.  We leveraged the fact that filters can be defined at the
+virtual cluster level to pass in tenant specific information to the filters. Specifically, this is how we pass in the tenant key (prefix) and the
 broker address mapping.
 
 ```yaml
