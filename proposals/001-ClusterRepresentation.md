@@ -14,6 +14,10 @@ There will be a mechansim to map between virtual and physical clusters.  This wi
 - *one to one* - the proxying of a single physical cluster.
 - *many to one* - kroxylicious presents many virtual clusters which map to a physical cluster. This would support a multi-tenant use-case where a single physical clusters is shared by isolated tenants.
 
+## Illustration of many-to-one use-case
+
+![alternative text](https://raw.githubusercontent.com/kroxylicious/design/001-ClusterRepresentation/proposals/001/many-to-one.png)
+
 ## Goals
 
 * Ability to support the *one to one* and *many to one* use-cases described above.
@@ -23,7 +27,7 @@ There will be a mechansim to map between virtual and physical clusters.  This wi
 ## Non-Goals
 
 * There's a possiblity of *one-to-many* where a single virtual cluster maps to several physical, presenting them as if they were one. However, supporting transactions across two or more physical clusters would be difficult.  This use-case is out-of-scope.
-* It might be possible for a virtual cluster to present a subset of a physical cluster's brokers as virtual brokers by clevery exposing only those brokers that host topic partitions belonging to that virtual cluster.  This might be advantagous in the case where the physical cluster comprises a very large number of brokers.  We won't cosnider this use-case for now. 
+* It might be possible for a virtual cluster to present a subset of a physical cluster's brokers as virtual brokers by clevery exposing only those brokers that host topic partitions belonging to that virtual cluster.  This might be advantagous in the case where the physical cluster comprises a very large number of brokers.  We won't consider this use-case as part of this proposal.
 
 
 ## Current situation
