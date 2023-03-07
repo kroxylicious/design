@@ -6,6 +6,6 @@ VirtualCluster *--{ "n" VirtualBroker
 PhysicalCluster *--{ "n" PhysicalBroker
 
 VirtualBroker }-- EndPoint
-VirtualCluster --- FilterChain
-PhysicalCluster --- FilterChain
+VirtualCluster ---{ Filters
+PhysicalCluster ---{ Filter
 @enduml
