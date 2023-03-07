@@ -8,7 +8,7 @@ A _downstream cluster_ is a kafka cluster that the clients connect to.   The dow
 one or more _upstream clusters_.    An _upstream cluster_ represents the physical kafka cluster.  There is a one to one correspondance between
 a _upstream cluster_ and a physical cluster in the world.
 
-There will be a mechansim to route flexibly between downstreams and upstreams.  This will allow useful topologies to built to serve different use-cases.
+There will be a mechansim to route flexibly between downstreams and upstreams.  This will allow building useful topologies to serve different use-cases.
 
 - *one to one* - the simple exposure of a physical cluster 
 - *many to one* - kroxy presents many downstream clusters which route to a single upstream - this would support a multitenant use-cases 
