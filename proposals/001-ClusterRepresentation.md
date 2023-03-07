@@ -1,31 +1,28 @@
 <!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
 
-# Cluster Representation in the Model
+# Representing Virtual and Physical Clusters in the Kroxylicious Model.
 
-This proposal introduces the concept of _cluster_ into the model.
+This proposal introduces the concept of _virtual cluster_ and _physical cluster_ into the model.  
 
-A _virtual cluster_ is a kafka cluster that the clients connect to.   The virtual cluster can be thought of as a 'virtual' cluster or a 'facade' to
-one or more _physical clusters_.    An _physical cluster_ represents the physical kafka cluster.  There is a one to one correspondance between
-a _physical cluster_ and a physical cluster in the world.
+A _virtual cluster_ is a kafka cluster that clients connect to. From the perspective of the client, the virtual cluster behaves exactly as a normal kafka cluster would.   Many virtual clusters can be defined with a Kroxylicious instance.   Conceptually, the virtual cluster exists on the [downstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
-There will be a mechansim to route flexibly between downstreams and upstreams.  This will allow building useful topologies to serve different use-cases.
+A _physical cluster_ is a model representation of an real Apache Kafka cluster.  There is always a one to one correspondance between the _physical cluster_
+and a real real Apache Kafka cluster. Many physical clusters can be defined with a Kroxylicious instance.  Conceptually, the physical cluster exists on the [upstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
-- *one to one* - the simple exposure of a physical cluster 
-- *many to one* - kroxy presents many virtual clusters which route to a single upstream - this would support a multitenant use-cases 
+There will be a mechansim to map between virtual and physical clusters.  This will allow building useful topologies to serve different use-cases, such as:
 
-(There's a possiblity of *one-to-many* which a single downstream routes to several upstreams as if they were one, which might be useful for presenting several
-kafka clusters as if they were one, however, supporting transactions across two clusters would be difficult.  We won't consider this use-case further).
+- *one to one* - the proxying of a single physical cluster.
+- *many to one* - kroxylicious presents many virtual clusters which map to a physical cluster. This would support a multi-tenant use-case where a single physical clusters is shared by isolated tenants.
+
+(There's a possiblity of *one-to-many* where a single virtual cluster maps to several physical, presenting them as if they were one. However, supporting transactions across two or more physical clusters would be difficult.  This use-case is out-of-scope).
 
 ## Current situation
 
-Currently Kroxyilicious binds a single port to the downstream and connects to a single upstream broker.  There is no support for clusters comprised of more
-then one broker.
+Kroxyliciousis currently limited to exposing a single broker of a singel cluster.
 
 ## Motivation
 
-1. Ability for Kroxylicious to expose multiple physical kafka clusters.
-1. Ability for Kroxylicious to support clusters formed of more than one broker.
-1. Ability for Kroxylicious to provide a building block to support multi-tenancy.
+Ability to support the *one to one* and *many to one* use-cases described above.
 
 ## Proposal
 
@@ -55,23 +52,23 @@ Currently `KafkaProxy` uses the `ProxyConfig` object to get a single address to 
   type: PLAIN|TLS
 ```
 
-#### Downstream Clusters
+#### Virtual Clusters
 
 Conceptually the _virtual cluster_ represents the cluster that the kafka client connects to.  The virtual clusters list specifies
-all the kafka clustsers are being presented by Kroxylicious. 
+all the kafka clusters are being presented by Kroxylicious. 
 
-A _downstream clustser_ references exactly one _physical cluster_. 
+A _virtual clusster_ references exactly one _physical cluster_. 
 
 A _virtual cluster_ may reference a `filter chain`.  This provides zero or more filters that the RPCs will pass through before arriving at the physical cluster.
 
-A _virtual cluster_ enumerates the downstream brokers that comprise the virtual cluster.
+A _virtual cluster_ enumerates the virtual brokers that comprise the virtual cluster.
 
-##### Downstream Brokers
+##### Virtual Brokers
 
 Each broker has a reference to an endpoint that will provide the way in to the broker.   For the SNI case, there is also an addresses matcher.  It is an error
 for more than one broker to share an endpoint unless the endpoint type is TLS and the SNI matching address is defined.
 
-Each downstream broker references exactly one upstream broker which must exist within the referenced physical cluster.  It is an error if there is not a
+Each virtual broker references exactly one physical broker which must exist within the referenced physical cluster.  It is an error if there is not a
 one-to-one correspondence between downstream and upstream brokers.
 
 TLS key material may be provided either at the virtual cluster level or at the individual broker level.
@@ -79,7 +76,7 @@ TLS key material may be provided either at the virtual cluster level or at the i
 
 ```yaml
 - name: my-public-cluster
-  upstreamClusterRef: my-private-cluster
+  physicalClusterRef: my-private-cluster
   filterChainRef: my-upstream-filter-chain
   brokers:
   - name: broker-1
@@ -99,18 +96,18 @@ TLS key material may be provided either at the virtual cluster level or at the i
 ```
 
 
-#### Upstream Clusters
+#### Physical Clusters
 
-An _physical cluster_ represents a physical kafka cluster.   The physical clusters list specifies all the kafka clustsers that are being exposed through Kroxylicious.  
+An _physical cluster_ is the in-model representation of a running kafka cluster.   The physical clusters list specifies all the kafka clusters that known to Kroxylicious.
 
 An _physical cluster_ may reference a `filter chain`.  This provides zero or more *additional* filters that the RPCs will pass through before passing to the brokers
 of the physical cluster.  
 
 An _physical cluster_ enumerates the upstream brokers that comprise the physical cluster.
 
-#### Upstream Brokers
+#### Physical Brokers
 
-Each upstream broker specifies the address of the physical broker and whether TLS is to be used.  It will also specify trust settings.
+Each physical broker specifies the address of a broker and whether TLS is to be used.  It will also specify trust settings.
 
 TLS trust material may be provided at the upstream broker level or at the individual broker level.
 
@@ -152,14 +149,14 @@ filterChains:
 
 All specified endpoints will be bound.
 
-When a connection is made to an endpoint,  the system must resolve that connection to a downstream broker and hence a virtual cluster.
+When a connection is made to an endpoint,  the system must resolve that connection to a virtual broker and hence a virtual cluster.
 
 To do this, it resolves the endpoint and any SNI information against the model.   This should yield exactly one broker belonging to a virtual cluster.
 It is an error otherwise and the connnection must be closed.
 
 If TLS is in use, the SSLContext can be generated from the virtual cluster definition.  This will be passed to Netty to let it complete the TLS handshake.
 
-The downstream broker and virtual cluster is used to identify the upstream broker and physical cluster.
+The virtual broker and virtual cluster is used to identify the physical broker and physical cluster.
 
 The physical cluster and downstream broker provide the filter chain.
 
@@ -188,7 +185,7 @@ endpoints:
 - name: my-tls-endpoint
   type: TLS
   bindAddress: 0.0.0.0:9092
-downstreams:
+virtualClusters:
 - name: my-public-cluster
   upstreamClusterRef: my-private-cluster
   filterChainRef: my-downstream--filter-chain
@@ -208,7 +205,7 @@ downstreams:
     sniMatchAddress: broker-3.public.kafka.com
     endpointRef: my-tls-endpoint
     upstreamBrokerRef: broker-3 
-upstreams:
+physicalClusters:
 - name: my-private-cluster
   brokers:
   - name: private-broker-1
@@ -235,7 +232,7 @@ endpoints:
 - name: my-tls-endpoint
   type: TLS
   bindAddress: 0.0.0.0:9092
-downstreams:
+virtualClusters:
 - name: my-tenant1
   upstreamClusterRef: my-private-cluster
   tls:
@@ -272,7 +269,7 @@ downstreams:
     sniMatchAddress: broker-3.my-tenant2.kafka.com
     endpointRef: my-tls-endpoint
     upstreamBrokerRef: broker-3 
-upstreams:
+physicalClusters:
 - name: my-big-cluster
   brokers:
   - name: broker-1
