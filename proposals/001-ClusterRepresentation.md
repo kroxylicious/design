@@ -80,6 +80,7 @@ TLS key material may be provided either at the virtual cluster level or at the i
 
 
 ```yaml
+virtualClusters:
 - name: my-public-cluster
   physicalClusterRef: my-private-cluster
   filters:
@@ -122,6 +123,7 @@ Each physical broker specifies the address of a broker and whether TLS is to be 
 TLS trust material may be provided at the upstream broker level or at the individual broker level.
 
 ```yaml
+physicalClusters:
 - name: my-private-cluster
   filters:
   - type: Filter1
