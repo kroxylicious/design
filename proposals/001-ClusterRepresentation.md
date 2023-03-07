@@ -92,7 +92,7 @@ virtualClusters:
   - name: broker-1
     endpointRef: my-tls-endpoint
     sniMatchAddress: broker-1-public.example.com
-    upstreamBrokerRef: broker-1
+    physicalBrokerRef: broker-1
     # or brokers themselves provide the key/cert
     - tls:
         key:
