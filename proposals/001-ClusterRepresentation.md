@@ -6,7 +6,7 @@ This proposal introduces the concept of _virtual cluster_ and _physical cluster_
 
 A _virtual cluster_ is a kafka cluster that clients connect to. From the perspective of the client, the virtual cluster behaves exactly as a normal kafka cluster would.   Many virtual clusters can be defined with a Kroxylicious instance.  Each _virtual clusters_ comprises one or more _virtual brokers_.  Conceptually, the virtual cluster and virtual broker exists on the [downstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
-A _physical cluster_ is a model representation of an real Apache Kafka cluster.  There is always a one to one correspondance between the _physical cluster_
+A _physical cluster_ is a model representation of a real Apache Kafka cluster.  There is always a one to one correspondance between the _physical cluster_
 and a real Apache Kafka cluster. Many physical clusters can be defined with a Kroxylicious instance. Each _physical cluster_ comprises one or more _physical brokers_.  Conceptually, the physical cluster exists on the [upstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
 There will be a mechansim to map between virtual and physical clusters.  This will allow the building useful topologies to serve different use-cases, such as:
