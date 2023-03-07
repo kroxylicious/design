@@ -61,7 +61,7 @@ Currently `KafkaProxy` uses the `ProxyConfig` object to get a single address to 
 Conceptually the _virtual cluster_ represents the cluster that the kafka client connects to.  The virtual clusters list specifies
 all the kafka clusters are being presented by Kroxylicious. 
 
-A _virtual clusster_ references exactly one _physical cluster_. 
+A _virtual cluster_ references exactly one _physical cluster_. 
 
 A _virtual cluster_ may define a chain of filters.  This provides zero or more filters that the RPCs will pass through as they traverse the virtual cluster,
 before they reach the physical cluster.
