@@ -4,25 +4,31 @@
 
 This proposal introduces the concept of _virtual cluster_ and _physical cluster_ into the model.  
 
-A _virtual cluster_ is a kafka cluster that clients connect to. From the perspective of the client, the virtual cluster behaves exactly as a normal kafka cluster would.   Many virtual clusters can be defined with a Kroxylicious instance.   Conceptually, the virtual cluster exists on the [downstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
+A _virtual cluster_ is a kafka cluster that clients connect to. From the perspective of the client, the virtual cluster behaves exactly as a normal kafka cluster would.   Many virtual clusters can be defined with a Kroxylicious instance.  Each _virtual clusters_ comprises one or more _virtual brokers_.  Conceptually, the virtual cluster and virtual broker exists on the [downstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
 A _physical cluster_ is a model representation of an real Apache Kafka cluster.  There is always a one to one correspondance between the _physical cluster_
-and a real real Apache Kafka cluster. Many physical clusters can be defined with a Kroxylicious instance.  Conceptually, the physical cluster exists on the [upstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
+and a real Apache Kafka cluster. Many physical clusters can be defined with a Kroxylicious instance. Each _physical cluster_ comprises one or more _physical brokers_.  Conceptually, the physical cluster exists on the [upstream](https://github.com/kroxylicious/design/blob/main/concepts.asciidoc#upstream-vs-downstream) (client side) of Kroxylicious.
 
-There will be a mechansim to map between virtual and physical clusters.  This will allow building useful topologies to serve different use-cases, such as:
+There will be a mechansim to map between virtual and physical clusters.  This will allow the building useful topologies to serve different use-cases, such as:
 
 - *one to one* - the proxying of a single physical cluster.
 - *many to one* - kroxylicious presents many virtual clusters which map to a physical cluster. This would support a multi-tenant use-case where a single physical clusters is shared by isolated tenants.
 
-(There's a possiblity of *one-to-many* where a single virtual cluster maps to several physical, presenting them as if they were one. However, supporting transactions across two or more physical clusters would be difficult.  This use-case is out-of-scope).
+## Goals
+
+* Ability to support the *one to one* and *many to one* use-cases described above.
+
+
+## Non-Goals
+
+* There's a possiblity of *one-to-many* where a single virtual cluster maps to several physical, presenting them as if they were one. However, supporting transactions across two or more physical clusters would be difficult.  This use-case is out-of-scope.
+* It might be possible for a virtual cluster to present a subset of a physical cluster's brokers as virtual brokers by clevery exposing only those brokers that host topic partitions belonging to that virtual cluster.  This might be advantagous in the case where the physical cluster comprises a very large number of brokers.  We won't cosnider this use-case for now. 
+
 
 ## Current situation
 
-Kroxyliciousis currently limited to exposing a single broker of a singel cluster.
+Kroxyliciousis currently limited to exposing a single broker of a single cluster.
 
-## Motivation
-
-Ability to support the *one to one* and *many to one* use-cases described above.
 
 ## Proposal
 
@@ -32,9 +38,6 @@ The proposal will change some existing concepts and introduce some new ones.  Th
 
 
 ![alternative text](http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.github.com/kroxylicious/design/001-ClusterRepresentation/proposals/001/UML/uml.puml)
-
-
-
 
 
 #### Endpoints
@@ -103,7 +106,7 @@ An _physical cluster_ is the in-model representation of a running kafka cluster.
 An _physical cluster_ may reference a `filter chain`.  This provides zero or more *additional* filters that the RPCs will pass through before passing to the brokers
 of the physical cluster.  
 
-An _physical cluster_ enumerates the upstream brokers that comprise the physical cluster.
+An _physical cluster_ enumerates the brokers that comprise the physical cluster.
 
 #### Physical Brokers
 
