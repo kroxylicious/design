@@ -120,7 +120,7 @@ An _physical cluster_ enumerates the brokers that comprise the physical cluster.
 
 Each physical broker specifies the address of a broker and whether TLS is to be used.  It will also specify trust settings.
 
-TLS trust material may be provided at the upstream broker level or at the individual broker level.
+TLS trust material may be provided at the virtual broker level or at the individual broker level.
 
 ```yaml
 physicalClusters:
@@ -179,8 +179,7 @@ The BrokerAddressFilter must map the RPC reponses that contain the physical brok
 In the case where Kroxylicious is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to *connect* to brokers in the other AZs.  However, BrokerAddressFilter must be capable of rewriting the the broker address for the whole cluster.
 This leads us to the conclusion that Broker Address filter need separate configuration, independent of that what could be derived from the virtual/physical cluster mapping.
 
-The BrokerAddressFilter will accept a mapping, which will map the upstream broker addresses to routable addresses that correspond to the virtual brokers of the
-cluster in question.
+The BrokerAddressFilter will accept a mapping, which will map the addresses returned by the upstream broker to routable addresses that route to the virtual brokers of the cluster in question.
 
 To do this, we can use the existing filter configuration mechanism.
 
@@ -207,7 +206,7 @@ endpoints:
   bindAddress: 0.0.0.0:9092
 virtualClusters:
 - name: my-public-cluster
-  upstreamClusterRef: my-private-cluster
+  physicalClusterRef: my-private-cluster
   filters:
   - type: ApiVersions
   - type: BrokerAddress
@@ -278,17 +277,17 @@ virtualClusters:
   - name: broker-1
     sniMatchAddress: broker-1.my-tenant1.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-1
+    physicalBrokerRef: private-broker-1
   - name: broker-2
     sniMatchAddress: broker-2.my-tenant1.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-2
+    physicalBrokerRef: private-broker-2
   - name: broker-3
     sniMatchAddress: broker-3.my-tenant1.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-3
+    physicalBrokerRef: private-broker-3
 - name: my-tenant2
-  upstreamClusterRef: my-big-cluster
+  physicalClusterRef: my-big-cluster
   tls:
     key:
     cert:
@@ -307,15 +306,15 @@ virtualClusters:
   - name: broker-1
     sniMatchAddress: broker-1.my-tenant2.kafka.com
     endpointRef: my-tls-my-tls-endpoint
-    upstreamBrokerRef: private-broker-1
+    physicalBrokerRef: private-broker-1
   - name: broker-2
     sniMatchAddress: broker-2.my-tenant2.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-2
+    physicalBrokerRef: private-broker-2
   - name: broker-3
     sniMatchAddress: broker-3.my-tenant2.kafka.com
     endpointRef: my-tls-endpoint
-    upstreamBrokerRef: private-broker-3
+    physicalBrokerRef: private-broker-3
 physicalClusters:
 - name: my-big-cluster
   brokers:
