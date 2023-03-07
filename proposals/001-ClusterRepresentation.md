@@ -14,7 +14,7 @@ There will be a mechansim to route flexibly between downstreams and upstreams.  
 - *many to one* - kroxy presents many downstream clusters which route to a single upstream - this would support a multitenant use-cases 
 
 (There's a possiblity of *one-to-many* which a single downstream routes to several upstreams as if they were one, which might be useful for presenting several
-kafka clusters as if they were one, however, supporting transactions across two clusters would be difficult.  We consider won't this use-case futrther).
+kafka clusters as if they were one, however, supporting transactions across two clusters would be difficult.  We won't consider this use-case further).
 
 ## Current situation
 
