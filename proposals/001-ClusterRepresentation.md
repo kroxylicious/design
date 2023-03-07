@@ -180,7 +180,7 @@ The system must reload chnages to the model dynammically, without dropping estab
 
 The BrokerAddressFilter must map the RPC reponses that contain the physical broker address to the virtual broker addresses that are resolveable to the client.  DescribeCluster response is an example of an RPC that needs to be mapped.
 
-In the case where Kroxylicious is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to *connect* to brokers in the other AZs.  However, BrokerAddressFilter must be capable of rewriting the the broker address for the whole cluster.
+In the case where Kroxylicious is being placed in front of a kafka cluster spanning a three-AZ cluster, the kroxylicious instances in the AZ won't need configuration to *connect* to brokers in the other AZs.  However, BrokerAddressFilter must be capable of rewriting the broker address for the whole cluster.
 This leads us to the conclusion that Broker Address filter need separate configuration, independent of that what could be derived from the virtual/physical cluster mapping.
 
 The BrokerAddressFilter will accept a mapping, which will map the addresses returned by the upstream broker to routable addresses that route to the virtual brokers of the cluster in question.
