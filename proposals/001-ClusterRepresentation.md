@@ -201,7 +201,7 @@ To do this, we can use the existing filter configuration mechanism.
 
 #### One to one case.
 
-# Single Cluster with 3 broker cluster, exposed via kroxy
+# Single Cluster with 3 brokers, exposed via kroxylicious
 
 ```yaml
 endpoints:
