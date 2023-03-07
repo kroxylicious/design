@@ -17,6 +17,7 @@ There will be a mechansim to map between virtual and physical clusters.  This wi
 ## Goals
 
 * Ability to support the *one to one* and *many to one* use-cases described above.
+* Ability to add/remove/change virtual or physical clusters at runtime, without interrupting connections established.
 
 
 ## Non-Goals
