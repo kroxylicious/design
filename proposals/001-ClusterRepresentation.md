@@ -74,7 +74,7 @@ Each broker has a reference to an endpoint that will provide the way in to the b
 for more than one broker to share an endpoint unless the endpoint type is TLS and the SNI matching address is defined.
 
 Each virtual broker references exactly one physical broker which must exist within the referenced physical cluster.  It is an error if there is not a
-one-to-one correspondence between downstream and upstream brokers.
+one-to-one correspondence between physical and virtual brokers.
 
 TLS key material may be provided either at the virtual cluster level or at the individual broker level.
 
