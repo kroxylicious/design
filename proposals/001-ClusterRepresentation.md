@@ -115,8 +115,7 @@ virtualClusters:
 An _physical cluster_ is the in-model representation of a running kafka cluster.   The physical clusters list specifies all the kafka clusters that known to Kroxylicious.
 
 A physical cluster_ may define a chain of filters.  This provides zero or more filters that the RPCs will pass through as they traverse the physical cluster.
-(Note that it is possible for both a filter chain to be define at both the virtual cluster and physical cluster level.  RPCs pass through both sets of filters
-in the order they are defined).
+Note that it is possible for both virtual and physical clusters to define filter chains. RPCs pass through both sets of filters in the order they are defined depending on the direction of message flow (that is messages flowing: upstream traverse the `virtual` filter chain then the `physical` filter chain.  messages flowing downstream will traverse the `physical` filter chain then the `virtual` chain).
 
 An _physical cluster_ enumerates the brokers that comprise the physical cluster.
 
