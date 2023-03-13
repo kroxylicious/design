@@ -1,6 +1,55 @@
 <!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
 
-# Representing Virtual and Physical Clusters in the Kroxylicious Model.
+# Cluster Representation in the  Kroxylicious Model.
+
+
+## Tom's idea
+
+
+
+```
+clusterMappings: # <1>
+- clusterId: <uuid> # <2>
+  upstreamBootstrap: 123.123.123.123/9092 # <3>
+  upstreamClusterId: <uuid> # <4>
+  minPort: 19092 # <5>
+  maxPort; 19192 # <6>
+  bootstrapAddress: 0.0.0.0 # <7>
+  endpointTemplate: 
+    host: broker-${id}.foo-kafka.example.com # <8>
+    port: $(minPort + nodeId + 1) # <9>
+```    
+    
+1. There would be one cluster mapping for each cluster
+2. The cluster id presented to the client
+3. A bootstrap list for the upstream cluster
+4. The expected upstream cluster id
+5. A base port
+The highest port this cluster can allocate (puts a limit on the number of brokers in this cluster). Non-disjoint port ranges between clusterMappings would be an error.
+A bootstrap address for clients. Always binds to the minPort. This is needed for clients to be able to bootstrap. Once bootstrapped they'd use the dynamicly generated endpoints. An alternative would be just have a list of broker ids which got bound initially, even before they were observed in MetadataResponse etc. This latter options is closer to to @k-wall's comment above, I think.
+
+6. A template for the hostname used when rewriting the MetadataResponse etc. I think this is what @SamBarker's comment
+7. Removing the definition of virtual brokers from the configuration model also implies that Kroxylicious becomes the arbiter of the broker hostname was about.
+Likewise for port numbers. IDK if we actually need to make this configurable or if we could just hard code this expression
+
+Notes:
+
+I've not thought much about TLS aspects. Obviously using a wildcard cert for *.foo-kafka.example.com means we don't need to dynamically obtain certs for individual brokers.
+
+
+
+
+
+
+
+Ignore below this line 
+
+====================================
+
+
+
+
+
 
 This proposal introduces the concept of _virtual cluster_ and _physical cluster_ into the model.  
 
