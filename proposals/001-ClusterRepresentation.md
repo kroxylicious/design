@@ -1,6 +1,99 @@
 <!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
 
-# Cluster Representation in the  Kroxylicious Model.
+#  Representating Clusters in the Kroxylicious Model.
+
+## Goals
+
+Currently Kroxylicious is limited to the exposing of a single broker.   For production use-cases, we need Kroxylicious to support richer topologies, such as:
+
+- exposing several clusters
+- exposing clusters that comprise >1 brokers
+- presenting a single cluster as if it were many clusters (a pre-requiste for multi-tenancy)
+
+We also want to support topology changes at runtime, such as:
+
+- scaling-up or scaling down of the number of brokers within a cluster that is being exposed by Kroxylicious.
+- additions to or removal from the list of clusters being exposed by Kroxylicious.
+
+We want to support TLS connections for both the downstream (client to kroxylicious) and the upstream (kroxylicious to cluster).  For convience in development
+and test use-cases we want to support non-TLS too.  As the Apache Kafka protocol does not have an analogue of the [Http Host: header](https://www.rfc-editor.org/rfc/rfc2616#section-14.23), this means that Kroxylicious must be capable of exposing a separate socket per exposed broker in order fo traffic to be routed to the correct broker.  In the TLS case, SNI can be used.  
+
+
+## Current situation
+
+Kroxylicious is currently limited to exposing a single broker of a single cluster.
+
+It is configured with a single listener address where Kroxylicious accepts incoming connections:
+
+```yaml
+proxy:
+  address: localhost:9192
+  logNetwork: false
+  logFrames: false
+```
+
+and has a list of upstream clusters that provide the cluster being exposed.  Whilst the configuration is a list,
+the implementation supports only one element.
+
+```yaml
+clusters:
+  demo:
+    bootstrap_servers: localhost:9092
+```
+
+## Proposal
+
+
+### Downstream Cluster List
+
+The existing `proxy` configuration will be removed and the existing `clusters` list will be refined to provide a list of `downstream clusters`.  The
+downstream cluster list is the list of clusters being presented to the clients. 
+
+Each `downstreamCluster` will define a mapping to an `upstreamCluster`.   The upstream cluster definition provides the bootstrap address of the upstream cluster.
+Kroxylicious will use this to discover the broker's topology.  This is described later.
+
+It is permitted for many downstream clusters to refer to the same upstream cluster. 
+
+```yaml
+downstreamClusters:
+- name: mycluster1
+  upstream:
+    bootstrap: 123.123.123.123:9092 
+- name: mycluster2
+  upstream:
+    bootstrap: 123.123.123.123:9092 
+```
+
+The next section describes the Downstrea Cluster in more details.
+
+### Downstream Cluster 
+
+```yaml
+downstreamClusters:
+- clusterId: <uuid> # <2> - as above
+  upstream:
+    bootstrap: 123.123.123.123:9092 # <3> - as above
+    requiredClusterId: <uuid> # Optional: <4> - as above
+    tls:   # carries trust/SSL client auth for connecting to the upstream
+       trust:...
+  bindAddress: 0.0.0.0 # Optional. Defaults to all interfaces if unspecified. Used as bind address for all listening sockets.
+  
+  endpointAssigner:
+     type: SniSharedPort
+     config:
+       bootstrapHost: foo-kafka.example.com # host  is used for SNI based routing
+       brokerHostPattern: broker-${nodeId}.foo-kafka.example.com
+       port: 9092
+  tls:  # 
+     key:
+     cert:
+     cipherSuite:
+```
+
+
+
+
+
 
 
 ## Tom's idea
@@ -50,7 +143,7 @@ clusterMappings: # <1> - as above
        trust:...
   bindAddress: 0.0.0.0 # Optional. Defaults to all interfaces if unspecified. Used as bind address for all listening sockets.
   
-  endpointSteward:
+  endpointAssigner:
      type: SniSharedPort
      config:
        bootstrapHost: foo-kafka.example.com # host  is used for SNI based routing
@@ -72,7 +165,7 @@ clusterMappings: # <1> - as above
   upstream:
     bootstrap: 123.123.123.123:9092 # <3> - as above
     requiredClusterId: <uuid> # Optional: <4> - as above
-  endpointSteward:
+  endpointAssigner:
      type: ExclusivePortPerBroker
      config:
        bootstrapPort: 9092
@@ -84,6 +177,11 @@ clusterMappings: # <1> - as above
 
 
 
+EndpointAssigner - responsibilities
+
+* provides a bootstrap address and port
+* assigningg brokers to endpoint addresses and listener ports
+* exposes a list of exclusiviely 
 
 
 for validation, the steward interface exposes a method like EndpointSteward#getExclusiveClaimedPorts().  This allows XXXX to query all the configured endpoint stewards and check for potential port conflicts.  The SniRouting steward, will return an empty list, because it doesn't exlusively claim any port.
@@ -110,28 +208,13 @@ and a real Apache Kafka cluster. Many physical clusters can be defined with a Kr
 
 There will be a mechansim to map between virtual and physical clusters.  This will allow the building useful topologies to serve different use-cases, such as:
 
-- *one to one* - the proxying of a single physical cluster.
-- *many to one* - kroxylicious presents many virtual clusters which map to a physical cluster. This would support a multi-tenant use-case where a single physical clusters is shared by isolated tenants.
+
 
 ## Illustration of many-to-one use-case
 
 ![alternative text](https://raw.githubusercontent.com/kroxylicious/design/001-ClusterRepresentation/proposals/001/many-to-one.png)
 
-## Goals
 
-* Ability to support the *one to one* and *many to one* use-cases described above.
-* Ability to add/remove/change virtual or physical clusters at runtime, without interrupting connections established.
-
-
-## Non-Goals
-
-* There's a possiblity of *one-to-many* where a single virtual cluster maps to several physical, presenting them as if they were one. However, supporting transactions across two or more physical clusters would be difficult.  This use-case is out-of-scope.
-* It might be possible for a virtual cluster to present a subset of a physical cluster's brokers as virtual brokers by clevery exposing only those brokers that host topic partitions belonging to that virtual cluster.  This might be advantagous in the case where the physical cluster comprises a very large number of brokers.  We won't consider this use-case as part of this proposal.
-
-
-## Current situation
-
-Kroxylicious is currently limited to exposing a single broker of a single cluster.
 
 
 ## Proposal
