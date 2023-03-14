@@ -36,24 +36,57 @@ Notes:
 
 I've not thought much about TLS aspects. Obviously using a wildcard cert for *.foo-kafka.example.com means we don't need to dynamically obtain certs for individual brokers.
 
-## Thinking about SNI case
+## SNI case
 
+In this case, Kroxy listens on a single port.  SNI is used to route traffic to boostrap/brokers.
 
-```
+```yaml
 clusterMappings: # <1> - as above
 - clusterId: <uuid> # <2> - as above
-  upstreamBootstrap: 123.123.123.123:9092 # <3> - as above
-  upstreamClusterId: <uuid> # Optional: <4> - as above
-  bootstrapAddress: 0.0.0.0:9092 # port number is mandatory
+  upstream:
+    bootstrap: 123.123.123.123:9092 # <3> - as above
+    requiredClusterId: <uuid> # Optional: <4> - as above
+    tls:   # carries trust/SSL client auth for connecting to the upstream
+       trust:...
+  bindAddress: 0.0.0.0 # Optional. Defaults to all interfaces if unspecified. Used as bind address for all listening sockets.
   
-  portRange: "[19092,19192]" # interval notation, optional if 
-  endpointTemplate: 
-    host: broker-${id}.foo-kafka.example.com # <8>
-    port: $(minPort + nodeId + 1) # <9>
-```  
+  endpointSteward:
+     type: SniSharedPort
+     config:
+       bootstrapHost: foo-kafka.example.com # host  is used for SNI based routing
+       brokerHostPattern: broker-${nodeId}.foo-kafka.example.com
+       port: 9092
+  tls:  # 
+     key:
+     cert:
+     cipherSuite:
+```
+
+# Non-SNI 
+
+In this case, Kroxy binds a port for bootstrap and dynamically assigns a port 
+
+```yaml
+clusterMappings: # <1> - as above
+- clusterId: <uuid> # <2> - as above
+  upstream:
+    bootstrap: 123.123.123.123:9092 # <3> - as above
+    requiredClusterId: <uuid> # Optional: <4> - as above
+  endpointSteward:
+     type: ExclusivePortPerBroker
+     config:
+       bootstrapPort: 9092
+       minPort: 19092 # <5>
+       maxPort: 19192 # <6>
+       brokerHostPattern: broker-${nodeId}.foo-kafka.example.com # <8>
+       brokerPort: $(minPort + nodeId) # <9>
+```
 
 
 
+
+
+for validation, the steward interface exposes a method like EndpointSteward#getExclusiveClaimedPorts().  This allows XXXX to query all the configured endpoint stewards and check for potential port conflicts.  The SniRouting steward, will return an empty list, because it doesn't exlusively claim any port.
 
 
 
