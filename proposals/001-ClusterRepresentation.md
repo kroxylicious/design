@@ -18,6 +18,7 @@ We also want to support topology changes at runtime, such as:
 We want to support TLS connections for both the downstream (client to kroxylicious) and the upstream (kroxylicious to cluster).  For convience in development
 and test use-cases we want to support non-TLS too.  As the Apache Kafka protocol does not have an analogue of the [Http Host: header](https://www.rfc-editor.org/rfc/rfc2616#section-14.23), this means that Kroxylicious must be capable of exposing a separate socket per exposed broker in order fo traffic to be routed to the correct broker.  In the TLS case, SNI can be used.  
 
+Filter implementations require knowledge of the current upstream to downstream broker mapping.  This proposal will define an API.
 
 ## Current situation
 
@@ -46,50 +47,59 @@ clusters:
 
 ### Downstream Cluster List
 
-The existing `proxy` configuration will be removed and the existing `clusters` list will be refined to provide a list of `downstream clusters`.  The
+The existing `proxy` configuration will be removed and the existing `clusters` list will be repurposed to provide a list of `downstream clusters`.  The
 downstream cluster list is the list of clusters being presented to the clients. 
 
 Each `downstreamCluster` will define a mapping to an `upstreamCluster`.   The upstream cluster definition provides the bootstrap address of the upstream cluster.
 Kroxylicious will use this to discover the broker's topology.  This is described later.
 
-It is permitted for many downstream clusters to refer to the same upstream cluster. 
+It is permitted for two or more downstream clusters to refer to the same upstream cluster.   This many to one mapping will support multi-tenancy use-cases.
 
 ```yaml
 downstreamClusters:
 - name: mycluster1
   upstream:
-    bootstrap: 123.123.123.123:9092 
+    bootstrap: 123.123.123.123:9092
+    ...
 - name: mycluster2
   upstream:
-    bootstrap: 123.123.123.123:9092 
+    bootstrap: 123.123.123.123:9092
+    ...
 ```
 
-The next section describes the Downstrea Cluster in more details.
+The next section describes the Downstream Cluster in more details.
 
 ### Downstream Cluster 
 
+The downstream cluster provides a name (used for logging and metric labels) and a clusterId (used to identify the cluster to client as a Kafka level).
+
+The upstream defines the bootstrap address of the upstream cluster.  The upstream may define a clusterId of the upstream.  If this is present, Kroxylicious
+will automatically verify that the upstream cluster present this clusterid.  If it does not not, the connection will be dropped with an error.  This exists to help prevent misconfigurations.
+
+The downstream cluster defines an endpoint assigner.  The endpoint assigner will have a pluggable implementation.  Its role is to provide the downstream bootstrap
+address and provide a function that produces a stable downstream broker address given a broker nodeid.  A   
+
+
 ```yaml
-downstreamClusters:
-- clusterId: <uuid> # <2> - as above
-  upstream:
-    bootstrap: 123.123.123.123:9092 # <3> - as above
-    requiredClusterId: <uuid> # Optional: <4> - as above
-    tls:   # carries trust/SSL client auth for connecting to the upstream
-       trust:...
-  bindAddress: 0.0.0.0 # Optional. Defaults to all interfaces if unspecified. Used as bind address for all listening sockets.
-  
-  endpointAssigner:
-     type: SniSharedPort
-     config:
-       bootstrapHost: foo-kafka.example.com # host  is used for SNI based routing
-       brokerHostPattern: broker-${nodeId}.foo-kafka.example.com
-       port: 9092
-  tls:  # 
-     key:
-     cert:
-     cipherSuite:
+name: mycluster1  # [required] Unique name - used for logging and metric label.
+clusterId: uid    # [required] Unique uid - used to identify the cluster to the client.
+upstream:         
+  bootstrap: 123.123.123.123:9092 # [required] Bootstrap of the upstream cluster
+  clusterId: <uuid>               # [optional] asserts the cluster id presented cluster
+endpointAssigner:
+  type: ExclusivePort
+  config:
+   bootstrapPort: 9092
+   minPort: 19092 # <5>
+   maxPort: 19192 # <6>
+   brokerHostPattern: broker-${nodeId}.foo-kafka.example.com 
+   brokerPort: $(minPort + nodeId) #
 ```
 
+
+## Endpoint Manager
+
+Starts a listener(s)
 
 
 
