@@ -36,6 +36,23 @@ Notes:
 
 I've not thought much about TLS aspects. Obviously using a wildcard cert for *.foo-kafka.example.com means we don't need to dynamically obtain certs for individual brokers.
 
+## Thinking about SNI case
+
+
+```
+clusterMappings: # <1> - as above
+- clusterId: <uuid> # <2> - as above
+  upstreamBootstrap: 123.123.123.123:9092 # <3> - as above
+  upstreamClusterId: <uuid> # Optional: <4> - as above
+  bootstrapAddress: 0.0.0.0:9092 # port number is mandatory
+  
+  portRange: "[19092,19192]" # interval notation, optional if 
+  endpointTemplate: 
+    host: broker-${id}.foo-kafka.example.com # <8>
+    port: $(minPort + nodeId + 1) # <9>
+```  
+
+
 
 
 
