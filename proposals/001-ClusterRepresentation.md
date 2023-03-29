@@ -4,7 +4,7 @@
 
 ## Goals
 
-Currently Kroxylicious is limited to the exposing of a single broker.   For production use-cases, we need Kroxylicious to support richer topologies, such as:
+Currently Kroxylicious is limited to the exposing of a single broker of a single broker.   For production use-cases, we need Kroxylicious to support richer topologies, such as:
 
 - exposing several clusters
 - exposing clusters that comprise >1 brokers
@@ -16,7 +16,7 @@ We also want to support topology changes at runtime, such as:
 - additions to or removal from the list of clusters being exposed by Kroxylicious.
 
 We want to support TLS connections for both the downstream (client to kroxylicious) and the upstream (kroxylicious to cluster).  For convience in development
-and test use-cases we want to support non-TLS too.  As the Apache Kafka protocol does not have an analogue of the [Http Host: header](https://www.rfc-editor.org/rfc/rfc2616#section-14.23), this means that Kroxylicious must be capable of exposing a separate socket per exposed broker in order fo traffic to be routed to the correct broker.  In the TLS case, SNI can be used.  
+and test use-cases we want to support non-TLS too.  As the Apache Kafka protocol does not have an analogue of the [Http Host: header](https://www.rfc-editor.org/rfc/rfc2616#section-14.23), this means that Kroxylicious must be capable of exposing a separate socket per exposed broker in order for traffic to be routed to the correct broker.  In the TLS case, SNI can be used as an alternative to socket per broker.
 
 Filter implementations require knowledge of the current upstream to downstream broker mapping.  This proposal will define an API.
 
@@ -45,18 +45,17 @@ clusters:
 ## Proposal
 
 
-### Downstream Cluster List
+### Virtual Cluster List
 
-The existing `proxy` configuration will be removed and the existing `clusters` list will be repurposed to provide a list of `downstream clusters`.  The
-downstream cluster list is the list of clusters being presented to the clients. 
+The existing `proxy` configuration will be removed and the existing `clusters` list will be remodelled to provide a list of `virtual clusters`.  A virtual cluster is the cluster that is being presented to the client. 
 
-Each `downstreamCluster` will define a mapping to an `upstreamCluster`.   The upstream cluster definition provides the bootstrap address of the upstream cluster.
+Each *virtual cluster* will define a mapping to an *upstream cluster*.   The upstream cluster definition provides the bootstrap address of the upstream cluster.
 Kroxylicious will use this to discover the broker's topology.  This is described later.
 
 It is permitted for two or more downstream clusters to refer to the same upstream cluster.   This many to one mapping will support multi-tenancy use-cases.
 
 ```yaml
-downstreamClusters:
+virtualClusters:
 - name: mycluster1
   upstream:
     bootstrap: 123.123.123.123:9092
@@ -67,39 +66,86 @@ downstreamClusters:
     ...
 ```
 
-The next section describes the Downstream Cluster in more details.
+The next section describes the Virtual Cluster in more details.
 
-### Downstream Cluster 
+### Virtual Cluster 
 
-The downstream cluster provides a name (used for logging and metric labels) and a clusterId (used to identify the cluster to client as a Kafka level).
+The virtual cluster provides a name (used for logging and metric labels) and a clusterId (used to identify the cluster to client as a Kafka RPC level).
 
 The upstream defines the bootstrap address of the upstream cluster.  The upstream may define a clusterId of the upstream.  If this is present, Kroxylicious
-will automatically verify that the upstream cluster present this clusterid.  If it does not not, the connection will be dropped with an error.  This exists to help prevent misconfigurations.
+will automatically verify that the upstream cluster presents this clusterid as part of the `DescribeCluster` response.  If it does not not, the connection will
+be dropped with an error.  This exists to help prevent misconfigurations.
 
-The downstream cluster defines an endpoint assigner.  The endpoint assigner will have a pluggable implementation.  Its role is to provide the downstream bootstrap
-address and provide a function that produces a stable downstream broker address given a broker nodeid.  A   
-
+The virtual cluster defines an *endpoint assigner*.  The endpoint assigner will have a pluggable implementation.  Its role is to provide a virtual bootstrap
+address for the cluster and provide a function that produces a stable virtual broker address given a broker nodeid.  It is virtual broker addresses that will
+be returned to the client as part of the MetadataResponse, FindCoordinatorResponse, DescribeCluster responses.
 
 ```yaml
-name: mycluster1  # [required] Unique name - used for logging and metric label.
-clusterId: uid    # [required] Unique uid - used to identify the cluster to the client.
+name: mycluster1  # [required] virtual cluster name - must be unique - used for logging and metric label.
+clusterId: uid    # [required] virtual cluster name uid  - must be unique - used to identify the cluster to the client.
 upstream:         
   bootstrap: 123.123.123.123:9092 # [required] Bootstrap of the upstream cluster
   clusterId: <uuid>               # [optional] asserts the cluster id presented cluster
 endpointAssigner:
-  type: ExclusivePort
+  type: AssignerType
   config:
-   bootstrapPort: 9092
-   minPort: 19092 # <5>
-   maxPort: 19192 # <6>
-   brokerHostPattern: broker-${nodeId}.foo-kafka.example.com 
-   brokerPort: $(minPort + nodeId) #
+   abc: def
+   ghi: jkl
+```
+
+### Endpoint Assigner
+
+The endpoint assigner is responsible for assigning network endpoints for the virtual cluster.  It will be a pluggable implementation that will expose
+two methods:
+
+```
+#InetAddress getBootstrapAddress() - return the bootstrapf for this cluster
+#InetAddress getBrokerAddressForNode(int nodeId) - returns a stable address for the broker identified by its nodeId.
+#Set<InetAddress> getExclusiveAddresses() - returns the set of addresses which this assigner requires exclusive use
 ```
 
 
-## Endpoint Manager
+XXXXXX [Kroxylicious Class] will use be responsible for binding and unbinding listening ports.  It will use the endpoint assigners to work out which need to be
+bound.
 
-Starts a listener(s)
+The endpoint assigner will accept configuration which will be specific to its implementation.
+
+There will be two implementations:
+
+#### ExclusivePortPerBroker Assigner
+
+The *ExclusivePortPerBroker* assigner allocates each broker an exclusive port.  The port number assignment is driven by a port range.  The broker address
+is formed from a pattern.
+
+type: ExclusivePortPerBroker
+config:
+ bootstrapPort: 9092
+ minPort: 19092
+ maxPort: 19192
+ brokerHostPattern: broker-$(nodeId).foo-kafka.example.com
+ brokerPort: $(minPort + nodeId)
+
+
+#### SniSharedPort Assigner
+
+The *ShareddPortSni* assigner is an implementation that allows the sharing of a single port amongst brokers and virtual clusters.  The advantage of this assigner
+is that it will exposes a single port to the world. This simplifies ingress configuration when using Kubernetes (a cloud load balancer can be pointed at the single port).
+
+This assigner requires the use of TLS.  The bootstrap host and broker host addresses will be matched against the SNI name presented in the TLS hello.  This will allow the traffic to be routed appropiately.
+
+type: SniSharedPort
+config:
+ bootstrapHost: foo-kafka.example.com # host is used for SNI based routing
+ brokerHostPattern: broker-${nodeId}.foo-kafka.example.com
+ port: 9092
+
+
+
+
+
+
+Need some sequence diagrams.
+
 
 
 
