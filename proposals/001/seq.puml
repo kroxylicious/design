@@ -1,4 +1,5 @@
 @startuml
+
 box client
 Actor "Kafka Client"
 Participant MetadataRequest
@@ -7,45 +8,56 @@ end box
 Control "System"
 
 System --> Kroxylicious: main
-create KafkaProxy
-Kroxylicious --> KafkaProxy: startup
+Kroxylicious --> KafkaProxy ** : startup
 
 loop [for all unique virtual clusters bootstrap listeners]
-  create NetFilter
-  KafkaProxy --> NetFilter: new
+  KafkaProxy --> NetFilter ** : new
 
-  create KafkaProxyInitializer
-  KafkaProxy --> KafkaProxyInitializer: new(netFilter)
+  KafkaProxy --> KafkaProxyInitializer ** : new(netFilter)
   KafkaProxy --> KafkaProxyInitializer: startup
 
-  create ServerChannel
-  KafkaProxy --> ServerChannel: bind
+  KafkaProxy --> ServerChannel ** : bind
 end
 
 
 "Kafka Client" --> ServerChannel: connect
-create Channel
-ServerChannel --> Channel: new
-Channel -> KafkaProxyInitializer: initChannel
+Participant Channel as DownstreamChannel
+ServerChannel --> DownstreamChannel **: new
+DownstreamChannel -> KafkaProxyInitializer: initChannel
 
 Participant BrokerTopologySnoopingMetadataFilter #red
-create BrokerTopologySnoopingMetadataFilter 
-KafkaProxyInitializer --> BrokerTopologySnoopingMetadataFilter: new 
+KafkaProxyInitializer --> BrokerTopologySnoopingMetadataFilter ** : new 
 note right
-  this is an internal filter that is internal wired into Kroxylicious filter chain.
+  this is an internal filter that is hard-wired into the filter chain.
 end note
 
-create KafkaProxyFrontendHandler
-KafkaProxyInitializer --> KafkaProxyFrontendHandler: new
+KafkaProxyInitializer --> KafkaProxyFrontendHandler ** : new
 
-create KafkaProxyBackendHandler
-KafkaProxyFrontendHandler --> KafkaProxyBackendHandler: new
 
-"Kafka Client" -> Channel: send(MetadataRequest)
-create MetadataRequest
-"Kafka Client" -> MetadataRequest: new
-"Kafka Client" -> Channel: send(MetadataRequest)
-Channel -> BrokerTopologySnoopingMetadataFilter:onMetadataRequest(MetadataRequest)
+"Kafka Client" -> DownstreamChannel: send(...)
+DownstreamChannel -> KafkaProxyFrontendHandler:channelRead
+KafkaProxyFrontendHandler -> NetFilter:selectServer
+NetFilter -> KafkaProxyFrontendHandler:initiateConnect
+
+Participant Channel as UpstreamChannel
+KafkaProxyFrontendHandler --> UpstreamChannel ** : new
+
+KafkaProxyFrontendHandler --> KafkaProxyBackendHandler ** : new
+UpstreamChannel -> Broker1 : connect
+
+
+"Kafka Client" -> MetadataRequest ** : new
+"Kafka Client" -> DownstreamChannel: send(MetadataRequest)
+DownstreamChannel -> KafkaProxyFrontendHandler:channelRead
+
+DownstreamChannel -> BrokerTopologySnoopingMetadataFilter:onMetadataRequest(MetadataRequest)
+
+box kafka cluster
+Participant Broker as Broker1
+Participant Broker as Broker2
+Participant MetadataResponse
+end box
+
 
 
 @enduml
