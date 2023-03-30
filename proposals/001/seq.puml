@@ -19,10 +19,14 @@ loop [for all unique virtual clusters bootstrap listeners]
   KafkaProxy --> ServerChannel ** : bind
 end
 
+== Connection to Bootstrap ==
 
 "Kafka Client" --> ServerChannel: connect
 Participant Channel as DownstreamChannel
 ServerChannel --> DownstreamChannel **: new
+note right
+  <i>ChannelPipeline elided</i>
+end note
 DownstreamChannel -> KafkaProxyInitializer: initChannel
 
 Participant BrokerTopologySnoopingMetadataFilter #red
@@ -45,12 +49,21 @@ KafkaProxyFrontendHandler --> UpstreamChannel ** : new
 KafkaProxyFrontendHandler --> KafkaProxyBackendHandler ** : new
 UpstreamChannel -> Broker1 : connect
 
+== Client sends MetadataRequest ==
+
 
 "Kafka Client" -> MetadataRequest ** : new
 "Kafka Client" -> DownstreamChannel: send(MetadataRequest)
 DownstreamChannel -> KafkaProxyFrontendHandler:channelRead
+KafkaProxyFrontendHandler -> KafkaProxyFrontendHandler:forwardOutbound
+KafkaProxyFrontendHandler -> UpstreamChannel:write
+UpstreamChannel -> Broker1:write
 
-DownstreamChannel -> BrokerTopologySnoopingMetadataFilter:onMetadataRequest(MetadataRequest)
+Broker1 -> MetadataResponse ** : new(broker1, broker2)
+
+Broker1 -> UpstreamChannel : write(MetadataResponse)
+UpstreamChannel -> BrokerTopologySnoopingMetadataFilter:onMetadataResponse(MetadataResponse)
+
 
 box kafka cluster
 Participant Broker as Broker1
