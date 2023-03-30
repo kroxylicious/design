@@ -44,8 +44,25 @@ clusters:
 
 ## Proposal
 
+### High Level
 
-### Virtual Cluster List
+Central to the model will be the *virtual cluster*.  This is on the downstream side and is the kafka cluster that the client will connect to.
+
+Each *virtual cluster* will specify an *target cluster*.  The *target cluster* is the model representation of the physical kafka cluster being proxied. The target cluster is on the upstream side.
+
+It is possible for many *virtual clusters* to specify the same *target cluster*.  
+
+Kroxylicious's will install it own -internal- Metadata filter.  It will use the metadata response to discover the target cluster's broker topology and use that information to bind any listening ports required to allow ingress from the upstream.  As the broker topology of the target cluster may change at runtime, kroxylicious must be capable of reacting to this and reflecting this in the listening port and routing used on the upstream side.
+
+As Kroxylicious needs its own metadata filter, it makes sense for it to take responsibily for rewriting the broker address in the metadata response.  It will also
+take this responsibility for other RPCs carrying broker address information, namely FindCoordinatorResponse and DescribeCluster.   This will relief the user of
+kroxylicious of this burden.  The user can of course install their own filters intercepting these RPCs as their use-case demands.
+
+
+### Detailed
+
+
+#### Virtual Cluster List
 
 The existing `proxy` configuration will be removed and the existing `clusters` list will be remodelled to provide a list of `virtual clusters`.  A virtual cluster is the cluster that is being presented to the client. 
 
@@ -68,7 +85,7 @@ virtualClusters:
 
 The next section describes the Virtual Cluster in more details.
 
-### Virtual Cluster 
+#### Virtual Cluster 
 
 The virtual cluster provides a name (used for logging and metric labels) and a clusterId (used to identify the cluster to client as a Kafka RPC level).
 
@@ -93,7 +110,7 @@ endpointAssigner:
    ghi: jkl
 ```
 
-### Endpoint Assigner
+#### Endpoint Assigner
 
 The endpoint assigner is responsible for assigning network endpoints for the virtual cluster.  It will be a pluggable implementation that will expose
 two methods:
@@ -112,7 +129,7 @@ The endpoint assigner will accept configuration which will be specific to its im
 
 There will be two implementations:
 
-#### ExclusivePortPerBroker Assigner
+##### ExclusivePortPerBroker Assigner
 
 The *ExclusivePortPerBroker* assigner allocates each broker an exclusive port.  The port number assignment is driven by a port range.  The broker address
 is formed from a pattern.
@@ -126,7 +143,7 @@ config:
  brokerPort: $(minPort + nodeId)
 
 
-#### SniSharedPort Assigner
+##### SniSharedPort Assigner
 
 The *ShareddPortSni* assigner is an implementation that allows the sharing of a single port amongst brokers and virtual clusters.  The advantage of this assigner
 is that it will exposes a single port to the world. This simplifies ingress configuration when using Kubernetes (a cloud load balancer can be pointed at the single port).
