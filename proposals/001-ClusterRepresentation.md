@@ -62,6 +62,11 @@ take this responsibility for other RPCs carrying broker address information, nam
 kroxylicious of this burden.  The user can of course install their own filters intercepting these RPCs as their use-case demands.
 
 
+### The Big Sequence Diagram
+
+
+![alternative text](http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/k-wall/design/001-ClusterRepresentation-v2/proposals/001/seq.puml)
+
 ### Detailed
 
 
