@@ -1,0 +1,37 @@
+@startuml
+box client
+Actor "Kafka Client"
+end box
+
+Control "System"
+
+System --> Kroxylicious: main
+create KafkaProxy
+Kroxylicious --> KafkaProxy: startup
+
+loop [for all unique virtual clusters bootstrap listeners]
+  create NetFilter
+  KafkaProxy --> NetFilter: new
+
+  create KafkaProxyInitializer
+  KafkaProxy --> KafkaProxyInitializer: new(netFilter)
+  KafkaProxy --> KafkaProxyInitializer: startup
+  create KafkaProxyFrontendHandler
+  KafkaProxyInitializer --> KafkaProxyFrontendHandler: new
+
+  create ServerBootstrap
+  KafkaProxy --> ServerBootstrap: bind
+  create ServerSocket
+  ServerBootstrap --> ServerSocket: bind
+end
+
+
+"Kafka Client" --> ServerSocket: connect
+
+create KafkaProxyBackendHandler
+KafkaProxyFrontendHandler --> KafkaProxyBackendHandler: new
+
+"Kafka Client" -> KafkaProxyFrontendHandler: send(MetadataRequest)
+
+
+@enduml
