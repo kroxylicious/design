@@ -1,6 +1,7 @@
 @startuml
 box client
 Actor "Kafka Client"
+Participant MetadataRequest
 end box
 
 Control "System"
@@ -27,13 +28,24 @@ create Channel
 ServerChannel --> Channel: new
 Channel -> KafkaProxyInitializer: initChannel
 
+Participant BrokerTopologySnoopingMetadataFilter #red
+create BrokerTopologySnoopingMetadataFilter 
+KafkaProxyInitializer --> BrokerTopologySnoopingMetadataFilter: new 
+note right
+  this is an internal filter that is internal wired into Kroxylicious filter chain.
+end note
+
 create KafkaProxyFrontendHandler
 KafkaProxyInitializer --> KafkaProxyFrontendHandler: new
 
 create KafkaProxyBackendHandler
 KafkaProxyFrontendHandler --> KafkaProxyBackendHandler: new
 
-"Kafka Client" -> KafkaProxyFrontendHandler: send(MetadataRequest)
+"Kafka Client" -> Channel: send(MetadataRequest)
+create MetadataRequest
+"Kafka Client" -> MetadataRequest: new
+"Kafka Client" -> Channel: send(MetadataRequest)
+Channel -> BrokerTopologySnoopingMetadataFilter:onMetadataRequest(MetadataRequest)
 
 
 @enduml
