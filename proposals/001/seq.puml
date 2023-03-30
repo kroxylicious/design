@@ -16,17 +16,19 @@ loop [for all unique virtual clusters bootstrap listeners]
   create KafkaProxyInitializer
   KafkaProxy --> KafkaProxyInitializer: new(netFilter)
   KafkaProxy --> KafkaProxyInitializer: startup
-  create KafkaProxyFrontendHandler
-  KafkaProxyInitializer --> KafkaProxyFrontendHandler: new
 
-  create ServerBootstrap
-  KafkaProxy --> ServerBootstrap: bind
-  create ServerSocket
-  ServerBootstrap --> ServerSocket: bind
+  create ServerChannel
+  KafkaProxy --> ServerChannel: bind
 end
 
 
-"Kafka Client" --> ServerSocket: connect
+"Kafka Client" --> ServerChannel: connect
+create Channel
+ServerChannel --> Channel: new
+Channel -> KafkaProxyInitializer: initChannel
+
+create KafkaProxyFrontendHandler
+KafkaProxyInitializer --> KafkaProxyFrontendHandler: new
 
 create KafkaProxyBackendHandler
 KafkaProxyFrontendHandler --> KafkaProxyBackendHandler: new
