@@ -58,8 +58,7 @@ There is a choice to be made about whether Kroxylicious proactively discovers me
 
 Kroxylicious's will install it own -internal- Metadata filter.  It will use the metadata response to discover the target cluster's broker topology and use that information to bind any listening ports required to allow ingress from the upstream.  As the broker topology of the target cluster may change at runtime, kroxylicious must be capable of reacting to this and reflecting this in the listening port and routing used on the upstream si
 As Kroxylicious needs its own metadata filter, it makes sense for it to take responsibily for rewriting the broker address in the metadata response.  It will also
-take this responsibility for other RPCs carrying broker address information, namely FindCoordinatorResponse and DescribeCluster.   This will relief the user of
-kroxylicious of this burden.  The user can of course install their own filters intercepting these RPCs as their use-case demands.
+take this responsibility for re-writing the other RPC responses carrying broker address information, namely `FindCoordinatorResponse` and `DescribeCluster`.   This will relieve the user of this burden.  The user can of course install their own filters intercepting these RPCs as their use-case demands.
 
 
 ### The Big Sequence Diagram
@@ -68,6 +67,9 @@ kroxylicious of this burden.  The user can of course install their own filters i
 ![alternative text](http://www.plantuml.com/plantuml/proxy?cache=no&src=https://raw.githubusercontent.com/k-wall/design/001-ClusterRepresentation-v2/proposals/001/seq.puml)
 
 ### Detailed
+
+The following sections walks through the key sections of the design.
+
 
 
 #### Virtual Cluster List
@@ -118,15 +120,31 @@ endpointAssigner:
    ghi: jkl
 ```
 
+#### Endpoint Registry
+
+A single instance of this class exists for each Kroxylicious instance.
+
+* This class is reponsible for tracking the network endpoints in use by each virtual cluster.
+* It is responsible for broadcasting events when the broker topology of the virtual cluster's target cluster changes.  `EndpointRegistryListener` will listen to these events and bind/unbind ports in response.  `KafkaProxy` will implement  `EndpointRegistryListener`.
+
+The interface of this registry looks like this:
+
+```
+#reconcile(String virtualClusterId, List<MetadataResponseBroker>) CompletionStage<MetadataResponseBroker> 
+```
+
+The job of this 
+
+
 #### Endpoint Assigner
 
 The endpoint assigner is responsible for assigning network endpoints for the virtual cluster.  It will be a pluggable implementation that will expose
 two methods:
 
 ```
-#InetAddress getBootstrapAddress() - return the bootstrapf for this cluster
-#InetAddress getBrokerAddressForNode(int nodeId) - returns a stable address for the broker identified by its nodeId.
-#Set<InetAddress> getExclusiveAddresses() - returns the set of addresses which this assigner requires exclusive use
+#getBootstrapAddress()  InetAddress - return the bootstrapf for this cluster.
+#getBrokerAddressForNode(int nodeId) InetAddress - returns a stable address for the broker identified by its nodeId.
+# getExclusiveAddresses() Set<InetAddress> - returns the set of addresses which this assigner requires exclusive use.
 ```
 
 
