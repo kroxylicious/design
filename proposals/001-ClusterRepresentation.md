@@ -133,7 +133,7 @@ The interface of this registry looks like this:
 #reconcile(String virtualClusterId, List<MetadataResponseBroker>) CompletionStage<MetadataResponseBroker> 
 ```
 
-The job of this 
+`reconile` accepts the list of MetadataResponseBroker that the MetadataResponse provides and returns a `CompletionStage` that will complete once the necessary upsteam endpoints are bound.
 
 
 #### Endpoint Assigner
