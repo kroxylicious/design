@@ -13,7 +13,7 @@ This effort is currently being bootstrapped, take a look at the following resour
 
 * [Discussions](https://github.com/kroxylicous/design/discussions): Ideas and other discussions
 * [Resources](useful-resources.asciidoc): A collection of useful resources
-* [kproxy](https://github.com/kroxylicous/kproxy): A basic PoC for a Kafka protocol proxy based on Netty
+* [kroxylicious](https://github.com/kroxylicous/kroxylicious): A basic PoC for a Kafka protocol proxy based on Netty
 
 ## License
 
