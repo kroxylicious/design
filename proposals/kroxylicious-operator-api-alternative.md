@@ -12,10 +12,11 @@
   * [KafkaProxyIngress](#kafkaproxyingress)
   * [VirtualKafkaCluster](#virtualkafkacluster)
   * [KafkaProtocolFilter](#kafkaprotocolfilter)
+  * [KafkaClusterRef](#kafkaclusterref)
 * [Worked examples](#worked-examples)
   * [On Cluster Traffic - plain downstream & upstream](#on-cluster-traffic---plain-downstream--upstream)
   * [On Cluster Traffic - tls downstream & upstream](#on-cluster-traffic---tls-downstream--upstream)
-    * [On Cluster Traffic - tls downstream & upstream - varation using OpenShift Cluster CA generated cert](#on-cluster-traffic---tls-downstream--upstream---varation-using-openshift-cluster-ca-generated-cert)
+    * [On Cluster Traffic - tls downstream & upstream - variation using OpenShift Cluster CA generated cert](#on-cluster-traffic---tls-downstream--upstream---variation-using-openshift-cluster-ca-generated-cert)
   * [Off Cluster Traffic (OpenShift Route)](#off-cluster-traffic-openshift-route)
   * [Off Cluster Traffic (Load Balancer)](#off-cluster-traffic-load-balancer)
   * [Upstream specified by Kafka CR](#upstream-specified-by-kafka-cr)
@@ -34,6 +35,7 @@ has prompted him to think about an alternative API design.
 * KafkaProxyIngress CR - Defines a way to access a KafkaProxy
 * VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
+* KafkaClusterRef CR - a reference to a kafka cluster
 
 ![image](diagrams/kroxylicious-operator-apis.png)
 
@@ -156,6 +158,13 @@ spec:
        x: y
     labels:
        x: y
+
+   # Optional - provides tls configuration.  Does not provide key material
+  tls:
+    protocols:
+      allowed: [TLSv1.3,  TLSv1.2]
+    cipherSuites:
+      denied: [TLS_ECDHE_ECDSA_WITH_AES_256_CCM]
 status:
    # describes the validity state of the ingress.  For instance:
    # - for openShiftRoute the operator will verify that the ingress controller exists.
@@ -223,35 +232,19 @@ spec:
 
   # Points to the cluster being proxied.  Can either be Strimzi Kafka resource or endpoint details.
   targetCluster:
-    # one of: resourceRef or bootstrapping
-    resourceRef:
-      kind: Kafka  # must be Kafka
-      group: strimzi.io # must be strimzi.io
+    clusterRef:
+      group: strimzi.io|kroxylicious.io # must be strimzi.io or kroxylicious.io
+      kind: Kafka|KafkaClusterRef  # must be Kafka (belonging to group strimzi.io) or TargetClusterRef (belonging to group kroxylicious.io)
       name: my-cluster
-      listenerName: listener # name of strimzi listener 
-    bootstrapping:
-       bootstrap: bootstrap:9092
-       protocol: TCP|TLS
-       nodeIdRanges:
-       - name: mybrokers
-         range:
-          startInclusive: 0
-          endExclusive: 3
+      listenerName: listener # name of strimzi listener, permitted only for Kafka (group strimzi.io)
     tls:
-      # Optional - client auth
+      # Optional - client auth certificate
       # secret provided by the Developer.
       certificateRef:
         kind: Secret # if present must be Secret, otherwise defaulted to Secret
         group: ""  # if present must be "", otherwise defaulted to ""
-        name: servercert
+        name: clientcert
         namespace: # namespace of the secret, if omitted assumes namespace of this resource
-      # Optional - peer trust
-      # configMap provided by the Developer.
-      trustAnchorRefs:
-      - kind: ConfigMap # if present must be ConfigMap, otherwise defaulted to ConfigMap
-        group: ""  # if present must be "", otherwise defaulted to ""
-        name: trustbundle
-        namespace: # namespace of the configmap, if omitted assumes namespace of this resource
 
   # ordered list of filters to be used by the virtualcluster
   filterRefs:
@@ -296,6 +289,42 @@ spec:
     selectorConfig: {}
 ```
 
+## KafkaClusterRef
+
+KafkaClusterRef points to a Kafka cluster. It might be a Kafka cluster stood up on the same Kubernetes cluster, a cluster
+running on a remote Kafka cluster, it might be service running on bare metal, or a Kafka service of a Cloud Provider.
+
+The KafkaClusterRef CR may the responsibility of a Developer or the Infrastructure admin.
+
+The KafkaClusterRef is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
+VirtualClusters belonging to different proxies.
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
+metadata:
+  name: mycluster
+spec:
+   bootstrap: bootstrap:9092
+   protocol: TCP|TLS
+   nodeIdRanges:
+   - name: range1
+     start: 0
+     end: 3
+   tls:
+    # Optional - peer trust
+    # configMap provided by the Developer or the Infrastructure admin
+    trustAnchorRefs:
+      - kind: ConfigMap # if present must be ConfigMap, otherwise defaulted to ConfigMap
+        group: ""  # if present must be "", otherwise defaulted to ""
+        name: trustbundle
+        namespace: # namespace of the configmap, if omitted assumes namespace of this resource
+    protocols:
+      allowed: [TLSv1.3,  TLSv1.2]
+    cipherSuites:
+      denied: [TLS_ECDHE_ECDSA_WITH_AES_256_CCM]
+```
+
 # Worked examples
 
 ## On Cluster Traffic - plain downstream & upstream
@@ -336,18 +365,28 @@ spec:
   - name: myclusterip
 
   targetCluster:
-    bootstrapping:
-       bootstrap: upstream:9092
-       protocol: TCP
-       nodeIdRanges:
-       - name: mybrokers
-         range:
-          startInclusive: 0
-          endExclusive: 3
+    clusterRef:
+      name: mytargetcluster
+
   filterRefs:
   - group: filter.kroxylicious.io
     kind: KafkaProtocolFilter
     name: encryption 
+```
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
+metadata:
+  name: mytargetcluster
+spec:
+  bootstrap: upstream:9092
+  protocol: TCP
+  nodeIdRanges:
+    - name: mybrokers
+      range:
+        startInclusive: 0
+        endExclusive: 3
 ```
 
 What would operator create:
@@ -398,19 +437,28 @@ spec:
          ...
 
   targetCluster:
-    bootstrapping:
-       bootstrap: upstream:9092
-       protocol: TLS
-       nodeIdRanges:
-       - name: mybrokers
-         range:
-          startInclusive: 0
-          endExclusive: 3
+    clusterRef:
+      name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
     kind: KafkaProtocolFilter
     name: encryption 
+```
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
+metadata:
+  name: mytargetcluster
+spec:
+  bootstrap: upstream:9092
+  protocol: TLS
+  nodeIdRanges:
+    - name: mybrokers
+      range:
+        startInclusive: 0
+        endExclusive: 3
 ```
 
 What the Developer would provide:
@@ -423,7 +471,7 @@ What would operator create:
 * Kafka Clients connect to serviceaddress:9082 
 
 
-### On Cluster Traffic - tls downstream & upstream - varation using OpenShift Cluster CA generated cert
+### On Cluster Traffic - tls downstream & upstream - variation using OpenShift Cluster CA generated cert
 
 KafkaProxy and KafkaProxyIngress as above
 
@@ -498,19 +546,28 @@ spec:
          ...
 
   targetCluster:
-     bootstrapping:
-       bootstrap: upstream:9092
-       protocol: TLS
-       nodeIdRanges:
-       - name: mybrokers
-         range:
-          startInclusive: 0
-          endExclusive: 3
+    clusterRef:
+      name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
     kind: KafkaProtocolFilter
     name: encryption 
+```
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
+metadata:
+  name: mytargetcluster
+spec:
+  bootstrap: upstream:9092
+  protocol: TLS
+  nodeIdRanges:
+    - name: mybrokers
+      range:
+        startInclusive: 0
+        endExclusive: 3
 ```
 
 What the Developer would provide:
@@ -569,14 +626,28 @@ spec:
          ...
 
   targetCluster:
-     bootstrapping:
-       bootstrap: upstream:9092
-       protocol: TLS
+    clusterRef:
+      name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
     kind: KafkaProtocolFilter
     name: encryption 
+```
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
+metadata:
+  name: mytargetcluster
+spec:
+  bootstrap: upstream:9092
+  protocol: TLS
+  nodeIdRanges:
+    - name: mybrokers
+      range:
+        startInclusive: 0
+        endExclusive: 3
 ```
 
 What Developer would provide:
@@ -633,7 +704,7 @@ spec:
   - name: myclusterip
 
   targetCluster:
-    resourceRef:
+    clusterRef:
       kind: Kafka  
       group: strimzi.io 
       name: my-cluster
@@ -688,5 +759,6 @@ Parallel work:
    providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of KafkaProxyIngress until the API firms up.
 1. Allow virtual cluster listener to target specific listeners of the target cluster.   This might be useful say if user want
    to use different SASL mechanisms for different applications (say OAUTH for webapps and SCRAM for traditional apps).
+
 
 
