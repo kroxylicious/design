@@ -690,3 +690,11 @@ Parallel work:
    to use different SASL mechanisms for different applications (say OAUTH for webapps and SCRAM for traditional apps).
 
 
+## Not in Scope
+
+1. Gateway API integration.   This proposal imagines integrating with the TLSRoute Gateway API object.   This isn't yet considered stable.   There are some Gateway API implementations
+   providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of ProxyIngress until the API firms up.
+1. Allow virtual cluster listener to target specific listeners of the target cluster.   This might be useful say if user want
+   to use different SASL mechanisms for different applications (say OAUTH for webapps and SCRAM for traditional apps).
+
+
