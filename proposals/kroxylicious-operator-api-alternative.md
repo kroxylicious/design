@@ -302,10 +302,10 @@ spec:
         group: ""  # if present must be "", otherwise defaulted to ""
         name: trustbundle
         namespace: # namespace of the configmap, if omitted assumes namespace of this resource
-   protocols:
-     allowed: [TLSv1.3,  TLSv1.2]
-   cipherSuites:
-     denied: [TLS_ECDHE_ECDSA_WITH_AES_256_CCM]
+    protocols:
+      allowed: [TLSv1.3,  TLSv1.2]
+    cipherSuites:
+      denied: [TLS_ECDHE_ECDSA_WITH_AES_256_CCM]
 ```
 
 ## Filter
