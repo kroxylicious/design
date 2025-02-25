@@ -61,7 +61,7 @@ The KafkaProxy CR is the responsibility of the Infrastructure admin.
 Declares an instance of the proxy and defines the ingress mechanisms available to it.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -112,7 +112,7 @@ It declares a named ingress mechanism - in other words, a way for traffic to get
 * gateway - for off-cluster realised using Gateway API.  Supports `TLSRoutes` with listener type of `passthrough`.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: myclusterip
@@ -120,7 +120,7 @@ spec:
   # reference to the proxy that will use this ingress.
   proxyRef:
     kind: KafkaProxy  # if present must be Gateway, otherwise defaulted
-    group: proxy.kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
+    group: kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
     name: myproxy  # name of proxy
 
   # oneOf: clusterIP, loadBalancer, openShiftRoute, gateway
@@ -180,14 +180,14 @@ such as the TLS certificates.
 The virtualcluster has a reference to a single target cluster which may be expressed using either a reference to a Strimzi Kafka object, or generic bootstraping information.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     kind: KafkaProxy  # if present must be KafkaProxy, otherwise defaulted
-    group: proxy.kroxylicious.io # if present must be proxy.kroxylicious.io, otherwise defaulted
+    group: kroxylicious.io # if present must be kroxylicious.io, otherwise defaulted
     name: myproxy
  
   # list of ingresses the virtual cluster wishes to use.  Each ingress selected must be one associated with
@@ -301,7 +301,7 @@ spec:
 ## On Cluster Traffic - plain downstream & upstream
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -309,7 +309,7 @@ spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: myclusterip
@@ -322,7 +322,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -330,7 +330,7 @@ spec:
   proxyRef:
     name: myproxy
     kind: KafkaProxy
-    group: proxy.kroxylicious.io
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
@@ -359,7 +359,7 @@ What would operator create:
 ## On Cluster Traffic - tls downstream & upstream
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -367,7 +367,7 @@ spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: oncluster
@@ -381,7 +381,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -389,7 +389,7 @@ spec:
   proxyRef:
     name: myproxy
     kind: KafkaProxy
-    group: proxy.kroxylicious.io
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
@@ -428,7 +428,7 @@ What would operator create:
 KafkaProxy and KafkaProxyIngress as above
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -461,7 +461,7 @@ What would operator create:
 ## Off Cluster Traffic (OpenShift Route)
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -469,7 +469,7 @@ spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: myopenshiftroute
@@ -481,7 +481,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -489,7 +489,7 @@ spec:
   proxyRef:
     name: myproxy
     kind: KafkaProxy
-    group: proxy.kroxylicious.io
+    group: kroxylicious.io
 
   ingress:
   - name: myopenshiftroute
@@ -529,7 +529,7 @@ Note: that the operator would write the virtualcluster proxy config based on the
 ## Off Cluster Traffic (Load Balancer)
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -537,7 +537,7 @@ spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: myloadbalancer
@@ -552,7 +552,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -560,7 +560,7 @@ spec:
   proxyRef:
     name: myproxy
     kind: KafkaProxy
-    group: proxy.kroxylicious.io
+    group: kroxylicious.io
 
   ingress:
   - name: myloadbalancer
@@ -598,7 +598,7 @@ deployed to same cluster as the Kafka. This reduces the amount of configuration 
 the listener status section reported by Strimzi.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxy
 metadata:
   name: myproxy
@@ -606,7 +606,7 @@ spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: KafkaProxyIngress
 metadata:
   name: myclusterip
@@ -619,7 +619,7 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
+apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualCluster
 metadata:
   name: mycluster
@@ -627,7 +627,7 @@ spec:
   proxyRef:
     name: myproxy
     kind: KafkaProxy
-    group: proxy.kroxylicious.io
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
