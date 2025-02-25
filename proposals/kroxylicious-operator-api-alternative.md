@@ -8,7 +8,7 @@
   * [Infrastructure admin](#infrastructure-admin)
   * [Developer](#developer)
 * [API](#api)
-  * [Proxy](#proxy)
+  * [KafkaProxy](#kafkaproxy)
   * [ProxyIngress](#proxyingress)
   * [VirtualCluster](#virtualcluster)
   * [Filter](#filter)
@@ -30,8 +30,8 @@ has prompted him to think about an alternative API design.
 
 # CRDs
 
-* Proxy CR - an instance of the Kroxylicious
-* ProxyIngress CR - Defines a way to access a Proxy
+* KafkaProxy CR - an instance of the Kroxylicious
+* ProxyIngress CR - Defines a way to access a KafkaProxy
 * VirtualCluster CR - a virtual cluster
 * Filter CR - a filter definition
 
@@ -54,20 +54,20 @@ Responsible for providing any key/trust material required to connect to the targ
 
 # API
 
-## Proxy
+## KafkaProxy
 
-The Proxy CR is the responsibility of the Infrastructure admin.
+The KafkaProxy CR is the responsibility of the Infrastructure admin.
 
 Declares an instance of the proxy and defines the ingress mechanisms available to it.
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec:
 
-   # Optional - controls the Proxy infrastructure.
+   # Optional - controls the KafkaProxy infrastructure.
    infrastructure:
       # Influences the annotations and labels on all resources created by the operator.
       annotations:
@@ -119,7 +119,7 @@ metadata:
 spec:
   # reference to the proxy that will use this ingress.
   proxyRef:
-    kind: Proxy  # if present must be Gateway, otherwise defaulted
+    kind: KafkaProxy  # if present must be Gateway, otherwise defaulted
     group: proxy.kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
     name: myproxy  # name of proxy
 
@@ -172,7 +172,7 @@ The VirtualCluster CR is the responsibility of the Developer.
 
 Declares a virtualcluster.
 
-A Virtualcluster is associated with exactly one Proxy.
+A Virtualcluster is associated with exactly one KafkaProxy.
 
 It enumerates the ingresses that are to be used by the virtualcluster.  It also supplies the virtual cluster ingress specific information
 such as the TLS certificates.
@@ -186,7 +186,7 @@ metadata:
   name: mycluster
 spec:
   proxyRef:
-    kind: Proxy  # if present must be Proxy, otherwise defaulted
+    kind: KafkaProxy  # if present must be KafkaProxy, otherwise defaulted
     group: proxy.kroxylicious.io # if present must be proxy.kroxylicious.io, otherwise defaulted
     name: myproxy
  
@@ -302,7 +302,7 @@ spec:
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
@@ -329,7 +329,7 @@ metadata:
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
+    kind: KafkaProxy
     group: proxy.kroxylicious.io
 
   ingress:
@@ -360,7 +360,7 @@ What would operator create:
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
@@ -388,7 +388,7 @@ metadata:
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
+    kind: KafkaProxy
     group: proxy.kroxylicious.io
 
   ingress:
@@ -425,7 +425,7 @@ What would operator create:
 
 ### On Cluster Traffic - tls downstream & upstream - varation using OpenShift Cluster CA generated cert
 
-Proxy and ProxyIngress as above
+KafkaProxy and ProxyIngress as above
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
@@ -462,7 +462,7 @@ What would operator create:
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
@@ -488,7 +488,7 @@ metadata:
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
+    kind: KafkaProxy
     group: proxy.kroxylicious.io
 
   ingress:
@@ -530,7 +530,7 @@ Note: that the operator would write the virtualcluster proxy config based on the
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
@@ -559,7 +559,7 @@ metadata:
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
+    kind: KafkaProxy
     group: proxy.kroxylicious.io
 
   ingress:
@@ -593,13 +593,13 @@ What would operator create:
 
 ## Upstream specified by Kafka CR
 
-We'd also allow the upstream t be specified by a Kafka CR.  This would be useful for use-cases where the Proxy is
+We'd also allow the upstream t be specified by a Kafka CR.  This would be useful for use-cases where the KafkaProxy is
 deployed to same cluster as the Kafka. This reduces the amount of configuration as the operator can take advantage of
 the listener status section reported by Strimzi.
 
 ```yaml
 apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
@@ -626,7 +626,7 @@ metadata:
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
+    kind: KafkaProxy
     group: proxy.kroxylicious.io
 
   ingress:
@@ -653,7 +653,7 @@ spec:
 * Operator restricted to max of 1 ingress per proxy (in other words matches the current capabilities of Kroxylicious operand)
 * Target Cluster `bootstrapping` supported -  TCP only.  No Kafka refs.
 * Simple status section reporting the bootstrap.
-* Any changes to any Proxy/ProxyIngress/VirtualCluster/Filter CRs or secrets providing TLS material will cause the Proxy Deployment to roll.
+* Any changes to any KafkaProxy/ProxyIngress/VirtualCluster/Filter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
 * Start building out system test suite
 
 2. ClusterIP/TLS
