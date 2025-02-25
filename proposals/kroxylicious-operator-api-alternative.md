@@ -677,10 +677,10 @@ spec:
 
 Parallel work:
 
-1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)
-2. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
-3. Allow Filters to reference secrets
-4. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
+~1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)~ _(edit: not required)_
+1. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
+1. Allow Filters to reference secrets
+1. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
 
 # Not in Scope
 
