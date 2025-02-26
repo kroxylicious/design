@@ -35,9 +35,9 @@ has prompted him to think about an alternative API design.
 * VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
 
-![image](https://github.com/user-attachments/assets/8767da6b-3fc4-4fbc-99bc-64e93c06bc70)
+![image](diagrams/kroxylicious-operator-apis.png)
 
-https://excalidraw.com/#json=CVAZMl-MuN1QP2cIW3hcA,cEWi5VjUg1mK2N1lvU-_xQ
+https://excalidraw.com/#json=8UKYvKppCHjuVXGjDWVhi,9ixEeUx2ayn6fwlMFixvsA
 
 
 # Personas / Responsibilities
