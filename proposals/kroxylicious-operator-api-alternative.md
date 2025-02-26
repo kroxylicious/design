@@ -10,7 +10,7 @@
 * [API](#api)
   * [KafkaProxy](#kafkaproxy)
   * [KafkaProxyIngress](#kafkaproxyingress)
-  * [VirtualCluster](#virtualcluster)
+  * [VirtualKafkaCluster](#virtualkafkacluster)
   * [KafkaProtocolFilter](#kafkaprotocolfilter)
 * [Worked examples](#worked-examples)
   * [On Cluster Traffic - plain downstream & upstream](#on-cluster-traffic---plain-downstream--upstream)
@@ -32,7 +32,7 @@ has prompted him to think about an alternative API design.
 
 * KafkaProxy CR - an instance of the Kroxylicious
 * KafkaProxyIngress CR - Defines a way to access a KafkaProxy
-* VirtualCluster CR - a virtual cluster
+* VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
 
 ![image](https://github.com/user-attachments/assets/8767da6b-3fc4-4fbc-99bc-64e93c06bc70)
@@ -166,9 +166,9 @@ status:
      reason: r 
 ```      
 
-## VirtualCluster
+## VirtualKafkaCluster
 
-The VirtualCluster CR is the responsibility of the Developer.
+The VirtualKafkaCluster CR is the responsibility of the Developer.
 
 Declares a virtualcluster.
 
@@ -181,7 +181,7 @@ The virtualcluster has a reference to a single target cluster which may be expre
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -280,7 +280,7 @@ status:
 
 ## KafkaProtocolFilter
 
-The VirtualCluster CR is the responsibility of the Developer - As per current implementation.
+The VirtualKafkaCluster CR is the responsibility of the Developer - As per current implementation.
 
 ```yaml
 apiVersion: filter.kroxylicious.io/v1alpha1
@@ -323,7 +323,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -382,7 +382,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -429,7 +429,7 @@ KafkaProxy and KafkaProxyIngress as above
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -482,7 +482,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -553,7 +553,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -620,7 +620,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: VirtualCluster
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -653,7 +653,7 @@ spec:
 * Operator restricted to max of 1 ingress per proxy (in other words matches the current capabilities of Kroxylicious operand)
 * Target Cluster `bootstrapping` supported -  TCP only.  No Kafka refs.
 * Simple status section reporting the bootstrap.
-* Any changes to any KafkaProxy/KafkaProxyIngress/VirtualCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
+* Any changes to any KafkaProxy/KafkaProxyIngress/VirtualKafkaCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
 * Start building out system test suite
 
 2. ClusterIP/TLS
