@@ -8,10 +8,10 @@
   * [Infrastructure admin](#infrastructure-admin)
   * [Developer](#developer)
 * [API](#api)
-  * [Proxy](#proxy)
-  * [ProxyIngress](#proxyingress)
-  * [VirtualCluster](#virtualcluster)
-  * [Filter](#filter)
+  * [KafkaProxy](#kafkaproxy)
+  * [KafkaProxyIngress](#kafkaproxyingress)
+  * [VirtualKafkaCluster](#virtualkafkacluster)
+  * [KafkaProtocolFilter](#kafkaprotocolfilter)
 * [Worked examples](#worked-examples)
   * [On Cluster Traffic - plain downstream & upstream](#on-cluster-traffic---plain-downstream--upstream)
   * [On Cluster Traffic - tls downstream & upstream](#on-cluster-traffic---tls-downstream--upstream)
@@ -30,14 +30,14 @@ has prompted him to think about an alternative API design.
 
 # CRDs
 
-* Proxy CR - an instance of the Kroxylicious
-* ProxyIngress CR - Defines a way to access a Proxy
-* VirtualCluster CR - a virtual cluster
-* Filter CR - a filter definition
+* KafkaProxy CR - an instance of the Kroxylicious
+* KafkaProxyIngress CR - Defines a way to access a KafkaProxy
+* VirtualKafkaCluster CR - a virtual cluster
+* KafkaProtocolFilter CR - a filter definition
 
-![image](https://github.com/user-attachments/assets/8767da6b-3fc4-4fbc-99bc-64e93c06bc70)
+![image](diagrams/kroxylicious-operator-apis.png)
 
-https://excalidraw.com/#json=CVAZMl-MuN1QP2cIW3hcA,cEWi5VjUg1mK2N1lvU-_xQ
+https://excalidraw.com/#json=8UKYvKppCHjuVXGjDWVhi,9ixEeUx2ayn6fwlMFixvsA
 
 
 # Personas / Responsibilities
@@ -54,20 +54,20 @@ Responsible for providing any key/trust material required to connect to the targ
 
 # API
 
-## Proxy
+## KafkaProxy
 
-The Proxy CR is the responsibility of the Infrastructure admin.
+The KafkaProxy CR is the responsibility of the Infrastructure admin.
 
 Declares an instance of the proxy and defines the ingress mechanisms available to it.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec:
 
-   # Optional - controls the Proxy infrastructure.
+   # Optional - controls the KafkaProxy infrastructure.
    infrastructure:
       # Influences the annotations and labels on all resources created by the operator.
       annotations:
@@ -84,7 +84,7 @@ spec:
 #  # Optional: default ordered list of filters to be used by a virtualcluster that doesn't apply it own.  (this doesn't fit well with the Infra role - drop it?).
 #  defaultFilterRefs:
 #  - group: filter.kroxylicious.io
-#    kind: Filter
+#    kind: KafkaProtocolFilter
 #    name: encryption```
 
 status:
@@ -100,11 +100,11 @@ status:
      - ...
 ```
 
-## ProxyIngress
+## KafkaProxyIngress
 
-The ProxyIngress CR is the responsibility of the Infrastructure admin.
+The KafkaProxyIngress CR is the responsibility of the Infrastructure admin.
 
-It declares a named ingress mechanism - in other words, a way for traffic to get to a proxy.  ProxyIngress knows about four types:
+It declares a named ingress mechanism - in other words, a way for traffic to get to a proxy.  KafkaProxyIngress knows about four types:
 
 * clusterIP - for on-cluster traffic realised using Kubernetes ClusterIP Service. Supports TCP or TLS.
 * loadBalancer - for off-cluster realised using a Kubernetes LoadBalancer Service.  Supports TLS only.
@@ -112,15 +112,15 @@ It declares a named ingress mechanism - in other words, a way for traffic to get
 * gateway - for off-cluster realised using Gateway API.  Supports `TLSRoutes` with listener type of `passthrough`.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: myclusterip
 spec:
   # reference to the proxy that will use this ingress.
   proxyRef:
-    kind: Proxy  # if present must be Gateway, otherwise defaulted
-    group: proxy.kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
+    kind: KafkaProxy  # if present must be Gateway, otherwise defaulted
+    group: kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
     name: myproxy  # name of proxy
 
   # oneOf: clusterIP, loadBalancer, openShiftRoute, gateway
@@ -166,13 +166,13 @@ status:
      reason: r 
 ```      
 
-## VirtualCluster
+## VirtualKafkaCluster
 
-The VirtualCluster CR is the responsibility of the Developer.
+The VirtualKafkaCluster CR is the responsibility of the Developer.
 
 Declares a virtualcluster.
 
-A Virtualcluster is associated with exactly one Proxy.
+A Virtualcluster is associated with exactly one KafkaProxy.
 
 It enumerates the ingresses that are to be used by the virtualcluster.  It also supplies the virtual cluster ingress specific information
 such as the TLS certificates.
@@ -180,14 +180,14 @@ such as the TLS certificates.
 The virtualcluster has a reference to a single target cluster which may be expressed using either a reference to a Strimzi Kafka object, or generic bootstraping information.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
-    kind: Proxy  # if present must be Proxy, otherwise defaulted
-    group: proxy.kroxylicious.io # if present must be proxy.kroxylicious.io, otherwise defaulted
+    kind: KafkaProxy  # if present must be KafkaProxy, otherwise defaulted
+    group: kroxylicious.io # if present must be kroxylicious.io, otherwise defaulted
     name: myproxy
  
   # list of ingresses the virtual cluster wishes to use.  Each ingress selected must be one associated with
@@ -213,7 +213,7 @@ spec:
        clientAuth: REQUIRED
     infrastructure:
       # Controls that let the Developer influence the annotations/labels created on the ingress objects (Service, OpenShift Routes, TLSRoutes etc).
-      # If an annotation or label supplied here duplicates one provided by the ProxyIngress, the one defined by the ProxyIngress takes precendence. 
+      # If an annotation or label supplied here duplicates one provided by the KafkaProxyIngress, the one defined by the KafkaProxyIngress takes precendence. 
       # The specific use case for this is https://docs.openshift.com/container-platform/4.17/security/certificates/service-serving-certificate.html#add-service-certificate_service-serving-certificate
       # where the developer wishes their VC to use Certificates created by OpenShift (useful for ClusterIP type TLS).
       annotations:
@@ -256,7 +256,7 @@ spec:
   # ordered list of filters to be used by the virtualcluster
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption
 status:
    # overall status
@@ -278,13 +278,13 @@ status:
      - ...
 ```
 
-## Filter
+## KafkaProtocolFilter
 
-The VirtualCluster CR is the responsibility of the Developer - As per current implementation.
+The VirtualKafkaCluster CR is the responsibility of the Developer - As per current implementation.
 
 ```yaml
 apiVersion: filter.kroxylicious.io/v1alpha1
-kind: Filter
+kind: KafkaProtocolFilter
 metadata:
   name: myfilter
 spec:
@@ -301,16 +301,16 @@ spec:
 ## On Cluster Traffic - plain downstream & upstream
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: myclusterip
 spec:
@@ -322,15 +322,15 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
-    group: proxy.kroxylicious.io
+    kind: KafkaProxy
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
@@ -346,7 +346,7 @@ spec:
           endExclusive: 3
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption 
 ```
 
@@ -359,16 +359,16 @@ What would operator create:
 ## On Cluster Traffic - tls downstream & upstream
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: oncluster
 spec:
@@ -381,15 +381,15 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
-    group: proxy.kroxylicious.io
+    kind: KafkaProxy
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
@@ -409,7 +409,7 @@ spec:
 
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption 
 ```
 
@@ -425,11 +425,11 @@ What would operator create:
 
 ### On Cluster Traffic - tls downstream & upstream - varation using OpenShift Cluster CA generated cert
 
-Proxy and ProxyIngress as above
+KafkaProxy and KafkaProxyIngress as above
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
@@ -461,16 +461,16 @@ What would operator create:
 ## Off Cluster Traffic (OpenShift Route)
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: myopenshiftroute
 spec:
@@ -481,15 +481,15 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
-    group: proxy.kroxylicious.io
+    kind: KafkaProxy
+    group: kroxylicious.io
 
   ingress:
   - name: myopenshiftroute
@@ -509,7 +509,7 @@ spec:
 
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption 
 ```
 
@@ -529,16 +529,16 @@ Note: that the operator would write the virtualcluster proxy config based on the
 ## Off Cluster Traffic (Load Balancer)
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: myloadbalancer
 spec:
@@ -552,15 +552,15 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
-    group: proxy.kroxylicious.io
+    kind: KafkaProxy
+    group: kroxylicious.io
 
   ingress:
   - name: myloadbalancer
@@ -575,7 +575,7 @@ spec:
 
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption 
 ```
 
@@ -593,21 +593,21 @@ What would operator create:
 
 ## Upstream specified by Kafka CR
 
-We'd also allow the upstream t be specified by a Kafka CR.  This would be useful for use-cases where the Proxy is
+We'd also allow the upstream t be specified by a Kafka CR.  This would be useful for use-cases where the KafkaProxy is
 deployed to same cluster as the Kafka. This reduces the amount of configuration as the operator can take advantage of
 the listener status section reported by Strimzi.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: Proxy
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxy
 metadata:
   name: myproxy
 spec: {}
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: ProxyIngress
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyIngress
 metadata:
   name: myclusterip
 spec:
@@ -619,15 +619,15 @@ spec:
 ```
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: VirtualCluster
+apiVersion: kroxylicious.io/v1alpha1
+kind: VirtualKafkaCluster
 metadata:
   name: mycluster
 spec:
   proxyRef:
     name: myproxy
-    kind: Proxy
-    group: proxy.kroxylicious.io
+    kind: KafkaProxy
+    group: kroxylicious.io
 
   ingress:
   - name: myclusterip
@@ -641,7 +641,7 @@ spec:
 
   filterRefs:
   - group: filter.kroxylicious.io
-    kind: Filter
+    kind: KafkaProtocolFilter
     name: encryption 
 ```
 
@@ -653,7 +653,7 @@ spec:
 * Operator restricted to max of 1 ingress per proxy (in other words matches the current capabilities of Kroxylicious operand)
 * Target Cluster `bootstrapping` supported -  TCP only.  No Kafka refs.
 * Simple status section reporting the bootstrap.
-* Any changes to any Proxy/ProxyIngress/VirtualCluster/Filter CRs or secrets providing TLS material will cause the Proxy Deployment to roll.
+* Any changes to any KafkaProxy/KafkaProxyIngress/VirtualKafkaCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
 * Start building out system test suite
 
 2. ClusterIP/TLS
@@ -679,13 +679,13 @@ Parallel work:
 
 1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)
 2. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
-3. Allow Filters to reference secrets
+3. Allow KafkaProtocolFilters to reference secrets
 4. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
 
 # Not in Scope
 
 1. Gateway API integration.   This proposal imagines integrating with the `TLSRoute` Gateway API object.   This Gateway API isn't yet considered stable.   There are some Gateway API implementations
-   providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of ProxyIngress until the API firms up.
+   providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of KafkaProxyIngress until the API firms up.
 1. Allow virtual cluster listener to target specific listeners of the target cluster.   This might be useful say if user want
    to use different SASL mechanisms for different applications (say OAUTH for webapps and SCRAM for traditional apps).
 
