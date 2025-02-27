@@ -11,7 +11,7 @@
   * [KafkaProxy](#kafkaproxy)
   * [KafkaProxyIngress](#kafkaproxyingress)
   * [VirtualKafkaCluster](#virtualkafkacluster)
-  * [TargetKafkaClusterRef](#targetclusterref)
+  * [KafkaClusterRef](#kafkaclusterref)
   * [KafkaProtocolFilter](#kafkaprotocolfilter)
 * [Worked examples](#worked-examples)
   * [On Cluster Traffic - plain downstream & upstream](#on-cluster-traffic---plain-downstream--upstream)
@@ -22,6 +22,7 @@
   * [Upstream specified by Kafka CR](#upstream-specified-by-kafka-cr)
 * [Phased High Level Implementation Plan](#phased-high-level-implementation-plan)
 * [Not in Scope](#not-in-scope)
+  * [Not in Scope](#not-in-scope-1)
 <!-- TOC -->
 # Background
 
@@ -35,7 +36,7 @@ has prompted him to think about an alternative API design.
 * KafkaProxyIngress CR - Defines a way to access a KafkaProxy
 * VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
-* TargetKafkaClusterRef CR - a reference to the target cluster
+* KafkaClusterRef CR - a reference to a kafka cluster
 
 ![image](diagrams/kroxylicious-operator-apis.png)
 
@@ -233,10 +234,10 @@ spec:
   # Points to the cluster being proxied.  Can either be Strimzi Kafka resource or endpoint details.
   targetCluster:
     clusterRef:
-      kind: Kafka|TargetClusterRef  # must be Kafka or TargetClusterRef
-      group: strimzi.io|proxy.kroxylicious.io # must be strimzi.io or proxy.kroxylicious.io
+      group: strimzi.io|kroxylicious.io # must be strimzi.io or kroxylicious.io
+      kind: Kafka|KafkaClusterRef  # must be Kafka (belonging to group strimzi.io) or TargetClusterRef (belonging to group kroxylicious.io)
       name: my-cluster
-      listenerName: listener # name of strimzi listener, applicable to Kafka
+      listenerName: listener # name of strimzi listener, permitted only for Kafka (group strimzi.io)
     tls:
       # Optional - client auth certificate
       # secret provided by the Developer.
@@ -271,19 +272,19 @@ status:
      - ...
 ```
 
-## TargetKafkaClusterRef
+## KafkaClusterRef
 
-TargetKafkaClusterRef points to a remote Kafka cluster.  It might be a Kafka cluster stood up on remote Kubernetes
-Cluster, it might be service running on bare metal, or a Kafka service of the cloud provider.
+KafkaClusterRef points to a Kafka cluster. It might be a Kafka cluster stood up on the same Kubernetes cluster, a cluster
+running on a remote Kafka cluster, it might be service running on bare metal, or a Kafka service of a Cloud Provider.
 
-The TargetKafkaClusterRef CR may the responsibility of a Developer or the Infrastructure admin.
+The KafkaClusterRef CR may the responsibility of a Developer or the Infrastructure admin.
 
-The TargetKafkaClusterRef is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
+The KafkaClusterRef is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
 either VirtualClusters belonging to different proxies.
 
 ```yaml
-apiVersion: proxy.kroxylicious.io/v1alpha1
-kind: TargetClusterRef
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaClusterRef
 metadata:
   name: mycluster
 spec:
@@ -291,9 +292,8 @@ spec:
    protocol: TCP|TLS
    nodeIdRanges:
    - name: range1
-     range:
-      startInclusive: 0
-      endExclusive: 3
+     start: 0
+     end: 3
    tls:
     # Optional - peer trust
     # configMap provided by the Developer or the Infrastructure admin
