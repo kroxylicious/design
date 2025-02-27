@@ -195,7 +195,7 @@ spec:
   ingresses:
   - name: myclusterip
     tls:
-      # server certificate - grab bag matched by hostname (what about key/keystore password?)
+      # server certificate - initial implementation will permit at most one entry in the array. keystore needs to contain a certficate for bootstrap and brokers.  It might be a single certificate with SANs matching all, or keystore with a certificate per host.  We'll rely on sun.security.ssl.X509KeyManagerImpl.CheckType#check to select the most appropiate cert.
       # secrets provided by the Developer.
       certificateRefs:
       - kind: Secret # if present must be Secret, otherwise defaulted to Secret
