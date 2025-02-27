@@ -195,7 +195,7 @@ spec:
   ingresses:
   - name: myclusterip
     tls:
-      # server certificate - grab bag matched by hostname (what about key/keystore password?)
+      # server certificate - initial implementation will permit at most one entry in the array. keystore needs to contain a certficate for bootstrap and brokers.  It might be a single certificate with SANs matching all, or keystore with a certificate per host.  We'll rely on sun.security.ssl.X509KeyManagerImpl.CheckType#check to select the most appropiate cert.
       # secrets provided by the Developer.
       certificateRefs:
       - kind: Secret # if present must be Secret, otherwise defaulted to Secret
@@ -677,10 +677,10 @@ spec:
 
 Parallel work:
 
-1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)
-2. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
-3. Allow KafkaProtocolFilters to reference secrets
-4. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
+~1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)~ _(edit: not required)_
+1. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
+1. Allow KafkaProtocolFilters to reference secrets
+1. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
 
 # Not in Scope
 
