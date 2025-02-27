@@ -718,40 +718,7 @@ spec:
 
 # Phased High Level Implementation Plan
 
-1. ClusterIP/TCP
-
-* ClusterIP/TCP support only
-* Operator restricted to max of 1 ingress per proxy (in other words matches the current capabilities of Kroxylicious operand)
-* Target Cluster `bootstrapping` supported -  TCP only.  No Kafka refs.
-* Simple status section reporting the bootstrap.
-* Any changes to any KafkaProxy/KafkaProxyIngress/VirtualKafkaCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
-* Start building out system test suite
-
-2. ClusterIP/TLS
-
-* Adds basic TLS support for downstream side
-* `cerificateRefs` array limited to single secret (in other words matches the current capabilities of Kroxylicious)
-* support only one kind of key material (suggest secret containing PEM formatted `tls.crt` and password-less `tls.key`)
-* Enhances status section ->  more errors and warnings reported
-
-3. LoadBalancer
-
-4. OpenShift Route
-
-5. Upstream TLS and other TLS controls.
-
-* TLS controls like protocol & cipher suite restrictions   
-
-6. Allow the upstream to be specified by the Strimzi Kafka reference.
-
-* Use the Kafka CR status to provide things like TLS settings
-
-Parallel work:
-
-~1. Kroxylicious - server certificate grab bag support (serve the right certificate and intermediates based on SNI match)~ _(edit: not required)_
-1. Allow Kroxylicious to have multiple listeners per virtual cluster _routed to the same target cluster listener_.  This makes the cluster accessible by both on-cluster and off-cluster workloads.
-1. Allow KafkaProtocolFilters to reference secrets
-1. Proxy dynamically reloads files providing TLS material (i.e. allows certificates to be rolled).
+See https://github.com/orgs/kroxylicious/projects/6
 
 # Not in Scope
 
