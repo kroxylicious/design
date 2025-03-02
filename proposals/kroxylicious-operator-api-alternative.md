@@ -39,7 +39,7 @@ has prompted him to think about an alternative API design.
 
 ![image](diagrams/kroxylicious-operator-apis.png)
 
-https://excalidraw.com/#json=8UKYvKppCHjuVXGjDWVhi,9ixEeUx2ayn6fwlMFixvsA
+https://excalidraw.com/#json=-vRYOfY9P3yzBNwzR9hu0,va3843kZ6Z2XCoR9wdgWrg
 
 
 # Personas / Responsibilities
