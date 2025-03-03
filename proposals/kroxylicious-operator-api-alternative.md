@@ -236,7 +236,7 @@ spec:
       group: strimzi.io|kroxylicious.io # must be strimzi.io or kroxylicious.io
       kind: Kafka|KafkaClusterRef  # must be Kafka (belonging to group strimzi.io) or TargetClusterRef (belonging to group kroxylicious.io)
       name: my-cluster
-      listenerName: listener # name of strimzi listener, permitted only for Kafka (group strimzi.io)
+      listenerName: listener # name of strimzi listener, permitted only for Kafka (group strimzi.io).  (Optional)
     tls:
       # Optional - client auth certificate
       # secret provided by the Developer.
