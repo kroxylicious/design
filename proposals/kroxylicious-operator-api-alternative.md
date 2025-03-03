@@ -9,7 +9,7 @@
   * [Developer](#developer)
 * [API](#api)
   * [KafkaProxy](#kafkaproxy)
-  * [KafkaProxyIngress](#kafkaproxyingress)
+  * [KafkaGateway](#kafkagateway)
   * [VirtualKafkaCluster](#virtualkafkacluster)
   * [KafkaProtocolFilter](#kafkaprotocolfilter)
 * [Worked examples](#worked-examples)
@@ -31,7 +31,7 @@ has prompted him to think about an alternative API design.
 # CRDs
 
 * KafkaProxy CR - an instance of the Kroxylicious
-* KafkaProxyIngress CR - Defines a way to access a KafkaProxy
+* KafkaGateway CR - Defines a way to access a KafkaProxy
 * VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
 
@@ -58,7 +58,7 @@ Responsible for providing any key/trust material required to connect to the targ
 
 The KafkaProxy CR is the responsibility of the Infrastructure admin.
 
-Declares an instance of the proxy and defines the ingress mechanisms available to it.
+Declares an instance of the proxy and defines the gateway mechanisms available to it.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -94,17 +94,17 @@ status:
      type: y
      reason: r
    # per listener status 
-   ingresses:
+   gateways:
    - name: myclusterip
      conditions:
      - ...
 ```
 
-## KafkaProxyIngress
+## KafkaGateway
 
-The KafkaProxyIngress CR is the responsibility of the Infrastructure admin.
+The KafkaGateway CR is the responsibility of the Infrastructure admin.
 
-It declares a named ingress mechanism - in other words, a way for traffic to get to a proxy.  KafkaProxyIngress knows about four types:
+It declares a named Gateway - in other words, a way for traffic to get to a proxy.  KafkaGateway knows about four types:
 
 * clusterIP - for on-cluster traffic realised using Kubernetes ClusterIP Service. Supports TCP or TLS.
 * loadBalancer - for off-cluster realised using a Kubernetes LoadBalancer Service.  Supports TLS only.
@@ -113,11 +113,11 @@ It declares a named ingress mechanism - in other words, a way for traffic to get
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: myclusterip
 spec:
-  # reference to the proxy that will use this ingress.
+  # reference to the proxy that will use this gateway.
   proxyRef:
     kind: KafkaProxy  # if present must be Gateway, otherwise defaulted
     group: kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
@@ -149,7 +149,7 @@ spec:
 
   # Optional
   infrastructure:
-    # Controls the Admin influence the annotations/labels created on the ingress objects (Service, OpenShift Routes, TLSRoutes etc).
+    # Controls the Admin influence the annotations/labels created on the gateway objects (Service, OpenShift Routes, TLSRoutes etc).
     # This lets the Infrastructure admin  specify things like:
     # https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.2/guide/service/annotations/#lb-type
     annotations:
@@ -157,7 +157,7 @@ spec:
     labels:
        x: y
 status:
-   # describes the validity state of the ingress.  For instance:
+   # describes the validity state of the gateway.  For instance:
    # - for openShiftRoute the operator will verify that the ingress controller exists.
    # - for gateway, it will verify that the gateway exists and the listener is defined as TLS passthrough.
    conditions:
@@ -174,7 +174,7 @@ Declares a virtualcluster.
 
 A Virtualcluster is associated with exactly one KafkaProxy.
 
-It enumerates the ingresses that are to be used by the virtualcluster.  It also supplies the virtual cluster ingress specific information
+It enumerates the gateways that are to be used by the virtualcluster.  It also supplies the virtual cluster gateway specific information
 such as the TLS certificates.
 
 The virtualcluster has a reference to a single target cluster which may be expressed using either a reference to a Strimzi Kafka object, or generic bootstraping information.
@@ -190,9 +190,9 @@ spec:
     group: kroxylicious.io # if present must be kroxylicious.io, otherwise defaulted
     name: myproxy
  
-  # list of ingresses the virtual cluster wishes to use.  Each ingress selected must be one associated with
+  # list of gateways the virtual cluster wishes to use.  Each Gateway selected must be one associated with
   # the proxy.  It is legal for the virtualcluster to choose only a subset.
-  ingresses:
+  gateways:
   - name: myclusterip
     tls:
       # server certificate - initial implementation will permit at most one entry in the array. keystore needs to contain a certficate for bootstrap and brokers.  It might be a single certificate with SANs matching all, or keystore with a certificate per host.  We'll rely on sun.security.ssl.X509KeyManagerImpl.CheckType#check to select the most appropiate cert.
@@ -212,8 +212,8 @@ spec:
       trustOptions:
        clientAuth: REQUIRED
     infrastructure:
-      # Controls that let the Developer influence the annotations/labels created on the ingress objects (Service, OpenShift Routes, TLSRoutes etc).
-      # If an annotation or label supplied here duplicates one provided by the KafkaProxyIngress, the one defined by the KafkaProxyIngress takes precendence. 
+      # Controls that let the Developer influence the annotations/labels created on the Gateway objects (Service, OpenShift Routes, TLSRoutes etc).
+      # If an annotation or label supplied here duplicates one provided by the KafkaGateway, the one defined by the KafkaGateway takes precendence. 
       # The specific use case for this is https://docs.openshift.com/container-platform/4.17/security/certificates/service-serving-certificate.html#add-service-certificate_service-serving-certificate
       # where the developer wishes their VC to use Certificates created by OpenShift (useful for ClusterIP type TLS).
       annotations:
@@ -264,8 +264,8 @@ status:
    - status: x
      type: y
      reason: r 
-   # per ingress status 
-   ingresses:
+   # per gateway status 
+   gateways:
    - name: myclusterip
      bootstrap: xxx.local:9082   # the bootstrap address
      protocol: TCP|TLS
@@ -310,7 +310,7 @@ spec: {}
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: myclusterip
 spec:
@@ -332,7 +332,7 @@ spec:
     kind: KafkaProxy
     group: kroxylicious.io
 
-  ingress:
+  gateways:
   - name: myclusterip
 
   targetCluster:
@@ -368,7 +368,7 @@ spec: {}
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: oncluster
 spec:
@@ -391,7 +391,7 @@ spec:
     kind: KafkaProxy
     group: kroxylicious.io
 
-  ingress:
+  gateways:
   - name: myclusterip
     tls:
       certificateRef:
@@ -425,7 +425,7 @@ What would operator create:
 
 ### On Cluster Traffic - tls downstream & upstream - varation using OpenShift Cluster CA generated cert
 
-KafkaProxy and KafkaProxyIngress as above
+KafkaProxy and KafkaGateway as above
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -436,7 +436,7 @@ spec:
   proxyRef:
      ...
 
-  ingress:
+  gateways:
   - name: myclusterip
     infrastructure:
        annotations:
@@ -470,7 +470,7 @@ spec: {}
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: myopenshiftroute
 spec:
@@ -491,7 +491,7 @@ spec:
     kind: KafkaProxy
     group: kroxylicious.io
 
-  ingress:
+  gateways:
   - name: myopenshiftroute
     tls:
       certificateRef:
@@ -538,7 +538,7 @@ spec: {}
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: myloadbalancer
 spec:
@@ -562,7 +562,7 @@ spec:
     kind: KafkaProxy
     group: kroxylicious.io
 
-  ingress:
+  gateways:
   - name: myloadbalancer
     tls:
       certificateRef:
@@ -607,7 +607,7 @@ spec: {}
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngress
+kind: KafkaGateway
 metadata:
   name: myclusterip
 spec:
@@ -629,7 +629,7 @@ spec:
     kind: KafkaProxy
     group: kroxylicious.io
 
-  ingress:
+  gateways:
   - name: myclusterip
 
   targetCluster:
@@ -650,10 +650,10 @@ spec:
 1. ClusterIP/TCP
 
 * ClusterIP/TCP support only
-* Operator restricted to max of 1 ingress per proxy (in other words matches the current capabilities of Kroxylicious operand)
+* Operator restricted to max of 1 gateway per proxy (in other words matches the current capabilities of Kroxylicious operand)
 * Target Cluster `bootstrapping` supported -  TCP only.  No Kafka refs.
 * Simple status section reporting the bootstrap.
-* Any changes to any KafkaProxy/KafkaProxyIngress/VirtualKafkaCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
+* Any changes to any KafkaProxy/KafkaGateway/VirtualKafkaCluster/KafkaProtocolFilter CRs or secrets providing TLS material will cause the KafkaProxy Deployment to roll.
 * Start building out system test suite
 
 2. ClusterIP/TLS
@@ -685,7 +685,7 @@ Parallel work:
 # Not in Scope
 
 1. Gateway API integration.   This proposal imagines integrating with the `TLSRoute` Gateway API object.   This Gateway API isn't yet considered stable.   There are some Gateway API implementations
-   providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of KafkaProxyIngress until the API firms up.
+   providing it as a beta feature.   We might experiment with those, but I don't imaging we'll actually implement `gateway: {}` part of KafkaGateway until the API firms up.
 1. Allow virtual cluster listener to target specific listeners of the target cluster.   This might be useful say if user want
    to use different SASL mechanisms for different applications (say OAUTH for webapps and SCRAM for traditional apps).
 
