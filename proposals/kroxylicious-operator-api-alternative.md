@@ -119,8 +119,8 @@ metadata:
 spec:
   # reference to the proxy that will use this gateway.
   proxyRef:
-    kind: KafkaProxy  # if present must be Gateway, otherwise defaulted
-    group: kroxylicious.io # if present must be proxy.kroxylicious, otherwise defaulted=
+    kind: KafkaProxy  # if present must be KafkaProxy, otherwise defaulted
+    group: kroxylicious.io # if present must be kroxylicious.io, otherwise defaulted=
     name: myproxy  # name of proxy
 
   # oneOf: clusterIP, loadBalancer, openShiftRoute, gateway
