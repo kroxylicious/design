@@ -1,7 +1,7 @@
-# Kroxylicious Operator API - Alternative Proposal.
+# Kroxylicious Operator API - v1alpha
 
 <!-- TOC -->
-* [Kroxylicious Operator API - Alternative Proposal.](#kroxylicious-operator-api---alternative-proposal)
+* [Kroxylicious Operator API - v1alpha](#kroxylicious-operator-api---v1alpha)
 * [Background](#background)
 * [CRDs](#crds)
 * [Personas / Responsibilities](#personas--responsibilities)
