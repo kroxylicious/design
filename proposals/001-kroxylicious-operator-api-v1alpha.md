@@ -1,4 +1,4 @@
-# Kroxylicious Operator API - v1alpha
+# Proposal 001 - Kroxylicious Operator API (v1alpha)
 
 <!-- TOC -->
 * [Kroxylicious Operator API - v1alpha](#kroxylicious-operator-api---v1alpha)
