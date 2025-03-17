@@ -12,7 +12,7 @@
   * [KafkaProxyIngress](#kafkaproxyingress)
   * [VirtualKafkaCluster](#virtualkafkacluster)
   * [KafkaProtocolFilter](#kafkaprotocolfilter)
-  * [KafkaClusterRef](#kafkaclusterref)
+  * [KafkaService](#kafkaservice)
 * [Worked examples](#worked-examples)
   * [On Cluster Traffic - plain downstream & upstream](#on-cluster-traffic---plain-downstream--upstream)
   * [On Cluster Traffic - tls downstream & upstream](#on-cluster-traffic---tls-downstream--upstream)
@@ -35,11 +35,11 @@ has prompted him to think about an alternative API design.
 * KafkaProxyIngress CR - Defines a way to access a KafkaProxy
 * VirtualKafkaCluster CR - a virtual cluster
 * KafkaProtocolFilter CR - a filter definition
-* KafkaClusterRef CR - a reference to a kafka cluster
+* KafkaService CR - describes how the proxy should connect to a target Kafka cluster
 
 ![image](diagrams/kroxylicious-operator-apis.png)
 
-https://excalidraw.com/#json=-vRYOfY9P3yzBNwzR9hu0,va3843kZ6Z2XCoR9wdgWrg
+https://excalidraw.com/#json=bb6MYaYlS_PB9SrO95lbi,I6KowvuLxK6cJDNiz-aSkg
 
 
 # Personas / Responsibilities
@@ -186,7 +186,7 @@ A Virtualcluster is associated with exactly one KafkaProxy.
 It enumerates the ingresses that are to be used by the virtualcluster.  It also supplies the virtual cluster ingress specific information
 such as the TLS certificates.
 
-The virtualcluster has a reference to a single target cluster which may be expressed using either a reference to a Strimzi Kafka object, or generic bootstraping information.
+The virtualcluster has a reference to a single target kafka cluster service.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -231,20 +231,8 @@ spec:
          x: y
 
   # Points to the cluster being proxied.  Can either be Strimzi Kafka resource or endpoint details.
-  targetCluster:
-    clusterRef:
-      group: strimzi.io|kroxylicious.io # must be strimzi.io or kroxylicious.io
-      kind: Kafka|KafkaClusterRef  # must be Kafka (belonging to group strimzi.io) or TargetClusterRef (belonging to group kroxylicious.io)
-      name: my-cluster
-      listenerName: listener # name of strimzi listener, permitted only for Kafka (group strimzi.io).  (Optional)
-    tls:
-      # Optional - client auth certificate
-      # secret provided by the Developer.
-      certificateRef:
-        kind: Secret # if present must be Secret, otherwise defaulted to Secret
-        group: ""  # if present must be "", otherwise defaulted to ""
-        name: clientcert
-        namespace: # namespace of the secret, if omitted assumes namespace of this resource
+  targetKafkaServiceRef: # required
+    name: my-cluster
 
   # ordered list of filters to be used by the virtualcluster
   filterRefs:
@@ -289,23 +277,28 @@ spec:
     selectorConfig: {}
 ```
 
-## KafkaClusterRef
+## KafkaService
 
-KafkaClusterRef points to a Kafka cluster. It might be a Kafka cluster stood up on the same Kubernetes cluster, a cluster
-running on a remote Kafka cluster, it might be service running on bare metal, or a Kafka service of a Cloud Provider.
+KafkaService represents, and encapsulates connection information for, a Kafka cluster. It might be a Kafka cluster stood up on the same Kubernetes cluster, a Kafka cluster
+running on a remote Kubernetes cluster, it might be service running on bare metal, or a Kafka service of a Cloud Provider.
 
-The KafkaClusterRef CR may the responsibility of a Developer or the Infrastructure admin.
+The KafkaService CR may the responsibility of a Developer or the Infrastructure admin.
 
-The KafkaClusterRef is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
+The KafkaService is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
 VirtualClusters belonging to different proxies.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaClusterRef
+kind: KafkaService
 metadata:
   name: mycluster
 spec:
-   bootstrap: bootstrap:9092
+   bootstrapServers: bootstrap:9092 # either `bootstrapServers` or `ref`, and not both
+   ref:
+     group: kafka.strimzi.io
+     kind: Kafka
+     namespace: kafka-prod
+     name: kafka
    protocol: TCP|TLS
    nodeIdRanges:
    - name: range1
@@ -364,9 +357,8 @@ spec:
   ingress:
   - name: myclusterip
 
-  targetCluster:
-    clusterRef:
-      name: mytargetcluster
+  targetKafkaServiceRef:
+    name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
@@ -376,7 +368,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaClusterRef
+kind: KafkaService
 metadata:
   name: mytargetcluster
 spec:
@@ -436,9 +428,8 @@ spec:
       certificateRef:
          ...
 
-  targetCluster:
-    clusterRef:
-      name: mytargetcluster
+  targetKafkaServiceRef:
+    name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
@@ -448,7 +439,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaClusterRef
+kind: KafkaService
 metadata:
   name: mytargetcluster
 spec:
@@ -492,7 +483,7 @@ spec:
     tls:
       certificateRefs:
       - name: myservingcert
-  targetCluster:
+  targetKafkaServiceRef:
      ...
 
   filterRefs:
@@ -545,9 +536,8 @@ spec:
       certificateRef:
          ...
 
-  targetCluster:
-    clusterRef:
-      name: mytargetcluster
+  targetKafkaServiceRef:
+    name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
@@ -557,7 +547,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaClusterRef
+kind: KafkaService
 metadata:
   name: mytargetcluster
 spec:
@@ -625,9 +615,8 @@ spec:
       certificateRef:
          ...
 
-  targetCluster:
-    clusterRef:
-      name: mytargetcluster
+  targetKafkaServiceRef:
+    name: mytargetcluster
 
   filterRefs:
   - group: filter.kroxylicious.io
@@ -637,7 +626,7 @@ spec:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaClusterRef
+kind: KafkaService
 metadata:
   name: mytargetcluster
 spec:
@@ -689,6 +678,20 @@ spec:
     port: 9082
 ```
 
+
+```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaService
+metadata:
+  name: mycluster
+spec:
+  ref:
+    kind: Kafka
+    group: strimzi.io
+    name: my-cluster
+  listenerName: mylistener
+```
+
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
 kind: VirtualKafkaCluster
@@ -703,12 +706,8 @@ spec:
   ingress:
   - name: myclusterip
 
-  targetCluster:
-    clusterRef:
-      kind: Kafka  
-      group: strimzi.io 
-      name: my-cluster
-      listenerName: mylistener
+  targetKafkaServiceRef:
+    name: mycluster
 
   filterRefs:
   - group: filter.kroxylicious.io
