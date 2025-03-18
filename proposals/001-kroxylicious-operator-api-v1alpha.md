@@ -284,8 +284,7 @@ running on a remote Kubernetes cluster, it might be service running on bare meta
 
 The KafkaService CR may the responsibility of a Developer or the Infrastructure admin.
 
-The KafkaService is a spec only resource.  It may be referenced by many VirtualCluster belonging to the same Proxy, or
-VirtualClusters belonging to different proxies.
+The KafkaService is a spec only resource. It is global in scope and thus can be referenced by multiple VirtualCluster definitions regardless of the KafkaProxy instance hosting them.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
