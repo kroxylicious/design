@@ -55,6 +55,7 @@ Maintains the same logical division between reconcilers thus avoiding the need f
 1. The blast radius of any config change is still the whole proxy process. I.e. a malformed config file still prevents the whole proxy from starting.
 This is largely mitigated by the fact the config file is in the kubernetes case is programmatically generated, and we can validate that before applying it.
 2. Any change to the config model requires the entire proxy process to restart. I.e. renewing the certificate of one virtual cluster requires the all connections to the hosting proxy instance to be disconnected and reconnect.
+3. The operator requires permissions to actually get all the resources (in order to obtain the `metadata.generation` and `metadata.uid`). While it can just query for the specific metadata the Kubernetes RBAC model works at verb/resource level not to fields within resources. 
 
 # Rejected Alternatives
 1. Have the Kafka Proxy reconciler (KPR) watch all resources involved for changes and trigger on any update. This has a variety of issues
