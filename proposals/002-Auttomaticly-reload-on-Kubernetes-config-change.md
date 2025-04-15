@@ -65,8 +65,10 @@ This is largely mitigated by the fact the config file is in the kubernetes case 
    1. What set of files should the proxy monitor? The set can grow and shrink during parsing as filers are added and removed
    2. How does the proxy know when a file is fully updated? User saves changes to the live config file before looking up the correct config syntax.
    3. We add complexity to the proxy, extra threads for file watches.
+   4. There is no mechanism for the proxy to report errors back to the operator. e.g. conflicting port allocations. 
 3. Follow the model pioneered by HTTPD but copied by many other services which support vhosting of a `conf.d` directory and have one file per virtual cluster.
    1. Increases the complexity of managing bare metal clusters 
    2. Makes crafting valid config harder (identifying for port collisions across a directory of file)
    3. Increases complexity within the proxy
-   4. Lack of developer bandwidth to context switch to the proxy
+   4. No mechanism to report problems encountered at the proxy level back to the operator.
+   5. Lack of developer bandwidth to context switch to the proxy
