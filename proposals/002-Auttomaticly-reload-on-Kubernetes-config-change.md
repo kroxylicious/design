@@ -24,7 +24,7 @@ We propose that each leaf reconciler should generate a hash of all the resources
 Each leaf reconciler will resolve references to the external resources it is aware of and compute a checksum[^1] derived from the metadata uid & generation of each resource. The checksum will be added as an annotation (`kroxylicious.io/dependantsChecksum`) of the Reconcilers resource.
 The aggregating reconciler will consume the checksums from each leaf reconciler and compute its own checksum combining the uid, generation and status checksum of each resource its aggregating.
 The Kafka Proxy Reconciler, KPR, will compute the ultimate checksum and include it as an annotation in the pod template metadata.
-This means that each reconciler is responsible for calculating the checksum only of its own external resources and not of itself.
+This means that each reconciler is responsible for calculating the checksum only of its own external resources but not of its primary resource.
 
 By including the checksum in the pod template it means that everytime a part of the configuration model for a proxy instance is updated the pods will be replaced as their annotations no longer match.  
 
