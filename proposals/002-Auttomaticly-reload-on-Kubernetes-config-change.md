@@ -21,7 +21,7 @@ We propose that each leaf reconciler should generate a hash of all the resources
 
 ## The details
 
-Each leaf reconciler will resolve references to the external resources it is aware of and compute a checksum[^1] derived from the metadata uid & generation of each resource. The checksum will be added as an annotation (`kroxylicious.io/dependantsChecksum`) of the Reconcilers resource.
+Each leaf reconciler will resolve references to the external resources it is aware of and compute a checksum[^1] derived from the metadata uid & generation of each resource. The checksum will be added as an annotation (`kroxylicious.io/dependants-checksum`) of the Reconcilers resource.
 The aggregating reconciler will consume the checksums from each leaf reconciler and compute its own checksum combining the uid, generation and status checksum of each resource its aggregating.
 The Kafka Proxy Reconciler, KPR, will compute the ultimate checksum and include it as an annotation in the pod template metadata.
 This means that each reconciler is responsible for calculating the checksum only of its own external resources but not of its primary resource.
@@ -44,7 +44,7 @@ The Kafka Service Reconciler, KSR, will:
    1. Follow any references to external secretes
    2. For each valid secret
       1. Compute a checksum of secret UID & Generation
-3. Annotate the KafkaService with `kroxylicious.io/dependantsChecksum = <computedChecksum>`  
+3. Annotate the KafkaService with `kroxylicious.io/dependants-checksum = <computedChecksum>`  
 
 
 [^1]: For simplicity CRC32 as that's already supported by the JDk. However, the algorithm used is immaterial.
