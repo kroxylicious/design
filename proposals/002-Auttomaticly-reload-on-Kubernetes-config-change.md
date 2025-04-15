@@ -1,7 +1,7 @@
-# Proposal 002 - Automatically re-load proxy pods on Kubernetes config change 
+# Proposal 002 - Automatically trigger a deployment rollout of affected proxies on Kubernetes config change 
 
 <!-- TOC -->
-* [Proposal 002 - Automatically re-load proxy pods on Kubernetes config change](#proposal-002---automatically-re-load-proxy-pods-on-kubernetes-config-change-)
+* [Proposal 002 - Automatically trigger a deployment rollout of affected proxies on Kubernetes config change](#proposal-002---automatically-trigger-a-deployment-rollout-of-affected-proxies-on-kubernetes-config-change-)
 * [Problem Statement](#problem-statement)
 * [Proposed Solution](#proposed-solution)
   * [The details](#the-details)
