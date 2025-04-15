@@ -21,15 +21,33 @@ We propose that each leaf reconciler should generate a hash of all the resources
 
 ## The details
 
-| Reconciler            | Roles            | Aggregated by         | Watches resources                      |
-|-----------------------|------------------|-----------------------|----------------------------------------|
-| Kafka Proxy           | aggregator       | not aggregated        | Virtual Kafka Cluster CRs              |
-| Virtual Kafka Cluster | aggregator, leaf | Kafka Proxy           | Kafka Protocol Filters, Kafka Services |
-| Kafka Protocol Filter | leaf             | Virtual Kafka Cluster |                                        |
-| Kafka Service         | leaf             | Virtual Kafka Cluster |                                        |
-| Kafka Proxy Ingress   | leaf             | Kafka Proxy Cluster   |                                        |
+Each leaf reconciler will resolve references to the external resources it is aware of and compute a checksum[^1] derived from the metadata uid & generation of each resource. The checksum will be added as an annotation (`kroxylicious.io/dependantsChecksum`) of the Reconcilers resource.
+The aggregating reconciler will consume the checksums from each leaf reconciler and compute its own checksum combining the uid, generation and status checksum of each resource its aggregating.
+The Kafka Proxy Reconciler, KPR, will compute the ultimate checksum and include it as an annotation in the pod template metadata.
+This means that each reconciler is responsible for calculating the checksum only of its own external resources and not of itself.
+
+By including the checksum in the pod template it means that everytime a part of the configuration model for a proxy instance is updated the pods will be replaced as their annotations no longer match.  
 
 
+|      Reconciler       |      Roles       |     Aggregated by     |                          Watches resources                           |
+|:---------------------:|:----------------:|:---------------------:|:--------------------------------------------------------------------:|
+|      Kafka Proxy      |    aggregator    |    not aggregated     |                       Virtual Kafka Cluster CR                       |
+| Virtual Kafka Cluster | aggregator, leaf |      Kafka Proxy      | Virtual Kafka Cluster CR, Kafka Protocol Filter CR, Kafka Service CR |
+| Kafka Protocol Filter |       leaf       | Virtual Kafka Cluster |                       Kafka Protocol Filter CR                       |
+|     Kafka Service     |       leaf       | Virtual Kafka Cluster |                 Kafka Service CR, Kubernetes Secrets                 |
+|  Kafka Proxy Ingress  |       leaf       |  Kafka Proxy Cluster  |                        Kafka Proxy Ingress CR                        |
+
+To illustrate
+The Kafka Service Reconciler, KSR, will: 
+1. Watch for Kafka Service CRs to appear
+2. Parse the KafkaService
+   1. Follow any references to external secretes
+   2. For each valid secret
+      1. Compute a checksum of secret UID & Generation
+3. Annotate the KafkaService with `kroxylicious.io/dependantsChecksum = <computedChecksum>`  
+
+
+[^1]: For simplicity CRC32 as that's already supported by the JDk. However, the algorithm used is immaterial.
 ## Advantages
 Maintains the same logical division between reconcilers thus avoiding the need for the aggregating reconciler to watch all resources involved and thus the need for it to understand the details of the full configuration model and its kubernetes representation. 
 
