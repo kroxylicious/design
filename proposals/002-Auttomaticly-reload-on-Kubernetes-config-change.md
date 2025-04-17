@@ -44,7 +44,7 @@ The Kafka Service Reconciler, KSR, will:
    1. Follow any references to external secretes
    2. For each valid secret
       1. Compute a checksum of secret UID & Generation
-3. Annotate the KafkaService with `kroxylicious.io/dependants-checksum = <computedChecksum>`  
+3. Annotate the KafkaService with `kroxylicious.io/referent-checksum = <computedChecksum>`  
 
 
 [^1]: For simplicity CRC32 as that's already supported by the JDk. However, the algorithm used is immaterial.
