@@ -16,7 +16,7 @@ We decided to split the operator into multiple reconcilers so that there was a s
 
 # Proposed Solution
 
-The Kroxylicious operator is built up from what we refer to as "leaf" (such as the Kafka Service Reconciler) and "aggregating" (with the Kafka Proxy Reconciler being the ultimate aggregator) reconcilers. 
+The Kroxylicious operator is built up from what we refer to as "leaf" (such as the Kafka Service Reconciler) and "aggregating" (with the Kafka Proxy Reconciler being the ultimate aggregator) reconcilers. A leaf reconciler is one that consumes a single instance of a Kroxylicious CRD and determines its validity. An aggregating reconciler on the other hand operates on a collection of Kroxylicious CRDs which are "managed" by other reconcilers and uses those to determine the desired state of the Kroxylicious CRD it is responsible for.
 We propose that each leaf reconciler should generate a hash of all the resources it has consumed to generate the required config for its reconciliation and include that in its status. The aggregate reconcilers would then be responsible for computing the ultimate hash representing the hash of all the configuration in use in a given proxy pod. The aggregating reconciler will then annotate the deployment with the config hash, thus when any node in the config model or external resource is modified the deployment is updated.    
 
 ## The details
