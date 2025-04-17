@@ -74,4 +74,4 @@ This is largely mitigated by the fact the config file is in the kubernetes case 
    2. Makes crafting valid config harder (identifying for port collisions across a directory of file)
    3. Increases complexity within the proxy
    4. No mechanism to report problems encountered at the proxy level back to the operator.
-   5. Lack of developer bandwidth to context switch to the proxy
+   5. This solves the orthogonal problem of controlling the blast radius of a configuration change it doesn't really address reloading
