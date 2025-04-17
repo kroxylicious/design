@@ -28,6 +28,7 @@ This means that each reconciler is responsible for calculating the checksum only
 
 By including the checksum in the pod template it means that everytime a part of the configuration model for a proxy instance is updated the pods will be replaced as their annotations no longer match.  
 
+The reconciler will only include/update the referent-checksum when it considers the result to be successful. This is because the changing the checksum applied to the deployment is intended to trigger a deployment rollout, and we only want to do that when the configuration is in a valid state. 
 
 |      Reconciler       |      Roles       |     Aggregated by     |                          Watches resources                           |
 |:---------------------:|:----------------:|:---------------------:|:--------------------------------------------------------------------:|
