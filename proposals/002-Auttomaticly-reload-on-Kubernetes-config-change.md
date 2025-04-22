@@ -48,7 +48,7 @@ The Kafka Service Reconciler, KSR, will:
 3. Annotate the KafkaService with `kroxylicious.io/referent-checksum = <computedChecksum>`  
 
 
-[^1]: For simplicity CRC32 as that's already supported by the JDk. However, the algorithm used is immaterial.
+[^1]: For simplicity CRC32 as that's already supported by the JDK. However, the algorithm used is immaterial.
 
 ## Advantages
 Maintains the same logical division between reconcilers thus avoiding the need for the aggregating reconciler to watch all resources involved and thus the need for it to understand the details of the full configuration model and its kubernetes representation. Brings a measure of consolidation to updates as checksums will only change once per-reconciler pass regardless of the number of resources changed in that pass. 
