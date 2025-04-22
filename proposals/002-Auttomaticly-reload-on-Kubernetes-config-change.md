@@ -30,13 +30,13 @@ By including the checksum in the pod template it means that everytime a part of 
 
 The reconciler will only include/update the referent-checksum when it considers the result to be successful. This is because the changing the checksum applied to the deployment is intended to trigger a deployment rollout, and we only want to do that when the configuration is in a valid state. 
 
-|      Reconciler       |      Roles       |     Aggregated by     |                          Watches resources                           |
-|:---------------------:|:----------------:|:---------------------:|:--------------------------------------------------------------------:|
-|      Kafka Proxy      |    aggregator    |    not aggregated     |                       Virtual Kafka Cluster CR                       |
-| Virtual Kafka Cluster | aggregator, leaf |      Kafka Proxy      | Virtual Kafka Cluster CR, Kafka Protocol Filter CR, Kafka Service CR |
-| Kafka Protocol Filter |       leaf       | Virtual Kafka Cluster |                       Kafka Protocol Filter CR                       |
-|     Kafka Service     |       leaf       | Virtual Kafka Cluster |                 Kafka Service CR, Kubernetes Secrets                 |
-|  Kafka Proxy Ingress  |       leaf       |  Kafka Proxy Cluster  |                        Kafka Proxy Ingress CR                        |
+|      Reconciler       |      Roles       |     Aggregated by     |                                Watches resources                                 |
+|:---------------------:|:----------------:|:---------------------:|:--------------------------------------------------------------------------------:|
+|      Kafka Proxy      |    aggregator    |    not aggregated     |                       Virtual Kafka Cluster CR, config map                       |
+| Virtual Kafka Cluster | aggregator, leaf |      Kafka Proxy      | Virtual Kafka Cluster CR, Kafka Protocol Filter CR, Kafka Service CR, config map |
+| Kafka Protocol Filter |       leaf       | Virtual Kafka Cluster |                             Kafka Protocol Filter CR                             |
+|     Kafka Service     |       leaf       | Virtual Kafka Cluster |                       Kafka Service CR, Kubernetes Secrets                       |
+|  Kafka Proxy Ingress  |       leaf       |  Kafka Proxy Cluster  |                              Kafka Proxy Ingress CR                              |
 
 To illustrate
 The Kafka Service Reconciler, KSR, will: 
@@ -57,7 +57,8 @@ Maintains the same logical division between reconcilers thus avoiding the need f
 1. The blast radius of any config change is still the whole proxy process. I.e. a malformed config file still prevents the whole proxy from starting.
 This is largely mitigated by the fact the config file is in the kubernetes case is programmatically generated, and we can validate that before applying it.
 2. Any change to the config model requires the entire proxy process to restart. I.e. renewing the certificate of one virtual cluster requires the all connections to the hosting proxy instance to be disconnected and reconnect.
-3. The operator requires permissions to actually get all the resources (in order to obtain the `metadata.generation` and `metadata.uid`). While it can just query for the specific metadata the Kubernetes RBAC model works at verb/resource level not to fields within resources. 
+3. The operator requires permissions to actually get all the resources (in order to obtain the `metadata.generation` and `metadata.uid`). While it can just query for the specific metadata the Kubernetes RBAC model works at verb/resource level not to fields within resources.
+4. This Operator based approach doesn't remove the need for all file watching. When using the secretes store CSI driver with [auto rotation]( https://secrets-store-csi-driver.sigs.k8s.io/topics/secret-auto-rotation) enabled the proxy process would still be required to watch for the secretes being updated.  
 
 # Rejected Alternatives
 1. Have the Kafka Proxy reconciler (KPR) watch all resources involved for changes and trigger on any update. This has a variety of issues
