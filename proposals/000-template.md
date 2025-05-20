@@ -2,7 +2,7 @@
 
 # <Title>
 
-Provide a brief summary of the feature you are proposing to add to Kroylicious.
+Provide a brief summary of the feature you are proposing to add to Kroxylicious.
 
 ## Current situation
 
