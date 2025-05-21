@@ -18,7 +18,7 @@ Currently, the proxy emits the following metrics:
 | kroxylicious_inbound_downstream_decoded_messages | Counter      | flowing, virtualCluster                     | Incremented by one every time every inbound RPC arriving _from the downstream that the proxy needs to decode_. (*1) |
 | kroxylicious_payload_size_bytes                  | Distribution | flowing, virtualCluster, ApiKey, ApiVersion | Incremented with RPC's frame size for every _decoded_ RPC from either the _downstream or upstream_. (*2)            |
 | kroxylicious_downstream_connections              | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection arrives from the downstream                                               |
-| kroxylicious_downstream_errors                   | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection fails owning to a downstream error (tls negotiation, protocol error etc)  |
+| kroxylicious_downstream_errors                   | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection fails owning to a downstream error (dropped connection) (*3)              |
 | kroxylicious_upstream_connections_attempts       | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection attempt to made to the upstream.                                          |
 | kroxylicious_upstream_errors                     | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection attempt fails owning to a upstream error (tls negotiation etc)            |
 
@@ -31,6 +31,7 @@ Currently, the proxy emits the following metrics:
   hard to use this metric to understand something about produce requests or fetch responses.
 * *1 / *2 - we have contradictory meanings for the `flowing` label.  in *2, requests flow `UPSTREAM`, responses flow `DOWNSTREAM`.
   In *1 requests flow `DOWNSTREAM` which makes no sense.
+* *3 - downstream errors does not record account for errors such as TLS negotiation errors or failures to determine virtual cluster or broker.  
 
 ### General short-comings/weaknesses
 
@@ -56,97 +57,120 @@ performance and other issues that might result from filter behaviour. Specifical
 
 ## Proposal
 
-### Deprecate `kroxylicious_inbound*`/`kroxylicious_payload_size_bytes` replace with new `kroxylicious_(downstream|upstream)_kafka_message_size_bytes` metrics
+## Summary
 
-This proposal suggests that we deprecate the `kroxylicious_inbound*`/`kroxylicious_payload_size_bytes` metrics and replace
-with two new **distribution** (aka histogram) metrics `kroxylicious_downstream_kafka_message_size_bytes` and `kroxylicious_upstream_kafka_message_size_bytes`.
+The following metrics will be added.  They will each be described in more detail later in this section.
 
-The new "message_size" differ from the old "payload_size" in several key ways:
-1. New "message_size" will be used to track both **opaque** and **decoded** messages ("payload_size" tracked only decoded messages).
-2. Downstream "message size" will track [message size](https://kafka.apache.org/protocol#:~:text=DESCRIPTION-,message_size,-The%20message_size%20field)
-   as messages come in from or leave for the client.  Upstream "message size" will track message size as messages go to or arrive from the broker.
-3. The design of the metric allows it to be used to track messages that originate within a filter.
-4. The design of metric allow a message-size histogram to be added.  This would allow the collection of statistical information
-   on, say, the size of the produce request or the fetch response.  If added, we would make this configurable.
+| Metric                                           | Type         | Labels                                                                                | Description                                                                             |
+|--------------------------------------------------|--------------|---------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| kroxylicious_downstream_kafka_message_total      | Counter      | virtual_cluster, node_id†, flowing, api_key, api_version, opaque                      | Incremented by one every time a request comes from/response goes to the downstream.     |
+| kroxylicious_upstream_kafka_message_total        | Counter      | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Incremented by one every time a request goes to/response comes from the upstream.       |
+| kroxylicious_downstream_kafka_message_size_bytes | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version  opaque                      | Records the message size of every message coming from/response going to the downstream. |
+| kroxylicious_upstream_kafka_message_size_bytes   | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the message size of every message coming from/response going to the upstream.   |
+| kroxylicious_message_process_time                | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the time taken for the message to traverse the proxy                            |
 
-In Micrometer, `Distribution` type metrics actually comprise three Prometheus metrics `_sum`, `_count` and `_max`.  This means that
-the use-cases for the deprecated counters `kroxylicious_inbound*` are actually covered.  If a user wants a count of the
-number of requests they'll be able to query `kroxylicious_downstream_kafka_message_size_bytes_count[flowing="upstream"]`.
+The following metrics wil have changes to their labels.
 
-**How this supports the use-cases?**
+| Metric                                        | Type    | Labels                     | Deprecated Labels | Description                                                                         |
+|-----------------------------------------------|---------|----------------------------|-------------------|-------------------------------------------------------------------------------------|
+| kroxylicious_downstream_connections_total     | Counter | virtual_cluster, node_id†  | virtualCluster    | Incremented by one every time a request comes from/response goes to the downstream. |
+| kroxylicious_downstream_error_total           | Counter | virtual_cluster†, node_id† | virtualCluster    | Incremented by one every time a request goes to/response comes from the upstream.   |
+| kroxylicious_upstreamstream_connections_total | Counter | virtual_cluster,  node_id† | virtualCluster    | Incremented by one every time a request comes from/response goes to the downstream. |
+| kroxylicious_upstreamstream_error_total       | Counter | virtual_cluster,  node_id† | virtualCluster    | Records the time taken for the message to traverse the proxy                        |
 
-Point `1` should assist capacity planning use-cases.  It gives you the means to know the number of bytes (layer 7) that are traversing the proxy.
-This information should help a user, say, scale the proxy replicas to match load.
 
-Point `2` should help use cases where the filters are changing the sizes of the messages as they go through the proxy.  The user
-will be able to compare metrics for, say, produce requests received on the downstream with the 
-produce requests leaving on the upstream side.
+The following metrics will be deprecated.
 
-Point `3` gives the ability for the user to focus in a Kafka requests sent by filters and responses to those requests.
+| Metric                                           |
+|--------------------------------------------------|
+| kroxylicious_inbound_downstream_messages         |
+| kroxylicious_inbound_downstream_decoded_messages |
+| kroxylicious_payload_size_bytes                  |
 
-#### kroxylicious_downstream_kafka_message_size_bytes
 
-Records the [message size](https://kafka.apache.org/protocol#:~:text=DESCRIPTION-,message_size,-The%20message_size%20field)
-of all messages (RPCs) arriving at or leaving the downstream side of the proxy.
+(† signifies labels that will be omitted in some circumstances. The circumstances are explained below).
 
-| Label                | Description                                                                                              |
-|----------------------|----------------------------------------------------------------------------------------------------------|
-| `virtual_cluster`    | name of virtual cluster                                                                                  |
-| `node_id`            | node id of the broker (or absent if this request/response is to/from boostrap)                           |
-| `api_key`            | API key of the message e.g. PRODUCE                                                                      |
-| `api_version`        | API version of the message                                                                               |
-| `flowing`            | `upstream` - request following towards the broker, `downstream` - response following towards the client. |
-| `opaque`             | 1 if this message transited the proxy without being decoded                                              |
-| `originating_filter` | if the request was originated by the filter, the name of the filter.                                     |
+### New counter `kroxylicious_downstream_kafka_message_total`
 
-####  kroxylicious_upstream_kafka_message_size_bytes
+`kroxylicious_downstream_kafka_message_total` is incremented every time a message passes to/from the downstream.
+It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, api_key`, and `api_version` labels.
 
-Records the [message size](https://kafka.apache.org/protocol#:~:text=DESCRIPTION-,message_size,-The%20message_size%20field)
-of all messages (RPCs) arriving at or leaving the upstream side of the proxy.
+`node_id` will only be present if for requests going to or responses coming from a broker.  For bootstrap interactions,
+`node_id` will be absent.
 
-This metric will the same set of labels as `kroxylicious_downstream_kafka_message_size_bytes`.
+`flowing` has two values - `upstream` signifies a request following towards the broker, `downstream` signifies a response
+following towards the client.
 
-### Add new `kroxylicious_message_process_time` metric
+Use cases that were previously served by the deprecated metrics `kroxylicious_inbound_downstream_messages` and
+`kroxylicious_inbound_downstream_decoded_messages` can now use this metric instead.
 
-This proposal suggests that we add a new distribution metric `kroxylicious_message_process_time`. This metric records
-the length of time a message (request or response) has taken to traverse the proxy.  Specifically, it will record 
-the length of time between the initial conversion of the wire byte-buf into objects, until the time the write promise
-completes.  The processing time will be recorded quantised buckets.  The size/number of buckets will be made configurable.
+### New counter `kroxylicious_upstream_kafka_message_total`
 
-**How this supports the use-cases?**
-This should aid diagnosis into performance problems or system slow-downs.  It should allow a user to quickly establish if
-a slow-down is due to the proxy, and then drill down to understand which RPCs are causing the issue.
+`kroxylicious_upstream_kafka_message_total` is incremented every time a message passes to/from the upstream.
+It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, `api_key`, `api_version` and `originating_filter` labels.
 
-| Label                | Description                                                                                              |
-|----------------------|----------------------------------------------------------------------------------------------------------|
-| `virtual_cluster`    | name of virtual cluster                                                                                  |
-| `node_id`            | node id of the broker (or absent if this request/response is to/from boostrap)                           |
-| `api_key`            | API key of the message e.g. PRODUCE                                                                      |
-| `api_version`        | API version of the message                                                                               |
-| `flowing`            | `upstream` - request following towards the broker, `downstream` - response following towards the client. |
-| `opaque`             | 1 if this message transited the proxy without being decoded                                              |
-| `originating_filter` | if the request was originated by the filter, the name of the filter.                                     |
+`node_id` will only be present if for requests going to or responses coming from a broker.  For bootstrap interactions,
+`node_id` will be absent.
 
-#### Add label `node_id` to `kroxylicious_upstream_connections_attempts` and `kroxylicious_upstream_errors`
+`originating_filter` is only used for requests generated by the filters themselves (`sendRequest` API)
+and their responses.  It will be populated with the filter's name. Otherwise `originating_filter` will be absent.
+`originating_filter` supports the metrics use-cases where the requests sent by the filters themselves need to be understood.
 
-The proposal is to add the `node_id` of the upstream broker being connected to.  If the connection being made is
-for boostrap, the label will be absent.
+### New distribution `kroxylicious_downstream_kafka_message_size_bytes`
 
-**How this supports the use-cases?**
+`kroxylicious_downstream_kafka_message_size_bytes` records the message size of every message passing to/from the downstream.
+It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, `api_key`, and `api_version` labels.  `node_id` will only
+be present if for requests going to or responses coming from a broker.  For bootstrap interactions, `node_id` will be
+absent.
 
-This should aid problem diagnosis. If a single upstream broker of a cluster has an issue, it will be obvious from the metrics (and alerts)
-which broker is down.
+Use cases that were previously served by the deprecated metric `kroxylicious_payload_size_bytes` can now use this metric
+instead. The new metric records the size of both **opaque** and **decoded** messages allowing the user to understand the
+number of bytes traversing the proxy.
 
-(Note: that proposal is not suggesting adding `node_id` to the `kroxylicious_downstream_connections_attempts` or
-`kroxylicious_downstream_errors`. This is because at the point these metrics are emitted, the upstream target has not yet
-been identified.  Emitting the metric early has advantages)
+### New distribution `kroxylicious_upstream_kafka_message_size_bytes`
 
-#### Deprecate label `virtualCluster`, replace with `virtual_cluster`.
+`kroxylicious_upstream_kafka_message_size_bytes` records the message size of every message passing to/from the upstream.
+It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, `api_key`, `api_version` and `originating_filter` labels.
+
+`node_id` will only be present if for requests going to or responses coming from a broker.  For bootstrap interactions, `node_id` will be
+absent.
+
+`originating_filter` is only used for requests sent by the filters themselves (i.e. the `sendRequest` API)
+and their responses.  It will be populated with the filter's name.  Otherwise `originating_filter` will be absent.
+
+### New distribution `kroxylicious_message_process_time`
+
+This metric records the length of time a message (request or response) has taken to traverse the proxy.
+
+* The start time will be time the bytes containing the message arrived from the network (in the Netty handler, before any decoding).
+* The end time will be the time that the network write at the proxy's opposite end completes (i.e. the Netty write promise completes)
+
+The use cases supported by this metric are ones where you are interested in how much processing time it being incurred 
+by the proxy decoding and encoding messages and any processing time incurred by the filter.
+
+The requests sent by filter themselves, the start time for a request will be time filter called `#sendRequest`. The end time
+will be the time the network write at the proxy upstream completes.  For responses, the start time is time the bytes containing
+the message arrived from the network. The end time will be the time the response reaches the originating filter (i.e. the future completes).
+
+#### Add label `node_id` and `virtual_cluster` to `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors`
+
+`node_id` will only be present if for requests going to or responses coming from a broker.  For bootstrap interactions,
+`node_id` will be absent.
+
+The existing label `virtualCluster` will be deprecated.  A new label `virtual_cluster` will be added.  It will carry
+the virtual cluster's name.
+
+#### Use `kroxylicious_downstream_errors` use to record other downstream errors
+
+Issues should as downstream TLS negotiating errors or failure to resolve virtual cluster result in the connection being
+closed, however, there is no metric counting those errors. `kroxylicious_downstream_connections_attempts` and
+`kroxylicious_downstream_errors` should be incremented for these case too.  `virtual_cluster` and `node_id` won't be known
+so these labels should be omitted.
 
 ## Compatibility
 
 This proposal deprecates several metrics and the `virtualCluster` label.  These will be retained for several release before
-being removed i.e. the project's deprecation policy will apply.
+being removed i.e. the project's normal deprecation practices will be followed.
 
 ## Rejected alternatives
 
