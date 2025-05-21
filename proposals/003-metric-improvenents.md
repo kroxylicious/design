@@ -56,10 +56,10 @@ performance and other issues that might result from filter behaviour. Specifical
 
 ## Proposal
 
-### Deprecate `kroxylicious_inbound*`/`kroxylicious_payload_size_bytes` replace with new `kroxylicious_(downstream|upstream)_kafka_rpc_message_size_bytes` metrics
+### Deprecate `kroxylicious_inbound*`/`kroxylicious_payload_size_bytes` replace with new `kroxylicious_(downstream|upstream)_kafka_message_size_bytes` metrics
 
 This proposal suggests that we deprecate the `kroxylicious_inbound*`/`kroxylicious_payload_size_bytes` metrics and replace
-with two new **distribution** (aka histogram) metrics `kroxylicious_downstream_kafka_rpc_message_size_bytes` and `kroxylicious_upstream_kafka_rpc_message_size_bytes`.
+with two new **distribution** (aka histogram) metrics `kroxylicious_downstream_kafka_message_size_bytes` and `kroxylicious_upstream_kafka_message_size_bytes`.
 
 The new "message_size" differ from the old "payload_size" in several key ways:
 1. New "message_size" will be used to track both **opaque** and **decoded** messages ("payload_size" tracked only decoded messages).
@@ -71,7 +71,7 @@ The new "message_size" differ from the old "payload_size" in several key ways:
 
 In Micrometer, `Distribution` type metrics actually comprise three Prometheus metrics `_sum`, `_count` and `_max`.  This means that
 the use-cases for the deprecated counters `kroxylicious_inbound*` are actually covered.  If a user wants a count of the
-number of requests they'll be able to query `kroxylicious_downstream_kafka_rpc_message_size_bytes_count[flowing="upstream"]`.
+number of requests they'll be able to query `kroxylicious_downstream_kafka_message_size_bytes_count[flowing="upstream"]`.
 
 **How this supports the use-cases?**
 
@@ -84,7 +84,7 @@ produce requests leaving on the upstream side.
 
 Point `3` gives the ability for the user to focus in a Kafka requests sent by filters and responses to those requests.
 
-#### kroxylicious_downstream_kafka_rpc_message_size_bytes
+#### kroxylicious_downstream_kafka_message_size_bytes
 
 Records the [message size](https://kafka.apache.org/protocol#:~:text=DESCRIPTION-,message_size,-The%20message_size%20field)
 of all messages (RPCs) arriving at or leaving the downstream side of the proxy.
@@ -99,16 +99,16 @@ of all messages (RPCs) arriving at or leaving the downstream side of the proxy.
 | `opaque`             | 1 if this message transited the proxy without being decoded                                              |
 | `originating_filter` | if the request was originated by the filter, the name of the filter.                                     |
 
-####  kroxylicious_upstream_kafka_rpc_message_size_bytes
+####  kroxylicious_upstream_kafka_message_size_bytes
 
 Records the [message size](https://kafka.apache.org/protocol#:~:text=DESCRIPTION-,message_size,-The%20message_size%20field)
 of all messages (RPCs) arriving at or leaving the upstream side of the proxy.
 
-This metric will the same set of labels as `kroxylicious_downstream_kafka_rpc_message_size_bytes`.
+This metric will the same set of labels as `kroxylicious_downstream_kafka_message_size_bytes`.
 
-### Add new `kroxylicious_rpc_message_process_time` metric
+### Add new `kroxylicious_message_process_time` metric
 
-This proposal suggests that we add a new distribution metric `kroxylicious_rpc_message_process_time`. This metric records
+This proposal suggests that we add a new distribution metric `kroxylicious_message_process_time`. This metric records
 the length of time a message (request or response) has taken to traverse the proxy.  Specifically, it will record 
 the length of time between the initial conversion of the wire byte-buf into objects, until the time the write promise
 completes.  The processing time will be recorded quantised buckets.  The size/number of buckets will be made configurable.
