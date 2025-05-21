@@ -7,6 +7,33 @@ The document aims to:
 * describe the short-comings with the current metrics
 * identify use-cases for Kroxylicious metrics
 * propose improvements.
+* propose an implementation plan.
+
+<!-- TOC -->
+* [Improvements to Kroxylicious (Proxy) Metrics](#improvements-to-kroxylicious-proxy-metrics)
+  * [Current situation](#current-situation)
+    * [Specific short-comings/weaknesses](#specific-short-comingsweaknesses)
+    * [General short-comings/weaknesses](#general-short-comingsweaknesses)
+  * [Use Cases](#use-cases)
+  * [Proposal](#proposal)
+  * [Summary](#summary)
+    * [New counter `kroxylicious_downstream_kafka_message_total`](#new-counter-kroxyliciousdownstreamkafkamessagetotal)
+    * [New counter `kroxylicious_upstream_kafka_message_total`](#new-counter-kroxyliciousupstreamkafkamessagetotal)
+    * [New distribution `kroxylicious_downstream_kafka_message_size_bytes`](#new-distribution-kroxyliciousdownstreamkafkamessagesizebytes)
+    * [New distribution `kroxylicious_upstream_kafka_message_size_bytes`](#new-distribution-kroxyliciousupstreamkafkamessagesizebytes)
+    * [New distribution `kroxylicious_message_process_time`](#new-distribution-kroxyliciousmessageprocesstime)
+    * [New gauge metrics `kroxylicious_(up|down)stream_backpressure_state`](#new-gauge-metrics-kroxyliciousupdownstreambackpressurestate)
+    * [New distribution `kroxylicious_(up|down)stream_backpressure_time`](#new-distribution-kroxyliciousupdownstreambackpressuretime)
+    * [Add label `node_id` and `virtual_cluster` to `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors`](#add-label-nodeid-and-virtualcluster-to-kroxyliciousdownupstreamconnectionsattempts-and-kroxyliciousdownupstreamerrors)
+    * [Use `kroxylicious_downstream_errors` use to record other downstream errors](#use-kroxyliciousdownstreamerrors-use-to-record-other-downstream-errors)
+    * [No Distribution/Histogram Buckets](#no-distributionhistogram-buckets)
+  * [Compatibility](#compatibility)
+  * [Rejected alternatives](#rejected-alternatives)
+  * [Implementation Schedule](#implementation-schedule)
+    * [Essential](#essential)
+    * [Highly Desirable](#highly-desirable)
+    * [Deferred until Later](#deferred-until-later)
+<!-- TOC -->
 
 ## Current situation
 
@@ -54,6 +81,7 @@ performance and other issues that might result from filter behaviour. Specifical
 * filters have the ability to change the size of the RPCs as they traverse the proxy (record encryption)
 * filters have the ability to change the flow of messages within the Kafka system. Specifically, they can short-circuit
   requests by producing their own responses (the broker never sees the request) and introduce their own requests.
+* filters can perform asynchronous work.  When asynchronous work occurs, the proxy stops reading the downstream or upstream.
 
 ## Proposal
 
@@ -68,6 +96,10 @@ The following metrics will be added.  They will each be described in more detail
 | kroxylicious_downstream_kafka_message_size_bytes | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version  opaque                      | Records the message size of every message coming from/response going to the downstream. |
 | kroxylicious_upstream_kafka_message_size_bytes   | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the message size of every message coming from/response going to the upstream.   |
 | kroxylicious_message_process_time                | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the time taken for the message to traverse the proxy                            |
+| kroxylicious_downstream_backpressure_state       | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state from the downstream                                      |
+| kroxylicious_downstream_backpressure_time        | Distribution | virtual_cluster, node_id†                                                             | Records the time that reading from the downstream has been paused owing to backpressure |
+| kroxylicious_upstream_backpressure_state         | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state from the upstream                                        |
+| kroxylicious_upstream_backpressure_time          | Distribution | virtual_cluster, node_id†                                                             | Records the time that reading from the upstream has been paused owing to backpressure   |
 
 The following metrics wil have changes to their labels.
 
@@ -101,6 +133,8 @@ It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, api_ke
 `flowing` has two values - `upstream` signifies a request following towards the broker, `downstream` signifies a response
 following towards the client.
 
+`opaque` has two values - `1` signifies an opaque message (one that the proxy hasn't needed to decode), `0` signifies decoded message.
+
 Use cases that were previously served by the deprecated metrics `kroxylicious_inbound_downstream_messages` and
 `kroxylicious_inbound_downstream_decoded_messages` can now use this metric instead.
 
@@ -113,8 +147,9 @@ It is discriminated by `virtual_cluster`, `node_id`, `flowing`, `opaque`, `api_k
 `node_id` will be absent.
 
 `originating_filter` is only used for requests generated by the filters themselves (`sendRequest` API)
-and their responses.  It will be populated with the filter's name. Otherwise `originating_filter` will be absent.
-`originating_filter` supports the metrics use-cases where the requests sent by the filters themselves need to be understood.
+and their responses.  It will be populated with the filter's name. Otherwise `originating_filter` will be absent. `opaque`
+will always be `0` (decoded) for requests generated by filters and their responses. `originating_filter` supports the
+metrics use-cases where the requests sent by the filters themselves need to be understood.
 
 ### New distribution `kroxylicious_downstream_kafka_message_size_bytes`
 
@@ -152,7 +187,20 @@ The requests sent by filter themselves, the start time for a request will be tim
 will be the time the network write at the proxy upstream completes.  For responses, the start time is time the bytes containing
 the message arrived from the network. The end time will be the time the response reaches the originating filter (i.e. the future completes).
 
-#### Add label `node_id` and `virtual_cluster` to `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors`
+### New gauges `kroxylicious_(up|down)stream_backpressure_state`
+
+Reports the backpressure state for upstream and downstream.  The use-case for metric is to allow the user to
+understand when the proxy must pause reading owing whilst asynchronous work completes (for example, in record validation
+requesting a schema or in record encryption, generating a new DEK).
+
+This gauge will use values `0` and `1` only.  `1` will signify that the proxy has stopped reading the channel whilst
+it awaits the completion of asynchronous work.  `0` signifies that there is no pending asynchronous.
+
+### New distributions `kroxylicious_(up|down)stream_backpressure_time`
+
+Reports the total length of time backpressure has been exerted.
+
+### Add label `node_id` and `virtual_cluster` to `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors`
 
 `node_id` will only be present if for requests going to or responses coming from a broker.  For bootstrap interactions,
 `node_id` will be absent.
@@ -160,12 +208,22 @@ the message arrived from the network. The end time will be the time the response
 The existing label `virtualCluster` will be deprecated.  A new label `virtual_cluster` will be added.  It will carry
 the virtual cluster's name.
 
-#### Use `kroxylicious_downstream_errors` use to record other downstream errors
+### Use `kroxylicious_downstream_errors` use to record other downstream errors
 
 Issues should as downstream TLS negotiating errors or failure to resolve virtual cluster result in the connection being
 closed, however, there is no metric counting those errors. `kroxylicious_downstream_connections_attempts` and
 `kroxylicious_downstream_errors` should be incremented for these case too.  `virtual_cluster` and `node_id` won't be known
 so these labels should be omitted.
+
+### No Distribution/Histogram Buckets
+
+Publication of a histograms is out of scope for this proposal.  This means that the distribution metrics will
+emit `_sum`, `_count` and `_max` metrics from the Prometheus endpoint.  This is sufficient information to allow trends
+to be observed and things like spikes will be apparent.  The user won't be able to use PromQL functions such as
+[histogram_quantile](https://prometheus.io/docs/prometheus/latest/querying/functions/#histogram_quantile).
+
+Future work will be required to allow the user to configure for which metrics histogram buckets should be gathered
+and what the bucket sizes should be.  This needs to be done in a way to avoid problematic number of metrics.
 
 ## Compatibility
 
@@ -180,6 +238,25 @@ being removed i.e. the project's normal deprecation practices will be followed.
 * Have a metric to time the passage of each message through each filter.  I think a courser grained metric `process time`
   should be good enough.  If the user needs more details, I think that would become a use-case for tracing.
 
-## Implementation Plan
+## Implementation Schedule
 
-TBD.
+### Essential
+
+Things we'll probably want in 0.13.0.
+
+* Implement `kroxylicious_(down|up)stream_kafka_message_(total|size_bytes)` but omit the `originating_filter` label.
+* Implement `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors` changes
+* Deprecate the indicated metrics
+* Documentation for metrics
+
+I think we can defer `originating_filter` because we don't yet ship filters that rely on `#sendRequest` API.
+
+### Highly Desirable
+
+* Implement `kroxylicious_message_process_time` but omit `originating_filter`
+* Implement `kroxylicious_(down|up)stream_backpressure_(state|time)`
+
+### Deferred until Later
+
+* Ability to selectively enable histograms and configure buckets
+* Implement the `originating_filter` label
