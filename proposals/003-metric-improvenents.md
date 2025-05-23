@@ -65,6 +65,7 @@ Currently, the proxy emits the following metrics:
 * The metrics endpoint populates `HELP` for each metric, but this is populated with nothing more than the metric's name.
   We ought to be giving a clear description of the metric.
 * Some of the label names don't follow Prometheus naming conventions.  Prometheus recommends snake case whereas we have used camel case in some cases.
+* Some of the metrics names aren't too clear.  For instance, the word payload has defined meaning in the [Kafka Protocol Guide](https://kafka.apache.org/protocol).
 
 ## Use Cases
 
@@ -96,9 +97,9 @@ The following metrics will be added.  They will each be described in more detail
 | kroxylicious_downstream_kafka_message_size_bytes | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version  opaque                      | Records the message size of every message coming from/response going to the downstream. |
 | kroxylicious_upstream_kafka_message_size_bytes   | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the message size of every message coming from/response going to the upstream.   |
 | kroxylicious_message_process_time                | Distribution | virtual_cluster, node_id†, flowing, api_key, api_version, opaque, originating_filter† | Records the time taken for the message to traverse the proxy                            |
-| kroxylicious_downstream_backpressure_state       | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state from the downstream                                      |
+| kroxylicious_downstream_backpressure_state       | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state being applied to the downstream                          |
 | kroxylicious_downstream_backpressure_time        | Distribution | virtual_cluster, node_id†                                                             | Records the time that reading from the downstream has been paused owing to backpressure |
-| kroxylicious_upstream_backpressure_state         | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state from the upstream                                        |
+| kroxylicious_upstream_backpressure_state         | Gauge        | virtual_cluster, node_id†                                                             | Records the backpressure state being applied to the upstream                            |
 | kroxylicious_upstream_backpressure_time          | Distribution | virtual_cluster, node_id†                                                             | Records the time that reading from the upstream has been paused owing to backpressure   |
 
 The following metrics wil have changes to their labels.
@@ -190,7 +191,7 @@ the message arrived from the network. The end time will be the time the response
 ### New gauges `kroxylicious_(up|down)stream_backpressure_state`
 
 Reports the backpressure state for upstream and downstream.  The use-case for metric is to allow the user to
-understand when the proxy must pause reading owing whilst asynchronous work completes (for example, in record validation
+understand when the proxy must pause reading whilst asynchronous work completes (for example, in record validation
 requesting a schema or in record encryption, generating a new DEK).
 
 This gauge will use values `0` and `1` only.  `1` will signify that the proxy has stopped reading the channel whilst
@@ -210,7 +211,7 @@ the virtual cluster's name.
 
 ### Use `kroxylicious_downstream_errors` use to record other downstream errors
 
-Issues should as downstream TLS negotiating errors or failure to resolve virtual cluster result in the connection being
+Issues such as downstream TLS negotiating errors or failure to resolve virtual cluster result in the connection being
 closed, however, there is no metric counting those errors. `kroxylicious_downstream_connections_attempts` and
 `kroxylicious_downstream_errors` should be incremented for these case too.  `virtual_cluster` and `node_id` won't be known
 so these labels should be omitted.
