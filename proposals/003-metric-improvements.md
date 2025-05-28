@@ -20,8 +20,8 @@ The document aims to:
     * [Summary](#summary)
     * [New counters `kroxylicious_<A>_to_<B>_request_total` and `kroxylicious_<A>_to_<B>_response_total`](#new-counters-kroxyliciousatobrequesttotal-and-kroxyliciousatobresponsetotal)
     * [New distributions `kroxylicious_<A>_to_<B>_request_size_bytes` and `kroxylicious_<A>_to_<B>_response_size_bytes`](#new-distributions-kroxyliciousatobrequestsizebytes-and-kroxyliciousatobresponsesizebytes)
-    * [New distributions `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time`](#new-distributions-kroxyliciousclienttobrokerrequesttransittime-and-kroxyliciousbrokertoclientresponsetransittime)
-    * [New distributions `kroxylicious_filter_to_broker_request_transit_time` and `kroxylicious_broker_to_filter_response_transit_time`](#new-distributions-kroxyliciousfiltertobrokerrequesttransittime-and-kroxyliciousbrokertofilterresponsetransittime)
+    * [New distributions `kroxylicious_client_to_server_request_transit_time` and `kroxylicious_server_to_client_response_transit_time`](#new-distributions-kroxyliciousclienttoserverrequesttransittime-and-kroxyliciousservertoclientresponsetransittime)
+    * [New distributions `kroxylicious_filter_to_server_request_transit_time` and `kroxylicious_server_to_filter_response_transit_time`](#new-distributions-kroxyliciousfiltertoserverrequesttransittime-and-kroxyliciousservertofilterresponsetransittime)
     * [Use `kroxylicious_downstream_errors` use to record other downstream errors](#use-kroxyliciousdownstreamerrors-use-to-record-other-downstream-errors)
     * [Out of scope](#out-of-scope)
       * [Distribution/Histogram Buckets](#distributionhistogram-buckets)
@@ -61,7 +61,7 @@ Currently, the proxy emits the following metrics:
   hard to use this metric to understand something about produce requests or fetch responses.
 * *1 / *2 - we have contradictory meanings for the `flowing` label.  in *2, requests flow `UPSTREAM`, responses flow `DOWNSTREAM`.
   In *1 requests flow `DOWNSTREAM` which makes no sense.
-* *3 - downstream errors does not record account for errors such as TLS negotiation errors or failures to determine virtual cluster or broker.  
+* *3 - downstream errors does not record account for errors such as TLS negotiation errors or failures to determine virtual cluster or broker node.  
 
 ### General short-comings/weaknesses
 
@@ -95,7 +95,8 @@ performance and other issues that might result from filter behaviour. Specifical
 
 * filters have the ability to change the size of the RPCs as they traverse the proxy (record encryption)
 * filters have the ability to change the flow of messages within the Kafka system. Specifically, they can short-circuit
-  requests by producing their own responses (the broker never sees the request) and introduce their own requests.
+  requests by producing their own responses (the server never sees the request), drop connections, and introduce their
+  own requests.
 * filters can perform asynchronous work.  When asynchronous work occurs, the proxy stops reading the downstream or upstream.
 
 ## Proposal
@@ -107,26 +108,26 @@ The following metrics will be added.  They will each be described in more detail
 | Metric                                              | Type         | Labels                                                      | Description                                                                                                                        |
 |-----------------------------------------------------|--------------|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
 | kroxylicious_client_to_proxy_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** arrives at the proxy from the downstream (client).                                     |
-| kroxylicious_proxy_to_broker_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request**† goes from the proxy to the upstream (broker).                                         |
-| kroxylicious_broker_to_proxy_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response**† arrives at the proxy from the upstream (broker).                                     |
+| kroxylicious_proxy_to_server_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request**† goes from the proxy to the upstream (server}.                                         |
+| kroxylicious_server_to_proxy_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response**† arrives at the proxy from the upstream (server}.                                     |
 | kroxylicious_proxy_to_client_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** goes from the proxy to the downstream (client).                                       |
 |                                                     |              |                                                             |                                                                                                                                    |
 | kroxylicious_client_to_proxy_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** arriving from the downstream (client).                                               |
-| kroxylicious_proxy_to_broker_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request**† leaving for the upstream (broker).                                                  |
-| kroxylicious_broker_to_proxy_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response**† arriving from the upstream (broker).                                               |
+| kroxylicious_proxy_to_server_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request**† leaving for the upstream (server}.                                                  |
+| kroxylicious_server_to_proxy_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response**† arriving from the upstream (server}.                                               |
 | kroxylicious_proxy_to_client_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** leaving for the downstream (client).                                                |
 |                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_client_to_broker_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **request** to transit the proxy                                                                   |
-| kroxylicious_client_to_broker_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **response** to transit the proxy                                                                  |
+| kroxylicious_client_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **request** to transit the proxy                                                                   |
+| kroxylicious_client_to_server_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **response** to transit the proxy                                                                  |
 |                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_broker_request_total         | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **filter-initiated request** goes from the proxy to the upstream (broker).                         |
-| kroxylicious_broker_to_filter_response_total        | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **response** for a **filter-initiated request** arrives at the proxy from the upstream (broker).   |
+| kroxylicious_filter_to_server_request_total         | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **filter-initiated request** goes from the proxy to the upstream (server}.                         |
+| kroxylicious_server_to_filter_response_total        | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}.   |
 |                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_broker_request_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **filter-initiated request** goes from the proxy to the upstream (broker).                       |
-| kroxylicious_broker_to_filter_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (broker). |
+| kroxylicious_filter_to_server_request_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **filter-initiated request** goes from the proxy to the upstream (server}.                       |
+| kroxylicious_server_to_filter_response_size_bytes   | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}. |
 |                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_broker_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
-| kroxylicious_client_to_broker_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
+| kroxylicious_filter_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
+| kroxylicious_client_to_server_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
 
 
 The following metrics will have changes to their labels.
@@ -159,7 +160,7 @@ The following metrics will be deprecated.
 
 † Requests generated by Filter API's `sendRequest`, and their responses, are not accounted for by these metric
 
-‡ This happens only in the case of connection to gateways using "SNI identifies broker" where the connection fails TLS negotiation or the SNI name is unrecognised.
+‡ This happens only in the case of connection to gateways using "SNI Identifies Node" where the connection fails TLS negotiation or the SNI name is unrecognised.
 
 ### New counters `kroxylicious_<A>_to_<B>_request_total` and `kroxylicious_<A>_to_<B>_response_total`
 
@@ -169,11 +170,11 @@ Use cases that were previously served by the deprecated metrics `kroxylicious_in
 `kroxylicious_inbound_downstream_decoded_messages` can now use these metric instead.
 
 In the case where a filter **short-circuits** a request and provides its own response, `client_to_proxy_request_total` will tick
-but `kroxylicious_proxy_to_broker_request_total` will not.
+but `kroxylicious_proxy_to_server_request_total` will not.
 
-The `kroxylicious_filter_to_broker_request_total` and `kroxylicious_broker_to_filter_response_total` are used exclusively
-for `FilerContext#sendRequest` interactions.  The `kroxylicious_proxy_to_broker_request_total` and
-`kroxylicious_broker_to_proxy_response_total` do not tick for these use-cases.
+The `kroxylicious_filter_to_server_request_total` and `kroxylicious_server_to_filter_response_total` are used exclusively
+for `FilerContext#sendRequest` interactions.  The `kroxylicious_proxy_to_server_request_total` and
+`kroxylicious_server_to_proxy_response_total` do not tick for these use-cases.
 
 ### New distributions `kroxylicious_<A>_to_<B>_request_size_bytes` and `kroxylicious_<A>_to_<B>_response_size_bytes`
 
@@ -184,11 +185,11 @@ instead. The new metric records the size of both **opaque** and **decoded** mess
 number of bytes traversing the proxy.
 
 In the case where a filter causes a request (or response) to expand, this will be evident from the metrics. `kroxylicious_client_to_proxy_request_size_bytes`
-will record the size when the request arrived and `kroxylicious_proxy_to_broker_request_size_bytes` will record its new
+will record the size when the request arrived and `kroxylicious_proxy_to_server_request_size_bytes` will record its new
 encoded size as it leaves.  The same thing will happen from responses.   This will allow the effect of adding filters
 such as the Record Encryption (where produce request sizes will change) to be understood.
 
-### New distributions `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time`
+### New distributions `kroxylicious_client_to_server_request_transit_time` and `kroxylicious_server_to_client_response_transit_time`
 
 These metric records the length of time a message (request or response) has taken to transit the proxy.
 
@@ -198,9 +199,9 @@ These metric records the length of time a message (request or response) has take
 The use cases supported by this metric are ones where you are interested in how much processing time it being incurred 
 by the proxy decoding and encoding messages and any processing time incurred by the filter chain.
 
-### New distributions `kroxylicious_filter_to_broker_request_transit_time` and `kroxylicious_broker_to_filter_response_transit_time`
+### New distributions `kroxylicious_filter_to_server_request_transit_time` and `kroxylicious_server_to_filter_response_transit_time`
 
-These metrics work like `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time`
+These metrics work like `kroxylicious_client_to_server_request_transit_time` and `kroxylicious_server_to_client_response_transit_time`
 but concerns filter-initiated requests and their responses.
 
 For filter-initiated requests, the start time for a request will be time filter called `#sendRequest`. The end time
@@ -249,7 +250,7 @@ subject of a future proposal.
 ### Specific metric for short circuit responses
 
 With this proposal, in the case where a request filter _short circuits_ a request and reproduces its own response, the
-`kroxylicious_client_to_proxy_request_total` value will exceed the `kroxylicious_proxy_to_broker_request_total`
+`kroxylicious_client_to_proxy_request_total` value will exceed the `kroxylicious_proxy_to_server_request_total`
 but this is quite subtle.
 
 We think there is merit in a separate metric that ticks in this case.  Filter can emit their own metric, but it
@@ -298,10 +299,10 @@ I think we can defer the filter metrics because we don't yet ship filters that r
 
 ### Highly Desirable
 
-* Implement `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time`
+* Implement `kroxylicious_client_to_server_request_transit_time` and `kroxylicious_server_to_client_response_transit_time`
 
 ### Deferred until Later
 
 * Ability to selectively enable histograms and configure buckets
-* Implement `kroxylicious_filter_to_broker_request_(total|size_bytes)`
-* Implement `kroxylicious_broker_to_filter_response_(total|size_bytes)`
+* Implement `kroxylicious_filter_to_server_request_(total|size_bytes)`
+* Implement `kroxylicious_server_to_filter_response_(total|size_bytes)`
