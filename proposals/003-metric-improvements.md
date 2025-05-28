@@ -231,6 +231,25 @@ the downstream whilst a new DEK is created.
 We don't yet know exactly how this metric should look, so we choose to defer working on it for now. This will be
 subject of a future proposal.
 
+### Specific metric for short circuit responses
+
+With this proposal, in the case where a request filter _short circuits_ a request and reproduces its own response, the
+`kroxylicious_client_to_proxy_request_total` value will exceed the `kroxylicious_proxy_to_broker_request_total`
+but this is quite subtle.
+
+We think there is merit in a separate metric that ticks in this case.  Filter can emit their own metric, but it
+might be good to have a metric built in.  This might be subject of a future proposal.  The proposal will need to 
+think about how the `transit_time` metrics behave in this case.
+
+### Specific metric for filters that drop connections or suffer an exception
+
+Filters can cause a connection to drop (`io.kroxylicious.proxy.filter.FilterResultBuilder#drop`) or a filter's
+processing thrown an exception, leading to a connection being closed.
+
+Filter can be coded to emit their own metrics in these scenarios, but it might be good to have a metrics built in. 
+This might be subject of a future proposal. The proposal will need to think about how the `transit_time` metrics behave
+in these cases.
+
 ## Compatibility
 
 This proposal deprecates several metrics and the `virtualCluster` label.  These will be retained for several release before
