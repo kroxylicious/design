@@ -108,13 +108,13 @@ The following metrics will be added.  They will each be described in more detail
 | kroxylicious_broker_to_filter_response_total        | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **response** for a **filter-initiated request** arrives at the proxy from the upstream (broker).   |
 |                                                     |              |                                                             |                                                                                                                                    |
 | kroxylicious_filter_to_broker_request_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **filter-initiated request** goes from the proxy to the upstream (broker).                       |
-| kroxylicious_broker_to_fiter_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (broker). |
+| kroxylicious_broker_to_filter_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (broker). |
 |                                                     |              |                                                             |                                                                                                                                    |
 | kroxylicious_filter_to_broker_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
 | kroxylicious_client_to_broker_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
 
 
-The following metrics wil have changes to their labels.
+The following metrics will have changes to their labels.
 
 | Metric                                    | Type    | Labels                   | Deprecated Labels | Description                                                                         |
 |-------------------------------------------|---------|--------------------------|-------------------|-------------------------------------------------------------------------------------|
@@ -168,7 +168,7 @@ Use cases that were previously served by the deprecated metric `kroxylicious_pay
 instead. The new metric records the size of both **opaque** and **decoded** messages allowing the user to understand the
 number of bytes traversing the proxy.
 
-In the case where a filter causes a request (or request) to expand, this will be evident from the metrics. `kroxylicious_client_to_proxy_request_size_bytes`
+In the case where a filter causes a request (or response) to expand, this will be evident from the metrics. `kroxylicious_client_to_proxy_request_size_bytes`
 will record the size when the request arrived and `kroxylicious_proxy_to_broker_request_size_bytes` will record its new
 encoded size as it leaves.  The same thing will happen from responses.   This will allow the effect of adding filters
 such as the Record Encryption (where produce request sizes will change) to be understood.
@@ -181,7 +181,7 @@ These metric records the length of time a message (request or response) has take
 * The end time will be the time that the network write at the proxy's opposite end completes (i.e. the Netty write promise completes)
 
 The use cases supported by this metric are ones where you are interested in how much processing time it being incurred 
-by the proxy decoding and encoding messages and any processing time incurred by the filter.
+by the proxy decoding and encoding messages and any processing time incurred by the filter chain.
 
 ### New distributions `kroxylicious_filter_to_broker_request_transit_time` and `kroxylicious_broker_to_filter_response_transit_time`
 
@@ -260,7 +260,7 @@ I think we can defer the filter metrics because we don't yet ship filters that r
 
 ### Highly Desirable
 
-* Implement `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time
+* Implement `kroxylicious_client_to_broker_request_transit_time` and `kroxylicious_broker_to_client_response_transit_time`
 
 ### Deferred until Later
 
