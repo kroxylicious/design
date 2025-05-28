@@ -14,6 +14,7 @@ The document aims to:
   * [Current situation](#current-situation)
     * [Specific short-comings/weaknesses](#specific-short-comingsweaknesses)
     * [General short-comings/weaknesses](#general-short-comingsweaknesses)
+    * [Filter specific metrics](#filter-specific-metrics)
   * [Use Cases](#use-cases)
   * [Proposal](#proposal)
     * [Summary](#summary)
@@ -26,6 +27,9 @@ The document aims to:
       * [Distribution/Histogram Buckets](#distributionhistogram-buckets)
     * [TCP/IP Back pressure metrics](#tcpip-back-pressure-metrics)
     * [Auto-read toggle state metrics](#auto-read-toggle-state-metrics)
+    * [Specific metric for short circuit responses](#specific-metric-for-short-circuit-responses)
+    * [Specific metric for filters that drop connections or suffer an exception](#specific-metric-for-filters-that-drop-connections-or-suffer-an-exception)
+    * [Dedicated API for Filter specific metrics](#dedicated-api-for-filter-specific-metrics)
   * [Compatibility](#compatibility)
   * [Rejected alternatives](#rejected-alternatives)
   * [Implementation Schedule](#implementation-schedule)
@@ -65,6 +69,17 @@ Currently, the proxy emits the following metrics:
   We ought to be giving a clear description of the metric.
 * Some of the label names don't follow Prometheus naming conventions.  Prometheus recommends snake case whereas we have used camel case in some cases.
 * Some of the metrics names aren't too clear.  For instance, the word payload has no defined meaning in the [Kafka Protocol Guide](https://kafka.apache.org/protocol).
+
+### Filter specific metrics
+
+As shown by `io.kroxylicious.sample.SampleProduceRequestFilter#SampleProduceRequestFilter` it is possible for filters
+to emit their own metrics by making direct use of the Mircometer APIs.  Filters that need their own metrics will probably
+be a common use-case.
+
+It is questionable whether giving the giving filters free-reign to use Mircometer API directly is supportable
+in the long term.  Mircometer should probably be an internal concern of the Proxy.
+
+Also, there is nothing that that prevents two filters emitting metrics with colliding names.
 
 ## Use Cases
 
@@ -249,6 +264,10 @@ processing thrown an exception, leading to a connection being closed.
 Filter can be coded to emit their own metrics in these scenarios, but it might be good to have a metrics built in. 
 This might be subject of a future proposal. The proposal will need to think about how the `transit_time` metrics behave
 in these cases.
+
+### Dedicated API for Filter specific metrics
+
+There will subject to a separate proposal.
 
 ## Compatibility
 
