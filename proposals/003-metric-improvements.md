@@ -64,7 +64,7 @@ Currently, the proxy emits the following metrics:
 * The metrics endpoint populates `HELP` for each metric, but this is populated with nothing more than the metric's name.
   We ought to be giving a clear description of the metric.
 * Some of the label names don't follow Prometheus naming conventions.  Prometheus recommends snake case whereas we have used camel case in some cases.
-* Some of the metrics names aren't too clear.  For instance, the word payload has defined meaning in the [Kafka Protocol Guide](https://kafka.apache.org/protocol).
+* Some of the metrics names aren't too clear.  For instance, the word payload has no defined meaning in the [Kafka Protocol Guide](https://kafka.apache.org/protocol).
 
 ## Use Cases
 
