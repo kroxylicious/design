@@ -196,8 +196,9 @@ such as the Record Encryption (where produce request sizes will change) to be un
 
 These metric records the length of time a message (request or response) has taken to transit the proxy.
 
-* The start time will be time the bytes containing the message arrived from the network (in the Netty handler, before any decoding).
+* The start time will be time the proxy starts to handle the message
 * The end time will be the time that the network write at the proxy's opposite end completes (i.e. the Netty write promise completes)
+* If the message is decoded, the transit time must include the time taken to decode and any re-encoding of the message. 
 
 The use cases supported by this metric are ones where you are interested in how much processing time it being incurred 
 by the proxy decoding and encoding messages and any processing time incurred by the filter chain.
