@@ -108,13 +108,13 @@ The following metrics will be added.  They will each be described in more detail
 | Metric                                              | Type         | Labels                                                      | Description                                                                                                                        |
 |-----------------------------------------------------|--------------|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
 | kroxylicious_client_to_proxy_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** arrives at the proxy from the downstream (client).                                     |
-| kroxylicious_proxy_to_server_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request**† goes from the proxy to the upstream (server}.                                         |
-| kroxylicious_server_to_proxy_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response**† arrives at the proxy from the upstream (server}.                                     |
+| kroxylicious_proxy_to_server_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** (#1) goes from the proxy to the upstream (server}.                                     |
+| kroxylicious_server_to_proxy_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** (#1) arrives at the proxy from the upstream (server}.                                 |
 | kroxylicious_proxy_to_client_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** goes from the proxy to the downstream (client).                                       |
 |                                                     |              |                                                             |                                                                                                                                    |
 | kroxylicious_client_to_proxy_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** arriving from the downstream (client).                                               |
-| kroxylicious_proxy_to_server_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request**† leaving for the upstream (server}.                                                  |
-| kroxylicious_server_to_proxy_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response**† arriving from the upstream (server}.                                               |
+| kroxylicious_proxy_to_server_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** (#1) leaving for the upstream (server}.                                              |
+| kroxylicious_server_to_proxy_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** (#1) arriving from the upstream (server}.                                           |
 | kroxylicious_proxy_to_client_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** leaving for the downstream (client).                                                |
 |                                                     |              |                                                             |                                                                                                                                    |
 | kroxylicious_client_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **request** to transit the proxy                                                                   |
@@ -129,26 +129,31 @@ The following metrics will be added.  They will each be described in more detail
 | kroxylicious_filter_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
 | kroxylicious_client_to_server_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
 
+**#1** - Requests generated by Filter API's `sendRequest`, and their responses, are not accounted for by these metric
 
 The following metrics will have changes to their labels.
 
-| Metric                                    | Type    | Labels                   | Deprecated Labels | Description                                                                         |
-|-------------------------------------------|---------|--------------------------|-------------------|-------------------------------------------------------------------------------------|
-| kroxylicious_downstream_connections_total | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a request comes from/response goes to the downstream. |
-| kroxylicious_downstream_error_total       | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a request goes to/response comes from the upstream.   |
-| kroxylicious_upstream_connections_total   | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a request comes from/response goes to the downstream. |
-| kroxylicious_upstream_error_total         | Counter | virtual_cluster, node_id | virtualCluster    | Records the time taken for the message to traverse the proxy                        |
+| Metric                                    | Type    | Labels                   | Deprecated Labels | Description                                                                           |
+|-------------------------------------------|---------|--------------------------|-------------------|---------------------------------------------------------------------------------------|
+| kroxylicious_downstream_connections_total | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is made from the downstream the proxy. #2  |
+| kroxylicious_downstream_error_total       | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is closed due to downstream error.         |
+| kroxylicious_upstream_connections_total   | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is made to the upstream from the proxy. #2 |
+| kroxylicious_upstream_error_total         | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is closed due to upstream error.           |
+
+**#2** Note - In the case where the connection attempt fails early (TLS error etc), this metric is still incremented.
 
 The labels are defined as follows:
 
-| Label           | Definition                                                                                                                                                                |
-|-----------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| virtual_cluster | Name of virtual cluster.  Label omitted if the virtual cluster has not been established‡.                                                                                 |
-| node_id         | Numeric node_id of the broker being communicated with. the value `bootstrap` is used for bootstrapping interactions. Label omitted if the node has not been established‡. |
-| api_key         | API key of the kafka message e.g. PRODUCE                                                                                                                                 |                                                                                                                                               |
-| api_version     | Numeric API version of the message.                                                                                                                                       |                                                                                                                                               |
-| decoded         | Flag indicating if the proxy decoded the message or not (1 = decoded, 0 = not decoded)                                                                                    |                                                                                                                                               |
-| filter_name     | Name of the filter that initiated the request                                                                                                                             |                                                                                                                                               |
+| Label           | Definition                                                                                                                                                                  |
+|-----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| virtual_cluster | Name of virtual cluster.  Label omitted if the virtual cluster has not been established‡.                                                                                   |
+| node_id         | Numeric node_id of the broker being communicated with. the value `bootstrap` is used for bootstrapping interactions. Label omitted if the node has not been established #3. |
+| api_key         | API key of the kafka message e.g. PRODUCE                                                                                                                                   |                                                                                                                                               |
+| api_version     | Numeric API version of the message.                                                                                                                                         |                                                                                                                                               |
+| decoded         | Flag indicating if the proxy decoded the message or not (1 = decoded, 0 = not decoded)                                                                                      |                                                                                                                                               |
+| filter_name     | Name of the filter that initiated the request                                                                                                                               |                                                                                                                                               |
+
+**#3** This happens only in the case of connection to gateways using "SNI Identifies Node" where the connection fails TLS negotiation or the SNI name is unrecognised.
 
 The following metrics will be deprecated.
 
@@ -158,9 +163,7 @@ The following metrics will be deprecated.
 | kroxylicious_inbound_downstream_decoded_messages |
 | kroxylicious_payload_size_bytes                  |
 
-† Requests generated by Filter API's `sendRequest`, and their responses, are not accounted for by these metric
 
-‡ This happens only in the case of connection to gateways using "SNI Identifies Node" where the connection fails TLS negotiation or the SNI name is unrecognised.
 
 ### New counters `kroxylicious_<A>_to_<B>_request_total` and `kroxylicious_<A>_to_<B>_response_total`
 
