@@ -44,13 +44,15 @@ Currently, the proxy emits the following metrics:
 
 | Metric                                           | Type         | Labels                                      | Description                                                                                                         |
 |--------------------------------------------------|--------------|---------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
-| kroxylicious_inbound_downstream_messages         | Counter      | flowing, virtualCluster                     | Incremented by one every time every inbound RPC arriving _from the downstream only_. (*1)                           |
+| kroxylicious_inbound_downstream_message          | Counter      | flowing, virtualCluster                     | Incremented by one every time every inbound RPC arriving _from the downstream only_. (*1)                           |
 | kroxylicious_inbound_downstream_decoded_messages | Counter      | flowing, virtualCluster                     | Incremented by one every time every inbound RPC arriving _from the downstream that the proxy needs to decode_. (*1) |
 | kroxylicious_payload_size_bytes                  | Distribution | flowing, virtualCluster, ApiKey, ApiVersion | Incremented with RPC's frame size for every _decoded_ RPC from either the _downstream or upstream_. (*2)            |
-| kroxylicious_downstream_connections              | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection arrives from the downstream                                               |
-| kroxylicious_downstream_errors                   | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection fails owning to a downstream error (dropped connection) (*3)              |
-| kroxylicious_upstream_connections_attempts       | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection attempt to made to the upstream.                                          |
-| kroxylicious_upstream_errors                     | Counter      | flowing, virtualCluster                     | Incremented by one each time a connection attempt fails owning to a upstream error (tls negotiation etc)            |
+| kroxylicious_downstream_connections              | Counter      | virtualCluster                              | Incremented by one each time a connection arrives from the downstream                                               |
+| kroxylicious_downstream_errors                   | Counter      | virtualCluster                              | Incremented by one each time a connection fails owning to a downstream error (dropped connection) (*3)              |
+| kroxylicious_upstream_connections                | Counter      | virtualCluster                              | Incremented by one each time a connection is established to the upstream and the proxy is ready to forward data.    |
+| kroxylicious_upstream_connection_attempts        | Counter      | virtualCluster                              | Incremented by one each time a connection attempt to made to the upstream.                                          |
+| kroxylicious_upstream_connection_failures        | Counter      | virtualCluster                              | Incremented by one each time a connection attempt terminates exceptionally.                                         |
+| kroxylicious_upstream_errors                     | Counter      | virtualCluster                              | Incremented by one each time an upstream connection terminates exceptionally, whether it's connecting or not        |
 
 ### Specific short-comings/weaknesses
 
