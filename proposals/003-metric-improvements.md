@@ -107,42 +107,39 @@ performance and other issues that might result from filter behaviour. Specifical
 
 The following metrics will be added.  They will each be described in more detail later in this section.
 
-| Metric                                              | Type         | Labels                                                      | Description                                                                                                                        |
-|-----------------------------------------------------|--------------|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| kroxylicious_client_to_proxy_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** arrives at the proxy from the downstream (client).                                     |
-| kroxylicious_proxy_to_server_request_total          | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** (#1) goes from the proxy to the upstream (server}.                                     |
-| kroxylicious_server_to_proxy_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** (#1) arrives at the proxy from the upstream (server}.                                 |
-| kroxylicious_proxy_to_client_response_total         | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** goes from the proxy to the downstream (client).                                       |
-|                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_client_to_proxy_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** arriving from the downstream (client).                                               |
-| kroxylicious_proxy_to_server_request_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** (#1) leaving for the upstream (server}.                                              |
-| kroxylicious_server_to_proxy_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** (#1) arriving from the upstream (server}.                                           |
-| kroxylicious_proxy_to_client_response_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** leaving for the downstream (client).                                                |
-|                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_client_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **request** to transit the proxy                                                                   |
-| kroxylicious_client_to_server_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **response** to transit the proxy                                                                  |
-|                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_server_request_total         | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **filter-initiated request** goes from the proxy to the upstream (server}.                         |
-| kroxylicious_server_to_filter_response_total        | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}.   |
-|                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_server_request_size_bytes    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **filter-initiated request** goes from the proxy to the upstream (server}.                       |
-| kroxylicious_server_to_filter_response_size_bytes   | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}. |
-|                                                     |              |                                                             |                                                                                                                                    |
-| kroxylicious_filter_to_server_request_transit_time  | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
-| kroxylicious_client_to_server_response_transit_time | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
+| Metric                                                | Type         | Labels                                                      | Description                                                                                                                        |
+|-------------------------------------------------------|--------------|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| kroxylicious_client_to_proxy_request_total            | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** arrives at the proxy from the downstream (client).                                     |
+| kroxylicious_proxy_to_server_request_total            | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **request** (#1) goes from the proxy to the upstream (server}.                                     |
+| kroxylicious_server_to_proxy_response_total           | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** (#1) arrives at the proxy from the upstream (server}.                                 |
+| kroxylicious_proxy_to_client_response_total           | Counter      | virtual_cluster, node_id, api_key, api_version, decoded     | Incremented by one every time a **response** goes from the proxy to the downstream (client).                                       |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_client_to_proxy_request_size_bytes       | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** arriving from the downstream (client).                                               |
+| kroxylicious_proxy_to_server_request_size_bytes       | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **request** (#1) leaving for the upstream (server}.                                              |
+| kroxylicious_server_to_proxy_response_size_bytes      | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** (#1) arriving from the upstream (server}.                                           |
+| kroxylicious_proxy_to_client_response_size_bytes      | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the message size of every **response** leaving for the downstream (client).                                                |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_client_to_server_request_transit_time    | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **request** to transit the proxy                                                                   |
+| kroxylicious_client_to_server_response_transit_time   | Distribution | virtual_cluster, node_id, api_key, api_version, decoded     | Records the time taken for each **response** to transit the proxy                                                                  |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_filter_to_server_request_total           | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **filter-initiated request** goes from the proxy to the upstream (server}.                         |
+| kroxylicious_server_to_filter_response_total          | Counter      | virtual_cluster, node_id, api_key, api_version, filter_name | Incremented by one every time a **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}.   |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_filter_to_server_request_size_bytes      | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **filter-initiated request** goes from the proxy to the upstream (server}.                       |
+| kroxylicious_server_to_filter_response_size_bytes     | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the message size of every **response** for a **filter-initiated request** arrives at the proxy from the upstream (server}. |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_filter_to_server_request_transit_time    | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **filter-initiated request** to transit the proxy                                                  |
+| kroxylicious_client_to_server_response_transit_time   | Distribution | virtual_cluster, node_id, api_key, api_version, filter_name | Records the time taken for each **response** for a **filter-initiated request** to transit the proxy                               |
+|                                                       |              |                                                             |                                                                                                                                    |
+| kroxylicious_client_to_proxy_connection_total         | Counter      | virtual_cluster, node_id                                    | Incremented by one every time a connection is accepted from the downstream the proxy. #2                                           |
+| kroxylicious_client_to_proxy_errors_total             | Counter      | virtual_cluster, node_id                                    | Incremented by one every time a connection is closed due to **any** downstream error. #3                                           |
+| kroxylicious_proxy_to_server_connections_total        | Counter      | virtual_cluster, node_id                                    | Incremented by one every time a connection is made to the upstream from the proxy. #2                                              |
+| kroxylicious_proxy_to_server_errors_total             | Counter      | virtual_cluster, node_id                                    | Incremented by one every time a connection is closed due to **any** upstream error. #3                                             |
+
 
 **#1** - Requests generated by Filter API's `sendRequest`, and their responses, are not accounted for by these metric
-
-The following metrics will have changes to their labels.
-
-| Metric                                    | Type    | Labels                   | Deprecated Labels | Description                                                                           |
-|-------------------------------------------|---------|--------------------------|-------------------|---------------------------------------------------------------------------------------|
-| kroxylicious_downstream_connections_total | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is made from the downstream the proxy. #2  |
-| kroxylicious_downstream_error_total       | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is closed due to downstream error.         |
-| kroxylicious_upstream_connections_total   | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is made to the upstream from the proxy. #2 |
-| kroxylicious_upstream_error_total         | Counter | virtual_cluster, node_id | virtualCluster    | Incremented by one every time a connection is closed due to upstream error.           |
-
-**#2** Note - In the case where the connection attempt fails early (TLS error etc), this metric is still incremented.
+**#2** `kroxylicious_<A>_to_<B>_connection_total` - these metric counts any attempt to accept/make a connection, even those that fail early.
+**#3** `kroxylicious_<A>_to_<B>_errors_total` - these metrics count any error, including connection errors (TLS etc).
 
 The labels are defined as follows:
 
@@ -164,6 +161,12 @@ The following metrics will be deprecated.
 | kroxylicious_inbound_downstream_messages         |
 | kroxylicious_inbound_downstream_decoded_messages |
 | kroxylicious_payload_size_bytes                  |
+| kroxylicious_downstream_connections              |
+| kroxylicious_downstream_errors                   |
+| kroxylicious_upstream_connections                |
+| kroxylicious_upstream_connection_attempts        |
+| kroxylicious_upstream_connection_failures        |
+| kroxylicious_upstream_errors_total               |
 
 
 
@@ -297,7 +300,7 @@ Things we'll probably want in 0.13.0.
 
 * Implement `kroxylicious_<A>_to_<B>_request_total` and `kroxylicious_<A>_to_<B>_response_total` (excluding the case where A or B is `filter`)
 * Implement `kroxylicious_<A>_to_<B>_request_size_bytes` and `kroxylicious_<A>_to_<B>_response_size_bytes` (excluding the case where A or B is `filter`)
-* Implement `kroxylicious_(down|up)stream_connections_attempts` and `kroxylicious_(down|up)stream_errors` changes
+* Implement `kroxylicious_<A>_to_<B>_connection_total` and `kroxylicious_<A>_to_<B>_errors_total`
 * Deprecate the indicated metrics
 * Documentation for metrics
 
