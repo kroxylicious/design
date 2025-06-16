@@ -139,9 +139,10 @@ It may involve multiple outgoing requests to one or more clusters or routers.
 Validation performed at proxy startup will reject cyclic graphs.
 This will prevent the possibility of a request getting stuck in a router loop. 
 
-In order for non-trivial router graphs to be useful, `Router` authors will need to follow the same principle of composition as `Filter` authors.
-That is, a `Router` implementation should only talk to its receivers, and not, for example, make direct connections of its own to a backing cluster.
-To do so would prevent use of that router implementation in a larger graph. 
+In order for non-trivial router graphs to be useful, `Router` authors will need to follow the same _principle of composition_ as `Filter` authors.
+That is, a `Router` implementation should only talk to its receivers using the RouterContext API, and not, for example, make their own direct TCP connections to a backing cluster. 
+Doing so would shortcircuit any logic in upstream routers and filters, which could be manipulating broker-side entities like topic names.
+Such shortcircuiting would prevents use of that router implementation in a larger graph. 
 
 The `cluster` propety names a network-reachable backing cluster that speaks the Kafka procotol. It has the same schema as the `targetCluster` property of a virtual cluster.
 
