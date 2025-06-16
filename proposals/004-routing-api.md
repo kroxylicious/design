@@ -21,7 +21,7 @@ Here are some examples:
 * **Union clusters**. 
 Multiple backing Kafka clusters can be presented to clients as a single cluster. 
 Broker-side entities, such as topics, get bijectively mapped (for example using a per-backing cluster prefix) to the
-virtual entites presented to clients. 
+virtual entities presented to clients. 
 `Filters` cannot easily do this because they're always hooked up to a single backing Kafka cluster.
 
 * **Topic splicing**.
@@ -29,7 +29,7 @@ Multiple separate topics in distinct backing clusters are presented to clients a
 Only one backing topic is writable at any given logical time.
 
 * **Principal-aware routing**.
-A natural variation on basic SASL termination is to use the identity of the authenticated client to drive the decision about which backing cluter to route requests to.
+A natural variation on basic SASL termination is to use the identity of the authenticated client to drive the decision about which backing cluster to route requests to.
  
 Kroxylicious is currently unable to address use cases like these.
 
@@ -56,7 +56,7 @@ Routers and backing clusters necessarily handle the whole protocol.
 Each `Router` implementation will support 0 or more named routes.
 The available and required route names will depend on the implementation, which might ascribe different behaviour to different named routes.
 For example a `Router` implementing the 'union cluster' use case might simply use the route names as prefixes for names of the broker-side entities 
-it will expose (such as topics or consumer groups), as as such impose no restriction on the supported route names. 
+it will expose (such as topics or consumer groups), and as such impose no restriction on the supported route names. 
 In contrast, a `Router` implementing the 'topic splicing' use case might require configuration about each of the clusters being used in the splice, which 
 would required the route names to be referenced in the `Router`'s configuration.
 
@@ -134,8 +134,8 @@ Because routers can refer to other routers they form a graph.
                                           ...
 ```
 
-All _possible_ routes through the graph can be determined statically from the proxy configuration, but the routing of any individual incoming request is determined at runtime
-can might involve multiple outgoing requests from any given router.
+All _possible_ routes through the graph can be determined statically from the proxy configuration, but the routing of any individual incoming request is determined at runtime.
+It may involve multiple outgoing requests to one or more clusters or routers.
 Validation performed at proxy startup will reject cyclic graphs.
 This will prevent the possibility of a request getting stuck in a router loop. 
 
