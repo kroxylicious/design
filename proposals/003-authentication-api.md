@@ -78,13 +78,17 @@ package io.kroxylicious.proxy.authentication;
 import javax.security.auth.Subject;
 import javax.security.auth.login.LoginException;
 
-// Allows a plugin to opt-in to being away of client-facing authentication outcomes
+// Allows a plugin to opt-in to being aware of client-facing authentication outcomes
 interface ClientSubjectAware {
     
-    // Called when a client authenticates, or reauthenticates
+    /**
+     * Called when a client authenticates, or reauthenticates, with the proxy.
+     */
     void onClientAuthentication(Subject clientSubject, ClientAuthenticationContext context);
     
-    // Called when a client fails authentication, or reauthentication
+    /**
+     * Called when a client fails authentication, or reauthentication, with the proxy.
+     */
     default void onClientAuthenticationFailure(LoginException exception, ClientAuthenticationContext context) { 
     }
 }
@@ -96,27 +100,16 @@ In the case of client mTLS the runtime will populate the `Subject` with a `X500P
 The `ClientAuthenticationContext` is implemented by the runtime and may be used by the `ClientSubjectAware` implementation to query information available at that point in time.
 
 ```java
-// TODO do we really need this? 
-// In particular, if a pluin implements ClientSubjectAware then it's in a position to mutate the `clientSubject`, 
-// which will be visible to later plugins
-// If the runtime cloned the subject clientAuthenticationSuccessbefore each invocation then each plugin would have its own view
 package io.kroxylicious.proxy.authentication;
 
 public interface ClientAuthenticationContext {
 
-    /**
-     * Forward a successful authentication outcome towards
-     * the broker, invoking upstream filters.
-     * @param subject The subject
+    /** 
+     * The subject that the proxy presented to the client.
+     * This may be null of the authentication mechanism does not support 
+     * mutual authentication.
      */
-    void forwardClientAuthenticationSuccess(Subject clientSubject);
-
-    /**
-     * Forward a failed authentication outcome towards
-     * the broker, invoking upstream filters.
-     * @param e The exception
-     */
-    void forwardClientAuthenticationFailure(LoginException e);
+    Subject proxySubject();
 }
 ```
 
@@ -400,15 +393,34 @@ package io.kroxylicious.proxy.authentication;
 import javax.security.auth.Subject;
 import javax.security.auth.login.LoginException;
 
-// Allows a plugin to opt-in to being away of client-facing authentication outcomes
+// Allows a plugin to opt in to being aware of broker-facing authentication outcomes
 interface ServerSubjectAware {
     
-    // Called when a client authenticates, or reauthenticates
+    /** 
+     * Called when the proxy authenticates, or reauthenticates with a server
+     * The given serverSubject may not have a principal for the server corresponding 
+     * to the authentication mechanism used if that authentication mechanism does not provide
+     * mutual authentication.
+     */
     void onServerAuthentication(Subject serverSubject, ServerAuthenticationContext context);
     
-    // Called when a client fails authentication, or reauthentication
+    /**
+     * Called when the proxy fails authentication, or reauthentication, with a server
+     */
     default void onServerAuthenticationFailure(LoginException exception, ServerAuthenticationContext context) { 
     }
+}
+```
+
+```java
+package io.kroxylicious.proxy.authentication;
+
+public interface ServerAuthenticationContext {
+
+    /** 
+     * The subject that the proxy presented to the server.
+     */
+    Subject proxySubject();
 }
 ```
 
