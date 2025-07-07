@@ -16,15 +16,15 @@ Let's first define terms for TLS:
 * A **TLS server certificate** is a TLS certificate for the server-side of a TLS Handshake. As above, there could be two of these for a given connection through a proxy.
 * When the proxy is configured to use a TLS client certificate when making a TLS connection to a server, we will use the term **server mutual TLS authentication_** ("server mTLS").
 
-Now let's talk about SASL. In the following the word "component" is generalising over filters, other plugins, and the proxy as a whole:
+Now let's talk about SASL. In the following, the word "component" is generalising over filters, other plugins, and a proxy virtual cluster as a whole:
 
 * a component which forwards a client's `SaslAuthenticate` requests to the server, and conveys the responses back to the client, is performing **SASL Passthrough**.
-* SASL Passthrough is one way to for a proxy to be **identity preserving**, which means that a proxy's principal is the same as the broker's principal for all clients connecting through that proxy.
+* SASL Passthrough is one way to for a proxy to be **identity preserving**, which means that, for all client principals in the virtual cluster, each of those principals will have the same name as the corresponding client principal in the broker.
 * a component performing SASL Passthrough and looking at the requests and responses to infer the client's principal is performing **SASL Passthrough Sniffing**. Note that this technique does not work with all SASL mechanisms.
 * a component that responds to a client's `SaslAuthenticate` requests _itself_, without forwarding those requests to the server, is performing **SASL Termination**.
 * a component that injects its own `SaslAuthenticate` requests into a SASL exchange with the server, is performing **SASL Initiation**.
 
-When _all_ the filters/plugins on the path between client and server a performing "SASL passthrough" then the proxy as a whole is performing "SASL passthrough". Alternatively, if any filters/plugins on the path between client and server is performing "SASL Termination", then we might say that the proxy as a whole is performing "SASL Termination".
+When _all_ the filters/plugins on the path between client and server a performing "SASL passthrough" then the virtual cluster as a whole is performing "SASL passthrough". Alternatively, if any filters/plugins on the path between client and server is performing "SASL Termination", then we might say that the virtual cluster as a whole is performing "SASL Termination".
 
 It is possible for a proxy to be perform neither, one, or both, of SASL Termination and SASL Initiation.
 
@@ -339,12 +339,13 @@ public interface FilterFactoryContext {
 }
 ```
 
-It is not proposed to allow dynamic selection of a set of trust anchors. Those should remain under the control of the person configuring the proxy.
+It is not proposed to allow dynamic selection of a set of trust anchors.
+Those should remain under the control of the person configuring the proxy.
 
 
 #### An Example: TLS-to-TLS identity mapping
 
-This shows how a plugin could choose a TLS client certificate for the broker connection based on the connected Kafka client's TLS identity.
+This shows how a plugin could choose a TLS client certificate for the broker connection, based on the connected Kafka client's TLS identity.
 
 ```java
 
