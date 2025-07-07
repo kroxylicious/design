@@ -45,7 +45,7 @@ The `Filter` and `FilterContext` APIs currently don't directly expose any authen
 Specifically:
 
 * If proxy uses client mTLS, then filters don't have access to a `Subject` or `Principal` corresponding to the client's TLS client certificate.
-* If clients are authenticating using SASL the only way a `Filter` can know about that is by intercepting those frames.
+* If clients are authenticating using SASL, the only way a `Filter` can know about that is by intercepting those frames.
     - identity-using filters in the chain must _each_ implement SASL passthrough sniffing. 
     - but this is usually incompatible with use of a filter performing SASL Termination or SASL Initiation.
 
@@ -59,6 +59,7 @@ Goals:
 * Enable plugins to access a client's identity using a single, consistent API, irrespective of which authentication mechanism(s) are being used, TLS or SASL, and whether they're implemented by the proxy runtime (in the TLS case), or a prior plugin in the chain (in the SASL termination case).
 * Don't require a plugin to handle `SaslAuthenticate` unless it is performing SASL termination or initiation.
 * Provide a flexible API to make serving niche use cases possible (though perhaps not simple).
+* Drop support for the "raw" (i.e. not encapsulated within the Kafka protocol) support for SASL, as [Kafka itself has does from Kafka 4.0](https://cwiki.apache.org/confluence/display/KAFKA/KIP-896%3A+Remove+old+client+protocol+API+versions+in+Kafka+4.0)
 
 Non-goals:
 
@@ -265,8 +266,12 @@ public class ExampleSaslTerminatingFilter implements SaslAuthenticateRequestFilt
         CallbackHandler callbackHandler = new PlainServerCallbackHandler();
 
         try {
+            // Note: In general these methods are not guaranteed to be non-blocking, so 
+            // use of ThreadPoolExecutor is recommended unless an implementor knows 
+            // from other means that blocking is impossible.
             LoginContext loginContext = new LoginContext("client_auth_stack", subject, callbackHandler, config);
             loginContext.login();
+            
             // here we propagate the subject along the pipeline
             // using the new clientAuthentication() method which
             // broadcasts the subject to all plugins in the upstream direction
@@ -322,7 +327,7 @@ interface ServerCredentialContext {
 }
 ```
 
-and adding
+and adding the following to allow a filter factory to generate `TlsCredentials` at initialization time so as to take work off the hotter path on which `ServerTlsClientCertificateSupplier.tlsCredentials()` is invoked:
 
 ```java
 
@@ -428,14 +433,14 @@ public interface ServerAuthenticationContext {
 
 There are two mutually exclusive cases to consider for SASL initiation:
 
-1. That a SASL initiator plugin should perform SASL authentication _eagerly_, as soon as the underlying connection is ready. 
+1. That a SASL initiator plugin should perform SASL authentication _eagerly_, as soon as the underlying connection to the server is ready. 
 This would be driven by the runtime following a successful TCP handshake on the client-to-proxy connection, and after `ClientSubjectAware` plugins have initially been called with any `X500Principal`, but before any SASL exchange on the client side.
 2. That the SASL initiator plugin should perform SASL authentication _lazily_, as soon as a KRPC requests propagates along the chain to the initator plugin.
 In this case the `ClientSubjectAware` plugins may have been called with a SASL principal.
 
-Supporting the former case would allow the broker's principal (as obtained by a `ServerSubjectAware` implementing plugin) to be used in the client-facing SASL exchange. This could be relevant for Kafka clients which validated or made use of the authenticate server (in this case proxy) principal. However, we're noy aware of any clients that actually do this, so we won't consider it further.
+Supporting the former case would allow the broker's principal (as obtained by a `ServerSubjectAware` implementing plugin) to be used in the client-facing SASL exchange. This could be relevant for Kafka clients which validated or made use of the authenticate server (in this case proxy) principal. However, we're not aware of any clients that actually do this, so we won't consider it further.
 
-Supporting the latter case allows the proxy's server-faving SASL credentials to depend on the client-facing principal.
+Supporting the latter case allows the proxy's server-facing SASL credentials to depend on the client-facing principal.
 Because of variation in behaviour of client libraries there is not a single type of request which will always be the first. 
 However,the existing `Sasl(Handshake|Authenticate)(Request|Response)Filter` interfaces can be used for the KRPC level implementation.
 Such a filter implementation needs to keep some kind of `seenFirstRequest` state if it wants to use `FilterContent.sendRequest()` to insert its own initial requests prior to forwarding requests from the client.
