@@ -14,7 +14,7 @@ Let's first define terms for TLS:
 * When the proxy is configured to accept TLS connections from clients it is performing **TLS Termination**, which does not imply mutual authentication. 
   (For the avoidance of doubt, Kroxylicious does not support TLS passthrough; the alternative to TLS Termination is simply using TCP as the application transport).
 * A **TLS client certificate** is a TLS certificate for the client-side of a TLS Handshake. 
-  For a given client and server pairing a proxy might have _two_ of these: the Kafka client's TLS client certificate, and the proxy's own TLS client certificate for its connection to the server.
+  For a given client and server pairing, a proxy might have _two_ of these: the Kafka client's TLS client certificate, and the proxy's own TLS client certificate for its connection to the server.
 * When the proxy is configured to require TLS client certificates from clients and validates these against a set of trusted signing certificates (CA certificate) it is performing **client mutual TLS authentication** ("client mTLS").
 * A **TLS server certificate** is a TLS certificate for the server-side of a TLS Handshake. 
   As above, there could be two of these for a given connection through a proxy.
@@ -43,7 +43,7 @@ Finally, let's define some concepts from JAAS:
   A subject gains a principal following a successful TLS handshake.
   A subject also gains a principal following a successful `SaslAuthenticate` exchange.
 * A **credential** is information used to prove the authenticity of a principal.
-* A **public credential**, such as a TLS certificate, need not be kept a secret.
+* A **public credential**, such as a TLS certificate, does not need not be kept secret.
 * A **private credential**, such as a TLS private key or a password, must be kept secret, otherwise the authenticity of a principal is compromised.
 
 ## Current situation
@@ -81,7 +81,8 @@ The following method will be added to the existing `FilterContext` interface:
 
 ```java
     /**
-     * @return The TLS context for the client connection, or empty if the client connection is not TLS.
+     * @return The TLS context for the connection between the Kafka client and the proxy, 
+     * or empty if the client connection is not TLS.
      */
     Optional<ClientTlsContext> clientTlsContext();
 ```
@@ -101,7 +102,8 @@ public interface ClientTlsContext {
     X509Certificate proxyServerCertificate();
 
     /**
-     * @return the client's certificate, or empty if no TLS client certificate was presented during TLS handshake.
+     * @return the TLS client certificate was presented by the Kafka client to the proxy during TLS handshake, 
+     * or empty if no TLS client certificate was presented.
      */
     Optional<X509Certificate> clientCertificate();
 
@@ -128,6 +130,11 @@ For this purpose we will add the following methods to the existing `FilterContex
      * In order to support reauthentication, calls to this method and 
      * {@link #clientSaslAuthenticationFailure(String, String, Exception)}
      * may be arbitrarily interleaved during the lifetime of a given filter instance.
+     *
+     * This method can only be called by filters created from {@link FilterFactory FilterFactories} which 
+     * have been annotated with {@link ClientSaslProducer @ClientSaslProducer}. 
+     * Calls from filters where this is not the case will be logged but otherwise ignored.
+     *
      * @param mechanism The SASL mechanism used.
      * @param authorizationId The authorization ID.
      */
@@ -141,6 +148,11 @@ For this purpose we will add the following methods to the existing `FilterContex
      * In order to support reauthentication, calls to this method and 
      * {@link #clientSaslAuthenticationSuccess(String, String)}
      * may be arbitrarily interleaved during the lifetime of a given filter instance.
+     *
+     * This method can only be called by filters created from {@link FilterFactory FilterFactories} which 
+     * have been annotated with {@link ClientSaslProducer @ClientSaslProducer}. 
+     * Calls from filters where this is not the case will be logged but otherwise ignored.
+     *
      * @param mechanism The SASL mechanism used, or null if this is not known.
      * @param authorizationId The authorization ID, or null if this is not known.
      * @param exception An exception describing the authentication failure.
@@ -194,14 +206,6 @@ public interface ClientSaslContext {
      * @return the client's authorizationId.
      */
     String authorizationId();
-
-    /**
-     * The server identity that the proxy presented to the client using SASL authentication.
-     * @return the proxy's identity with the client. This will be null
-     * if the proxy did not supply an identity because the SASL mechanism used
-     * does not support mutual authentication.
-     */
-    Optional<String> proxyServerId();
 }
 ```
 
@@ -271,7 +275,8 @@ The API for exposing the proxy-to-broker TLS information to `Filters` is very si
 
 ```java
     /**
-     * @return The TLS context for the server connection, or empty if the server connection is not TLS.
+     * @return The TLS context for the connection between the proxy and the Kafka server, 
+     * or empty if the server connection is not TLS.
      */
     Optional<ServerTlsContext> serverTlsContext();
 ```
@@ -292,7 +297,7 @@ public interface ServerTlsContext {
     Optional<X509Certificate> proxyClientCertificate();
 
     /**
-     * @return the server's TLS certificate.
+     * @return the TLS server certificate was presented by the Kafka server to the proxy during TLS handshake.
      */
     X509Certificate serverCertificate();
 }
@@ -353,14 +358,6 @@ public interface ServerSaslContext {
      * @return The name of the SASL mechanism used.
      */
     String mechanismName();
-
-    /**
-     * Returns the principal returned by the server.
-     * @return the principal returned by the server,
-     * or empty if the SASL mechanism used does not support mutual authentication.
-     */
-    String serverId();
-
 }
 ```
 
