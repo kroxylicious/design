@@ -1,6 +1,6 @@
 # Plugin API for selecting TLS client credentials for proxy-to-server connection
 
-This proposal a new plugin API for allowing the selection of the TLS client credentials to be used for the connection between the proxy and a Kafka server.
+This proposes a new plugin API for allowing the selection of the TLS client credentials to be used for the connection between the proxy and a Kafka server.
 It makes use of [proposal-004](proposal-004) for the terminology used.
 
 ## Current situation
