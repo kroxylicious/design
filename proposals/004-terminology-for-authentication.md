@@ -11,7 +11,7 @@ In the following, the word "component" is generalising over filters, other plugi
 
 ### Mutual authentication
 
-A **mutual authentication mechanism** is one which proves the identity of a server to a client.
+Usually 'authentication' is the process by which a client proves their identity to a server. A **mutual authentication mechanism** is one which proves the identity of each party to the other.
 
 ### TLS Termination
 
@@ -40,11 +40,11 @@ a component which forwards a client's `SaslAuthenticate` requests to the server,
 
 ### Identity preserving
 
-SASL Passthrough is one way to for a proxy to be **identity preserving**, which means that, for all client principals in the virtual cluster, each of those principals will have the same name as the corresponding client principal in the broker.
+SASL Passthrough is one way to for a proxy to be **identity preserving**, which means that, for all client identities in the virtual cluster, each of those identities will have the same name as the corresponding client identity in the broker.
 
 ### SASL Passthrough Inspection
 
-a component performing SASL Passthrough and looking at the requests and responses to infer the client's principal is performing **SASL Passthrough Inspection**. 
+A component performing SASL Passthrough and looking at the requests and responses to infer the client's identity is performing **SASL Passthrough Inspection**. 
 Note that this technique does not work with all SASL mechanisms.
 
 ### SASL Termination
