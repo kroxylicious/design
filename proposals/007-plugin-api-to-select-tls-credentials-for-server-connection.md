@@ -129,11 +129,11 @@ Where the `Context` will be a inner interface:
         /**
          * Returns the default credentials for this target cluster (e.g. from the proxy configuration file).
          * Implementations of {@link ServerTlsCredentialSupplier} may use this as a fall-back
-         * or default, for example if the apply a certificiate-per-client-principal pattern
+         * or default, for example if they apply a certificiate-per-client-principal pattern
          * but are being used with an anonymous principal.
-         * @return the default credentials.
+         * @return the default credentials, or empty if none are define.
          */
-        TlsCredentials defaultTlsCredentials();
+        Optional<TlsCredentials> defaultTlsCredentials();
 
         /**
          * <p>Factory methods for creating TLS credentials for the given parameters.</p>
@@ -146,9 +146,9 @@ Where the `Context` will be a inner interface:
          * @return The TLS credentials instance.
          * see io.kroxylicious.proxy.filter.ServerTlsCredentialSupplierFactory.Context#tlsCredentials(PrivateKey, Certificate[])
          */
-        TlsCredentials tlsCredentials(Certificate certificate,
+        TlsCredentials tlsCredentials(
                                       PrivateKey key,
-                                      Certificate[] intermediateCertificates);
+                                      Certificate[] certificateChain);
     }
 ```
 
@@ -175,4 +175,6 @@ The `kroxylicous` repo.
 
 This change would be backwards compatible for `Filter` developers and proxy users (i.e. all existing proxy configurations files would still be valid).
 
+# Future Work
 
+* Enable using identity from a SASL Terminator in upstream TLS certificate selection.
