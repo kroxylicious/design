@@ -141,14 +141,12 @@ SASL was initially defined in [RFC 4422][RFC4422].
 Apache Kafka has built-in support for a number of mechanisms.
 Apache Kafka also supports plugging-in custom mechanisms on both the server and the client.
 
-|---------------------|---------------------|--------------------------|
 | Mechanism           | Definition          | Kafka implementation KIP |
 |---------------------|---------------------|--------------------------|
 | PLAIN               | [RFC 4616][RFC4616] | [KIP-43][KIP43]          |
 | GSSAPI (Kerberos v5)| [RFC 4752][RFC4752] | [KIP-12][KIP12]          |
 | SCRAM               | [RFC 5802][RFC5802] | [KIP-84][KIP84]          |
 | OAUTHBEARER         | [RFC 6750][RFC6750] | [KIP-255][KIP255]        |
-|---------------------|---------------------|--------------------------|
 
 Note that the above list of KIPs is not exhaustive: Other KIPs have further refined some mechanisms, and defined reauthentication.
 
