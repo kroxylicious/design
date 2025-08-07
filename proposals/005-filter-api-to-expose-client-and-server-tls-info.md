@@ -1,16 +1,13 @@
 
 # Authentication APIs
 
-This proposal describes a set of public APIs to expose client identity to plugin implementations.
+This proposal describes a set of public APIs to expose client and server TLS certificates for downstream-to-proxy and proxy-to-upstream connections to plugin implementations.
 It makes use of [proposal-004](proposal-004) for the terminology used.
 
 
 ## Current situation
 
 The `Filter` and `FilterContext` APIs currently don't directly expose any authenticated client identity information.
-Specifically if clients are authenticating using SASL, the only way a `Filter` can know about that is by intercepting those frames.
-* identity-using filters in the chain must _each_ implement SASL passthrough inspection. 
-* but this is usually incompatible with use of a filter performing SASL Termination or SASL Initiation.
 
 ## Motivation
 
@@ -89,7 +86,7 @@ import java.util.Optional;
 public interface ServerTlsContext {
     /**
      * @return The TLS server certificate that the proxy presented to the server during TLS handshake,
-     * or empty if no TLS client certificate was presented during TLS handshake.
+     * or empty if no TLS server certificate was presented during TLS handshake.
      */
     Optional<X509Certificate> proxyClientCertificate();
 
