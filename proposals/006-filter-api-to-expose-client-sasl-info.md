@@ -84,7 +84,6 @@ For such filters we will add the following methods to `FilterContext`:
     /**
      * Returns the SASL context for the client connection, or empty if the client
      * has not successfully authenticated using SASL.
-     * Filters should use {@link #clientPrincipal()} in preference to this method, unless they require SASL-specific functionality.
      * @return The SASL context for the client connection, or empty if the client
      * has not successfully authenticated using SASL.
      */
