@@ -36,16 +36,13 @@ When the proxy is configured to use a TLS client certificate when making a TLS c
 
 ### SASL Passthrough
 
-a component which forwards a client's `SaslAuthenticate` requests to the server, and conveys the responses back to the client, is performing **SASL Passthrough**.
-
-### Identity preserving
-
-SASL Passthrough is one way to for a proxy to be **identity preserving**, which means that, for all client identities in the virtual cluster, each of those identities will have the same name as the corresponding client identity in the broker.
+A component which forwards a client's `SaslAuthenticate` requests to the server, and conveys the responses back to the client, is performing **SASL Passthrough**.
 
 ### SASL Passthrough Inspection
 
 A component performing SASL Passthrough and looking at the requests and responses to infer the client's identity is performing **SASL Passthrough Inspection**. 
-Note that this technique does not work with all SASL mechanisms.
+Note that this technique does not work with all SASL mechanisms. 
+An example would be a mechanism which passes an opaque token issued by some authentication service that will be authenticated by the broker, but which cannot be introspected by the proxy.
 
 ### SASL Termination
 
@@ -91,14 +88,12 @@ SASL was initially defined in [RFC 4422][RFC4422].
 Apache Kafka has built-in support for a number of mechanisms.
 Apache Kafka also supports plugging-in custom mechanisms on both the server and the client.
 
-|---------------------|---------------------|--------------------------|
 | Mechanism           | Definition          | Kafka implementation KIP |
 |---------------------|---------------------|--------------------------|
 | PLAIN               | [RFC 4616][RFC4616] | [KIP-43][KIP43]          |
 | GSSAPI (Kerberos v5)| [RFC 4752][RFC4752] | [KIP-12][KIP12]          |
 | SCRAM               | [RFC 5802][RFC5802] | [KIP-84][KIP84]          |
 | OAUTHBEARER         | [RFC 6750][RFC6750] | [KIP-255][KIP255]        |
-|---------------------|---------------------|--------------------------|
 
 Note that the above list of KIPs is not exhaustive: Other KIPs have further refined some mechanisms, and defined reauthentication.
 
