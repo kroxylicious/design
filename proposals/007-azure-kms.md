@@ -13,6 +13,7 @@ We should implement an Azure Key Vault integration, so that users can use Azure 
     * [National Clouds](#national-clouds)
     * [TLS](#tls)
     * [DEK Generation](#dek-generation)
+    * [Key Identifiers](#key-identifiers)
   * [Proposed Initial Implementation](#proposed-initial-implementation)
     * [Configuration](#configuration)
 <!-- TOC -->
@@ -84,6 +85,30 @@ So that we can supply custom trust or use insecure testing modes (mock servers u
 
 Another difference is that basic Key Vault cannot generate the DEK bytes for us. Managed HSM does have an operation to generate random bytes for us https://learn.microsoft.com/en-us/rest/api/keyvault/?view=rest-keyvault-keys-7.4#key-operations-managed-hsm-only
 
+### Key Identifiers
+
+When we wrap/unwrap we have to identify a key by its name and version. You can obtain the latest version by https://learn.microsoft.com/en-us/rest/api/keyvault/keys/get-key/get-key?view=rest-keyvault-keys-7.4&tabs=HTTP.
+
+The API usually returns it as a `kid` https://learn.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#object-identifiers. Like
+
+> For Vaults: https://{vault-name}.vault.azure.net/{object-type}/{object-name}/{object-version}
+
+eg. `https://my-vault.vault.azure.net/keys/my-key/78deebed173b48e48f55abf87ed4cf71`
+
+The Azure SDK then takes advantage of the fact this happens to be the base URL for various operations like wrap/unwrap.
+
+ed. for [wrap key](https://learn.microsoft.com/en-us/rest/api/keyvault/keys/wrap-key/wrap-key?view=rest-keyvault-keys-7.4&tabs=HTTP) the url is `POST {vaultBaseUrl}/keys/{key-name}/{key-version}/wrapkey?api-version=7.4
+`
+
+To minimise EDEK bytes there are a couple of opportunities when encoding the EDEK:
+1. we can exclude the vaultBaseUrl and have the limitation that we work only with a single key vault
+2. we can encode just the keyName and keyVersion, and use that to decrypt
+3. all documented examples of the keyVersion (and from my experimentation too) are 128bits encoded as a hexadecimal string.
+
+So for the EDEK I think we could optimistically try to encode it as `versionByte,keyNameLength,keyName,keyVersionLength,128-bit-decoded,edek`
+and fall back to using the string like `versionByte,keyNameLength,keyName,keyVersionLength,keyVersionString,edek`. So
+we would have either a 16-byte version implying it's the bytes, or a 32 character string.
+
 ## Proposed Initial Implementation
 
 1. Support all flavours of Key Vault. The APIs will be the same, just with a different vault base URI.
@@ -93,6 +118,7 @@ Another difference is that basic Key Vault cannot generate the DEK bytes for us.
 5. Support TLS customization of the authentication client and key vault client.
 6. DEK bytes will be generated proxy-side with a SecureRandom.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
+8. Edek stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
 
 ### Configuration
 
