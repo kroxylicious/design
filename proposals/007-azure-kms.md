@@ -53,6 +53,13 @@ The Proxy must obtain a token that it can use to communicate with Key Vault. The
 
 See [Authentication in Azure Key Vault](https://learn.microsoft.com/en-us/azure/key-vault/general/authentication)
 
+One component that goes into the oauth request is the tenant id. This is a public piece of information that can be obtained
+from Key Vault by making an HTTP request to it with no `Authorization` header.
+
+The Azure SDK does this to avoid the user having to supply the tenant id. However this is a more fiddly workflow, I
+think we should make the user supply the tenant id by configuration so we do not have to obtain it by a request
+to Key Vault.
+
 ### National Clouds
 
 > National clouds are physically isolated instances of Azure. These regions of Azure are designed to make sure that data residency, sovereignty, and compliance requirements are honored within geographical boundaries.
@@ -119,7 +126,7 @@ we would have either a 16-byte version implying it's the bytes, or a 32 characte
 6. DEK bytes will be generated proxy-side with a SecureRandom.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
 8. Edek stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
-
+9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault
 ### Configuration
 
 ```
@@ -134,6 +141,7 @@ kmsConfig:
        passwordFile: /path/to/id
      clientSecret:
        passwordFile: /path/to/id
+     tenantId: "abds-1232dsaa"
      scope: https://vault.azure.net/.default // optional, could infer from vaultBaseUri
      tls:
        ... client trust configuration for oauth
