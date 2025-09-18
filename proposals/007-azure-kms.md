@@ -141,6 +141,8 @@ different version bytes to discriminate between the formats.
 8. [Edek](#edek-serialization-scheme) stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
 9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault
 10. Endpoints for Entra and Key Vault will be configurable to support national clouds.
+11. It will be a documentation/user responsibility to ensure that their topic names are valid Azure key names if they
+    wish to use the `$(topicName)` KEK selector.
 
 ### Key Types Support Matrix
 
@@ -267,3 +269,7 @@ The `kroxylicous` repo.
    convenience adds more Security risks. We must be very careful not to POST credentials at a malicious authorization
    endpoint or request a different scope than what we require. So for now, we make the entra endpoint, tenantId and scope fixed pieces of configuration so we absolutely know
    where we are sending the client's credentials. Allowing the Key Vault to dictate where to authenticate is a risk.
+5. **supporting topic name kek selectors that aren't valid Key Names in Azure Key Vault**. Using the topic name as the Key Name is not a very likely
+   scenario given how Keys are priced. Making and rotating many Keys will be expensive. Also we know our key selection
+   mechanism is likely to be overhauled. We could attempt to mangle the users topic names to coerce them into valid Azure key
+   names, but don't think it's a likely production configuration. Better handled by documentation for now.
