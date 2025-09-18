@@ -132,7 +132,7 @@ different version bytes to discriminate between the formats.
 ## Proposal
 
 1. Support all flavours of Key Vault. The APIs will be the same, just with a different vault base URI.
-2. Support RSA and HSM-RSA key types, wrapping using `RSA-OAEP-256` but emit a warning that it is not quantum-resistant.
+2. Support RSA and HSM-RSA key types, wrapping using `RSA-OAEP-256`.
 3. Support HSM-AES key type and AES-GCM wrapping
 4. Support only client credentials oauth flow with Entra using clientId + clientSecret. This supports workloads running anywhere. We could add support for other client credentials (certificates, federated certs) and Managed Identities later. Share a single auth token per Filter Definition until near expiry.
 5. Support TLS customization of the authentication client and key vault client.
