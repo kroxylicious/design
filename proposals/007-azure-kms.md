@@ -1,11 +1,8 @@
 # 007 - Azure KMS Implementation
 
-One of the flagship Kroxylicious Filters is Record Encryption, enabling users to implement encryption-at-rest for their Apache Kafka cluster. To do this securely, we rely on third-party Key Management Systems (KMS) to protect a set of Key Encryption Keys which are used to encrypt the Data Encryption Keys we write into the records. We currently have AWS, Hashicorp Vault and Fortanix DSM implementations.
-
-We should implement an Azure Key Vault integration, so that users can use Azure as their KMS for record encryption.
-
 <!-- TOC -->
 * [007 - Azure KMS Implementation](#007---azure-kms-implementation)
+  * [Motivation](#motivation)
   * [Background](#background)
     * [Key Vault Types](#key-vault-types)
     * [Key Types & Wrapping Algorithms](#key-types--wrapping-algorithms)
@@ -14,13 +11,28 @@ We should implement an Azure Key Vault integration, so that users can use Azure 
     * [TLS](#tls)
     * [DEK Generation](#dek-generation)
     * [Key Identifiers](#key-identifiers)
-  * [Proposed Initial Implementation](#proposed-initial-implementation)
+  * [Proposal](#proposal)
     * [Configuration](#configuration)
+    * [Authorization](#authorization)
+    * [Edek Serialization Scheme](#edek-serialization-scheme)
+      * [Common Fields](#common-fields)
+      * [Format 0: Hexadecimal Key Version](#format-0-hexadecimal-key-version)
+      * [Format 1: String Key Version](#format-1-string-key-version)
+  * [Compatibility](#compatibility)
+  * [Affected/not affected projects](#affectednot-affected-projects)
+  * [Rejected Alternatives](#rejected-alternatives)
 <!-- TOC -->
+
+## Motivation
+One of the flagship Kroxylicious Filters is Record Encryption, enabling users to implement encryption-at-rest for their Apache Kafka cluster. To do this securely, we rely on third-party Key Management Systems (KMS) to protect a set of Key Encryption Keys which are used to encrypt the Data Encryption Keys we write into the records. We currently have AWS, Hashicorp Vault and Fortanix DSM implementations.
+
+We should implement an Azure Key Vault integration, so that users can use Azure as their KMS for record encryption.
 
 ## Background
 
 > Azure Key Vault is a cloud service for securely storing and accessing secrets. A secret is anything that you want to tightly control access to, such as API keys, passwords, certificates, or cryptographic keys.
+
+Users can also install it on-premise by negotiation.
 
 ### Key Vault Types
 
@@ -112,21 +124,23 @@ To minimise EDEK bytes there are a couple of opportunities when encoding the EDE
 2. we can encode just the keyName and keyVersion, and use that to decrypt
 3. all documented examples of the keyVersion (and from my experimentation too) are 128bits encoded as a hexadecimal string.
 
-So for the EDEK I think we could optimistically try to encode it as `versionByte,keyNameLength,keyName,keyVersionLength,128-bit-decoded,edek`
-and fall back to using the string like `versionByte,keyNameLength,keyName,keyVersionLength,keyVersionString,edek`. So
-we would have either a 16-byte version implying it's the bytes, or a 32 character string.
+So for the EDEK I think we could optimistically try to encode it as `versionByte,keyNameLength,keyName,128-bit-decoded,edek`
+and fall back to using the string like `versionByte,keyNameLength,keyName,keyVersionLength,keyVersionString,edek` using
+different version bytes to discriminate between the formats.
 
-## Proposed Initial Implementation
+## Proposal
 
 1. Support all flavours of Key Vault. The APIs will be the same, just with a different vault base URI.
 2. Support RSA and HSM-RSA key types, wrapping using `RSA-OAEP-256` but emit a warning that it is not quantum-resistant.
 3. Support HSM-AES key type and AES-GCM wrapping
 4. Support only client credentials oauth flow with Entra using clientId + clientSecret. This supports workloads running anywhere. We could add support for other client credentials (certificates, federated certs) and Managed Identities later. Share a single auth token per Filter Definition until near expiry.
 5. Support TLS customization of the authentication client and key vault client.
-6. DEK bytes will be generated proxy-side with a SecureRandom.
+6. If the Key Vault is Managed HSM, then we will use the API to generate random bytes. Else, DEK bytes will be generated proxy-side with a SecureRandom.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
-8. Edek stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
+8. [Edek](#edek-serialization-scheme) stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
 9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault
+10. Endpoints for Entra and Key Vault will be configurable to support national clouds.
+
 ### Configuration
 
 ```
@@ -146,3 +160,95 @@ kmsConfig:
      tls:
        ... client trust configuration for oauth
 ```
+
+### Authorization
+
+We want to adhere to the principal of Least Privilege.
+
+The minimum authorization a Principal needs for the Key Vault using this implementation will be:
+
+* allow `get`
+* allow `unwrapKey`
+* allow `wrapKey`
+
+If using Managed HSM we will also need ` Microsoft.KeyVault/managedhsms/rng/action` action to be allowed so that we
+can use it to generate bytes.
+
+The Key itself in the Key Vault also has a set of supported operations. We require at minimum `unwrapKey` and `wrapKey`.
+
+### Edek Serialization Scheme
+
+We want to minimise the EDEK size as we serialize it into every encrypted record. All examples and experimentation show 
+that the Key Version is going to be represented  as a 128 bit Hex string. However, it is not documented as being a hex 
+string. We therefore attempt to take advantage of this to 
+reduce the serialized size, but implement a fallback in case the Key Version evolves within their documented limits.
+
+#### Common Fields
+
+- **Key Name**: The name of the key in Azure Key Vault, encoded in UTF-8. Its documented format is `1-127 character string, containing only 0-9, a-z, A-Z, and -.`
+- **Key Version**: The version identifier for the key in Azure Key Vault. Its documented format is `32 character string`
+- **EDEK**: The Encrypted Data Encryption Key, a byte array.
+
+[See also](https://learn.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#object-identifiers)
+
+#### Format 0: Hexadecimal Key Version
+
+This format is used when the **Key Version** is represented as a lowercase hexadecimal string (e.g., `78deebed173b48e48f55abf87ed4cf71`). The version is serialized directly as a 128-bit (16-byte) value.
+
+The byte layout is as follows:
+
+| Offset | Length (bytes) | Field Name            | Description                                      |
+|:-------|:---------------|:----------------------|:-------------------------------------------------|
+| 0      | 1              | **Format Version**    | A constant byte with the value `0x00`.           |
+| 1      | 1              | **Key Name Length**   | The length of the `Key Name` field in bytes (N). |
+| 2      | N              | **Key Name**          | The UTF-8 encoded key name.                      |
+| 2+N    | 16             | **Key Version (Hex)** | The 128-bit key version, serialized as 16 bytes. |
+| 18+N   | M              | **EDEK**              | The EDEK byte array.                             |
+
+Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
+#### Format 1: String Key Version
+
+This format is used for any **Key Version** that is not a lowercase hexadecimal string (e.g., a custom name or GUID). The version is serialized as a length-prefixed UTF-8 string.
+
+The byte layout is as follows:
+
+| Offset | Length (bytes) | Field Name               | Description                                                  |
+|:-------|:---------------|:-------------------------|:-------------------------------------------------------------|
+| 0      | 1              | **Format Version**       | A constant byte with the value `0x01`.                       |
+| 1      | 1              | **Key Name Length**      | The length of the `Key Name` field in bytes (N).             |
+| 2      | N              | **Key Name**             | The UTF-8 encoded key name.                                  |
+| 2+N    | 1              | **Key Version Length**   | The length of the `Key Version (String)` field in bytes (P). |
+| 3+N    | P              | **Key Version (String)** | The UTF-8 encoded key version string.                        |
+| 3+N+P  | M              | **EDEK**                 | The EDEK byte array.                                         |
+
+Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
+## Compatibility
+
+New feature without backwards compatibility requirements. Serialized EDEK contains version identifiers for future compatibility.
+
+## Affected/not affected projects
+
+The `kroxylicous` repo.
+
+## Rejected Alternatives
+
+1. **Depending on the Azure SDK**. To align with the other KMS implementations and keep our dependencies lean we will use implement
+   Entra authentication and Key Vault interactions ourselves. Specifically the dependency on netty/jackson is a risk
+   since the Kroxylicious framework also depends on these and we have no solution for per-plugin classloader isolation yet.
+2. **Using Azure Managed Identity to obtain the auth credentials**. This can be implemented later if users request it. This is an
+   Azure-specific mechanism for applications to conveniently obtain credentials from the environment they are
+   running in. We've implemented the equivalent functionality for AWS. Initially we only want to implement the OAuth 2
+   client credentials flow as it can be used from arbitrary environments and technology, not just Azure.
+3. **Storing the entire key id as it emerges from the Azure API**. The Key Vault APIs are documented in terms of
+   the components. To reduce the size of the serialized data, we assume the usage of single Azure Key Vault containing
+   all serialized Key Names and Versions.
+4. **automatic authentication discovery**. The Azure SDK does some smart work, you don't have to configure it with a tenant id
+   or entra endpoint or scope. It will send an initial request to the Key Vault without any Authorization header, and 
+   use the response to drive the authentication request. The response contains a header like:
+   ```
+   WWW-Authenticate: Bearer authorization="https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47", resource="https://vault.azure.net"
+   ```
+   Which saves configuring the specific Entra endpoint, tenantId and the resource implies the scope. However, all that
+   convenience adds more Security risks. We must be very careful not to POST credentials at a malicious authorization
+   endpoint or request a different scope than what we require. So for now, we make the entra endpoint, tenantId and scope fixed pieces of configuration so we absolutely know
+   where we are sending the client's credentials. Allowing the Key Vault to dictate where to authenticate is a risk.
