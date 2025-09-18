@@ -273,3 +273,6 @@ The `kroxylicous` repo.
    scenario given how Keys are priced. Making and rotating many Keys will be expensive. Also we know our key selection
    mechanism is likely to be overhauled. We could attempt to mangle the users topic names to coerce them into valid Azure key
    names, but don't think it's a likely production configuration. Better handled by documentation for now.
+6. **emitting quantum resistance warnings** the RSA mechanism available in the affordable Key Vault tiers is not advertised
+   as quantum resistant. Initially I thought we should emit warning logs in code, but given the state of the art is in flux
+   we should instead rely on documentation to advertise the latest information.
