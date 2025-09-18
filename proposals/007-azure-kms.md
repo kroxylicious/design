@@ -141,6 +141,20 @@ different version bytes to discriminate between the formats.
 9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault
 10. Endpoints for Entra and Key Vault will be configurable to support national clouds.
 
+### Key Types Support Matrix
+
+For completeness, this covers which key types are supported by this KMS implementation and which Key Vault products they
+are currently compatible with.
+
+| Azure key type | Supported | Wrapping Algorithm | Key Vault Standard | Key Vault Premium SKU | Managed HSM |
+|----------------|-----------|--------------------|--------------------|-----------------------|-------------|
+| RSA            | yes       | RSA-OAEP-256       | yes                | yes                   | yes         |
+| RSA-HSM        | yes       | RSA-OAEP-256       | no                 | yes                   | yes         |
+| oct            | yes       | AES-GCM            | no                 | no                    | yes         |
+| oct-HSM        | yes       | AES-GCM            | no                 | no                    | yes         |
+| EC             | no        | -                  | -                  | -                     | -           |
+| EC-HSM         | no        | -                  | -                  | -                     | -           |
+
 ### Configuration
 
 ```
