@@ -12,6 +12,7 @@
     * [DEK Generation](#dek-generation)
     * [Key Identifiers](#key-identifiers)
   * [Proposal](#proposal)
+    * [Key Types Support Matrix](#key-types-support-matrix)
     * [Configuration](#configuration)
     * [Authorization](#authorization)
     * [Edek Serialization Scheme](#edek-serialization-scheme)
