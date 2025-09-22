@@ -1,7 +1,7 @@
-# 007 - Azure KMS Implementation
+# 009 - Azure KMS Implementation
 
 <!-- TOC -->
-* [007 - Azure KMS Implementation](#007---azure-kms-implementation)
+* [009 - Azure KMS Implementation](#009---azure-kms-implementation)
   * [Motivation](#motivation)
   * [Background](#background)
     * [Key Vault Types](#key-vault-types)
@@ -184,11 +184,11 @@ We want to adhere to the principal of Least Privilege.
 
 The minimum authorization a Principal needs for the Key Vault using this implementation will be:
 
-* allow `get`
-* allow `unwrapKey`
-* allow `wrapKey`
+* allow data action `Microsoft.KeyVault/vaults/keys/read` to enable access to key metadata
+* allow data action `Microsoft.KeyVault/vaults/keys/wrap/action`
+* allow data action `Microsoft.KeyVault/vaults/keys/unwrap/action`
 
-If using Managed HSM we will also need ` Microsoft.KeyVault/managedhsms/rng/action` action to be allowed so that we
+If using Managed HSM we will also need `Microsoft.KeyVault/managedhsms/rng/action` action to be allowed so that we
 can use it to generate bytes.
 
 The Key itself in the Key Vault also has a set of supported operations. We require at minimum `unwrapKey` and `wrapKey`.
