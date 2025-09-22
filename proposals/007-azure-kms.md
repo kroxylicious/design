@@ -136,7 +136,7 @@ different version bytes to discriminate between the formats.
 3. Support HSM-AES key type and AES-GCM wrapping
 4. Support only client credentials oauth flow with Entra using clientId + clientSecret. This supports workloads running anywhere. We could add support for other client credentials (certificates, federated certs) and Managed Identities later. Share a single auth token per Filter Definition until near expiry.
 5. Support TLS customization of the authentication client and key vault client.
-6. If the Key Vault is Managed HSM, then we will use the API to generate random bytes. Else, DEK bytes will be generated proxy-side with a SecureRandom.
+6. If the Key Vault is Managed HSM, then we will use the Key Vault API to generate random bytes. Else, DEK bytes will be generated within the proxy JVM using a `SecureRandom`.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
 8. [Edek](#edek-serialization-scheme) stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
 9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault. Doing something smarter and making it optional in the future will be backwards compatible.
