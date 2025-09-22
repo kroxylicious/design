@@ -139,7 +139,7 @@ different version bytes to discriminate between the formats.
 6. If the Key Vault is Managed HSM, then we will use the API to generate random bytes. Else, DEK bytes will be generated proxy-side with a SecureRandom.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
 8. [Edek](#edek-serialization-scheme) stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
-9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault
+9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault. Doing something smarter and making it optional in the future will be backwards compatible.
 10. Endpoints for Entra and Key Vault will be configurable to support national clouds.
 11. It will be a documentation/user responsibility to ensure that their topic names are valid Azure key names if they
     wish to use the `$(topicName)` KEK selector.
