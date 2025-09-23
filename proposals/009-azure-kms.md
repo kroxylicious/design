@@ -164,7 +164,7 @@ are currently compatible with.
 kms: AzureKeyVault
 kmsConfig:
   keyVaultBaseUri: https://kv-kfesiehfoieaf.vault.azure.net
-  tls:
+  tls: # optional
     ... client trust for key vault
   entraIdentity:
      oauthEndpointUrl: https://login.microsoftonline.com
@@ -174,9 +174,12 @@ kmsConfig:
        passwordFile: /path/to/id
      tenantId: "abds-1232dsaa"
      scope: https://vault.azure.net/.default
-     tls:
+     tls: # optional
        ... client trust configuration for oauth
 ```
+
+All configuration options are required, except `tls` configuration. Noting that `clientSecret` and `clientId` use the
+established `PasswordProvider` mechanism, so can use inline `password` or `passwordFile`.
 
 ### Authorization
 
