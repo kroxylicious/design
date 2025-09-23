@@ -167,13 +167,13 @@ kmsConfig:
   tls:
     ... client trust for key vault
   entraIdentity:
-     oauthEndpointUrl: https://login.microsoftonline.com // optional defaults to this value
+     oauthEndpointUrl: https://login.microsoftonline.com
      clientId:
        passwordFile: /path/to/id
      clientSecret:
        passwordFile: /path/to/id
      tenantId: "abds-1232dsaa"
-     scope: https://vault.azure.net/.default // optional, could infer from vaultBaseUri
+     scope: https://vault.azure.net/.default
      tls:
        ... client trust configuration for oauth
 ```
