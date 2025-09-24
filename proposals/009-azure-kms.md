@@ -183,7 +183,7 @@ established `PasswordProvider` mechanism, so can use inline `password` or `passw
 
 ### Authorization
 
-We want to adhere to the principal of Least Privilege.
+We want to adhere to the Principle of Least Privilege.
 
 The minimum authorization a Principal needs for the Key Vault using this implementation will be:
 
