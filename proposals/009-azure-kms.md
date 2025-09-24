@@ -205,9 +205,13 @@ reduce the serialized size, but implement a fallback in case the Key Version evo
 
 #### Common Fields
 
+- **Vault Name**: The name of the Azure Key Vault, encoded in UTF-8. Its documented format is `3-24 character string, containing only 0-9, a-z, A-Z, and not consecutive -`
 - **Key Name**: The name of the key in Azure Key Vault, encoded in UTF-8. Its documented format is `1-127 character string, containing only 0-9, a-z, A-Z, and -.`
 - **Key Version**: The version identifier for the key in Azure Key Vault. Its documented format is `32 character string`
 - **EDEK**: The Encrypted Data Encryption Key, a byte array.
+
+Note that we do not serialize the Vault host (for example `vault.azure.net`), this is derived from the Filter configuration.
+The Filter will initially only support operating in a single cloud.
 
 [See also](https://learn.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#object-identifiers)
 
@@ -217,13 +221,15 @@ This format is used when the **Key Version** is represented as a lowercase hexad
 
 The byte layout is as follows:
 
-| Offset | Length (bytes) | Field Name            | Description                                      |
-|:-------|:---------------|:----------------------|:-------------------------------------------------|
-| 0      | 1              | **Format Version**    | A constant byte with the value `0x00`.           |
-| 1      | 1              | **Key Name Length**   | The length of the `Key Name` field in bytes (N). |
-| 2      | N              | **Key Name**          | The UTF-8 encoded key name.                      |
-| 2+N    | 16             | **Key Version (Hex)** | The 128-bit key version, serialized as 16 bytes. |
-| 18+N   | M              | **EDEK**              | The EDEK byte array.                             |
+| Length (bytes) | Field Name            | Description                                        |
+|:---------------|:----------------------|:---------------------------------------------------|
+| 1              | **Format Version**    | A constant byte with the value `0x00`.             |
+| 1              | **Vault Name Length** | The length of the `Vault Name` field in bytes (N). |
+| N              | **Vault Name**        | The UTF-8 encoded vault name.                      |
+| 1              | **Key Name Length**   | The length of the `Key Name` field in bytes (N).   |
+| M              | **Key Name**          | The UTF-8 encoded key name.                        |
+| 16             | **Key Version (Hex)** | The 128-bit key version, serialized as 16 bytes.   |
+| M              | **EDEK**              | The EDEK byte array.                               |
 
 Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
 #### Format 1: String Key Version
@@ -232,14 +238,16 @@ This format is used for any **Key Version** that is not a lowercase hexadecimal 
 
 The byte layout is as follows:
 
-| Offset | Length (bytes) | Field Name               | Description                                                  |
-|:-------|:---------------|:-------------------------|:-------------------------------------------------------------|
-| 0      | 1              | **Format Version**       | A constant byte with the value `0x01`.                       |
-| 1      | 1              | **Key Name Length**      | The length of the `Key Name` field in bytes (N).             |
-| 2      | N              | **Key Name**             | The UTF-8 encoded key name.                                  |
-| 2+N    | 1              | **Key Version Length**   | The length of the `Key Version (String)` field in bytes (P). |
-| 3+N    | P              | **Key Version (String)** | The UTF-8 encoded key version string.                        |
-| 3+N+P  | M              | **EDEK**                 | The EDEK byte array.                                         |
+| Length (bytes) | Field Name               | Description                                                  |
+|:---------------|:-------------------------|:-------------------------------------------------------------|
+| 1              | **Format Version**       | A constant byte with the value `0x01`.                       |
+| 1              | **Vault Name Length**    | The length of the `Vault Name` field in bytes (N).           |
+| N              | **Vault Name**           | The UTF-8 encoded vault name.                                |
+| 1              | **Key Name Length**      | The length of the `Key Name` field in bytes (N).             |
+| N              | **Key Name**             | The UTF-8 encoded key name.                                  |
+| 1              | **Key Version Length**   | The length of the `Key Version (String)` field in bytes (P). |
+| P              | **Key Version (String)** | The UTF-8 encoded key version string.                        |
+| M              | **EDEK**                 | The EDEK byte array.                                         |
 
 Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
 ## Compatibility
