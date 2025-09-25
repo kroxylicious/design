@@ -41,6 +41,19 @@ If the authorization result is `DENIED` for any resource in the request, the fil
 
 On receipt of a response message from the upstream, the Authorizing filter will filter the resources so that the downstream receives only resources that they are authorized to `DESCRIBE`.
 
+Some Kafka responses contain authorized operations values (originally introduced by [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430+-+Return+Authorized+Operations+in+Describe+Responses)).
+These give the client a way to know which operations are supported for a resource without having to try the operation.
+Authorized operation values are bit fields where each position in the bitfield corresponds to a different operation.
+The broker computes authorized operations values only when requested.  The client sets an include authorized operations flag in the request
+and the broker then computes the result which is returned in the response.
+
+If authorized operation values present in the response (`>0`), the filter must compute the effective authorized operations values
+given both the value returned from the upstream and authorized operation value computed for the ACLs imposed by itself.
+The response must be updated with the effective value before it is returned to the client.
+This equates to a bitwise-AND operation on the two values.
+
+### Pluggable API
+
 The Authorizer filter will have a pluggable API that allows different Authorizer implementations to be plugged in.  This proposal will deliver a simple implementation of the API that allows  authorization rules to be expressed in a separate file.  Future work may
 deliver alternative implementations that, say, delegate authorization decisions to externals systems (such as OPA), or implement other
 authorizations schemes (such as RBAC).
