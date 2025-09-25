@@ -180,8 +180,12 @@ record ResourceNamePattern(PatternType patternType, String pattern) {
 #### Rules File
 
 The rules file expresses a mapping between principals (user type only with exact match) and an allow-list of resources.
+If there is no permission expressed in the rules, then the operation is denied.
 
-For the initial scope, only resource rules of type TOPIC are supported.  In order to allow for future extension, the user’s configuration set the version property to 1.  This will allow future versions of the filter to introduce support for other resource types without changing the meaning of existing configurations.
+For the initial scope, only resource rules of type TOPIC are supported.
+
+In order to allow future versions to support additional resource types without changing the meaning of existing rules files, the rules files are versioned.
+The version described here is version 1. The user must specify the version number in their rules file.
 
 For the `CLUSTER` `CONNECT` authorization check, this will be implemented implicitly.  The check will return `ALLOW` if there is at least one resource rule for the principal.  If there are no resource rules for the principal, the authorizer will return `DENY`.
 
