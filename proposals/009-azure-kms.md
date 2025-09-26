@@ -138,11 +138,17 @@ different version bytes to discriminate between the formats.
 5. Support TLS customization of the authentication client and key vault client.
 6. If the Key Vault is Managed HSM, then we will use the Key Vault API to generate random bytes. Else, DEK bytes will be generated within the proxy JVM using a `SecureRandom`.
 7. The Azure SDK pulls in netty/jackson/project-reactor, lets try implementing the APIs ourselves as we have for AWS
-8. [Edek](#edek-serialization-scheme) stores the keyName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
+8. [Edek](#edek-serialization-scheme) stores the keyName, keyType, vaultName, keyVersion, edek. We attempt to minimise keyVersion size by optimistically decoding it from hex string, else store the string.
 9. User will supply tenantId for authentication, rather than implementing a more complicated workflow to obtain it using an HTTP request to KeyVault. Doing something smarter and making it optional in the future will be backwards compatible.
 10. Endpoints for Entra and Key Vault will be configurable to support national clouds.
 11. It will be a documentation/user responsibility to ensure that their topic names are valid Azure key names if they
     wish to use the `$(topicName)` KEK selector.
+
+When resolving the alias, we will expect that the alias is an Azure Key Name. We will `get` that key to determine its
+type and latest version, and check it supports wrap/unwrap operations.
+
+We will serialize everything we need to execute the unwrap operation without having to `get` the key again on the decrypt path.
+Meaning we will serialize the key name, version, type and vault name.
 
 ### Key Types Support Matrix
 
@@ -208,12 +214,23 @@ reduce the serialized size, but implement a fallback in case the Key Version evo
 - **Vault Name**: The name of the Azure Key Vault, encoded in UTF-8. Its documented format is `3-24 character string, containing only 0-9, a-z, A-Z, and not consecutive -`
 - **Key Name**: The name of the key in Azure Key Vault, encoded in UTF-8. Its documented format is `1-127 character string, containing only 0-9, a-z, A-Z, and -.`
 - **Key Version**: The version identifier for the key in Azure Key Vault. Its documented format is `32 character string`
+- **Key Type**: The key type, see [table](#key-type) for byte values
 - **EDEK**: The Encrypted Data Encryption Key, a byte array.
 
 Note that we do not serialize the Vault host (for example `vault.azure.net`), this is derived from the Filter configuration.
 The Filter will initially only support operating in a single cloud.
 
 [See also](https://learn.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates#object-identifiers)
+
+#### Key Type
+A subset of the Azure Key Types which we support. Initially, the key type will deterministically imply a wrapping algorithm.
+
+| id | Azure Key Type | Wrapping Algorithm |
+|:---|:---------------|:-------------------|
+| 0  | RSA            | RSA-OAEP-256       |
+| 1  | RSA-HSM        | RSA-OAEP-256       |
+| 2  | oct            | A256GCM            |
+| 3  | oct-HSM        | A256GCM            |
 
 #### Format 0: Hexadecimal Key Version
 
@@ -224,14 +241,16 @@ The byte layout is as follows:
 | Length (bytes) | Field Name            | Description                                        |
 |:---------------|:----------------------|:---------------------------------------------------|
 | 1              | **Format Version**    | A constant byte with the value `0x00`.             |
+| 1              | **Key Name Length**   | The length of the `Key Name` field in bytes (M).   |
+| M              | **Key Name**          | The UTF-8 encoded key name.                        |
 | 1              | **Vault Name Length** | The length of the `Vault Name` field in bytes (N). |
 | N              | **Vault Name**        | The UTF-8 encoded vault name.                      |
-| 1              | **Key Name Length**   | The length of the `Key Name` field in bytes (N).   |
-| M              | **Key Name**          | The UTF-8 encoded key name.                        |
+| 1              | **Key Type**          | The [key type](#key-type)                          |
 | 16             | **Key Version (Hex)** | The 128-bit key version, serialized as 16 bytes.   |
-| M              | **EDEK**              | The EDEK byte array.                               |
+| P              | **EDEK**              | The EDEK byte array.                               |
 
 Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
+
 #### Format 1: String Key Version
 
 This format is used for any **Key Version** that is not a lowercase hexadecimal string (e.g., a custom name or GUID). The version is serialized as a length-prefixed UTF-8 string.
@@ -241,13 +260,14 @@ The byte layout is as follows:
 | Length (bytes) | Field Name               | Description                                                  |
 |:---------------|:-------------------------|:-------------------------------------------------------------|
 | 1              | **Format Version**       | A constant byte with the value `0x01`.                       |
+| 1              | **Key Name Length**      | The length of the `Key Name` field in bytes (M).             |
+| M              | **Key Name**             | The UTF-8 encoded key name.                                  |
 | 1              | **Vault Name Length**    | The length of the `Vault Name` field in bytes (N).           |
 | N              | **Vault Name**           | The UTF-8 encoded vault name.                                |
-| 1              | **Key Name Length**      | The length of the `Key Name` field in bytes (N).             |
-| N              | **Key Name**             | The UTF-8 encoded key name.                                  |
+| 1              | **Key Type**             | The [key type](#key-type)                                    |
 | 1              | **Key Version Length**   | The length of the `Key Version (String)` field in bytes (P). |
 | P              | **Key Version (String)** | The UTF-8 encoded key version string.                        |
-| M              | **EDEK**                 | The EDEK byte array.                                         |
+| Q              | **EDEK**                 | The EDEK byte array.                                         |
 
 Note that the key name is up to 127 characters that are a subset of ascii so its length can be described with 1 byte.
 ## Compatibility
