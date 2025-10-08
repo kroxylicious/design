@@ -29,7 +29,7 @@ approach robustly handles edge cases, such as when a topic is deleted and later 
 find more details
 in [KIP-516: Topic Identifiers](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516%3A+Topic+Identifiers). In
 Kafka 4.1.0 Produce Requests have begun using topic ids when the client supports it, impacting multiple Filters offered
-by the project.
+by the Kroxylicious project.
 
 Currently, the Kroxylicious framework does not provide a direct way for filters to translate a topic ID back into its
 topic name. We have worked around this by intercepting the Api Versions response in those filters, and downgrading the
@@ -70,20 +70,26 @@ The following method will be added to the `FilterContext`:
 class TopicMappingException extends RuntimeException {
 }
 
+// the server responded with an error code
+class KafkaServerErrorException(org.apache.kafka.common.protocol.Errors error) extends TopicMappingException {
+    
+}
+
 /**
 * topicName XOR exception will be non-null
 */
 record TopicNameResult(@Nullable String topicName, @Nullable TopicMappingException exception){}
 
 /**
- * Asynchronously resolves a set of topic UUIDs to their corresponding topic names.
+ * Asynchronously resolves a collection of topic UUIDs to their corresponding topic names.
  *
  * @param topicUuids A Set of topic UUIDs to resolve.
- * @return A CompletionStage that will complete with an unmodifiable Map<Uuid, String>,
- * mapping each topic UUID to its topic name. Every input topicUuid must have an entry
- * in the result map.
+ * @return A CompletionStage that will complete with an unmodifiable Map<Uuid, TopicNameResult>,
+ * mapping each topic UUID to its topic name result. Every input topicUuid must have an entry
+ * in the result map. The stage may be completed exceptionally with an {@link TimeoutException}
+ * if the Server takes too long to respond.
  */
-CompletionStage<Map<Uuid, TopicNameResult>> getTopicNames(Set<Uuid> topicUuids);
+CompletionStage<Map<Uuid, TopicNameResult>> topicNames(Collection<Uuid> topicUuids);
 ```
 
 ### 2. Metadata Request
