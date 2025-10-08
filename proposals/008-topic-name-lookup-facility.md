@@ -88,6 +88,10 @@ record TopicNameResult(@Nullable String topicName, @Nullable TopicMappingExcepti
  * mapping each topic UUID to its topic name result. Every input topicUuid must have an entry
  * in the result map. The stage may be completed exceptionally with an {@link TimeoutException}
  * if the Server takes too long to respond.
+ * <h4>Chained Computation stages</h4>
+ * <p>Default and asynchronous default computation stages chained to the returned
+ * {@link java.util.concurrent.CompletionStage} are guaranteed to be executed by the thread associated with the
+ * connection. See {@link io.kroxylicious.proxy.filter} for more details.
  */
 CompletionStage<Map<Uuid, TopicNameResult>> topicNames(Collection<Uuid> topicUuids);
 ```
