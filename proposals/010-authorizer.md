@@ -26,16 +26,17 @@ Examples include things like record-level authorization, or authorization of ent
 
 We propose to add authorization-related APIs to Kroxylicious, as follows:
 
-1. Model client identity using new types in `kroxylicious-api`, namely JAAS-like `Subject` and `Principal`.
-2. Add a new `kroxylicious-authorizer` module defining an `Authorizer` plugin interface.
-3. Add a new `kroxylicious-authorizer-acl` module implementing the `Authorizer` plugin interface using Access Control Lists (ACLs).
-4. Add a new `kroxylicious-authorization` module implementing an `Authorization` protocol filter plugin which uses an `Authorizer` instance to provide Kafka-equivalent authorization.
+1. Model client identity using new types in `kroxylicious-api`, namely JAAS-like `Subject` and `Principal`, with an accessor on the `FilterContext`.
+2. Provide support in `kroxylicious-runtime` for basic subjects constructed from TLS or SASL information.
+3. Add a new `kroxylicious-authorizer` module defining an `Authorizer` plugin interface.
+4. Add a new `kroxylicious-authorizer-acl` module implementing the `Authorizer` plugin interface using Access Control Lists (ACLs).
+5. Add a new `kroxylicious-authorization` module implementing an `Authorization` protocol filter plugin which uses an `Authorizer` instance to provide Kafka-equivalent authorization.
 
 The following subections will explain these pieces in detail.
 
-The `Authorization` filter gives the ability to layer authorization checks into a Kafka system with those authorization checks being enforced by the filter. These authorization checks are in addition to any that may be imposed by the Kafka Cluster itself. This means that for an action to be allowed both the proxy’s authorizer and the Kafka broker’s authorizer will need to reach an ALLOW decision.
+Ultimately, the `Authorization` filter gives the ability to layer authorization checks into a Kafka system with those authorization checks being enforced by the filter. These authorization checks are in addition to any that may be imposed by the Kafka Cluster itself. This means that for an action to be allowed both the proxy’s authorizer and the Kafka broker’s authorizer will need to reach an ALLOW decision.
 
-### Changes in `kroxylicious-api` and `kroxylicious-runtime` -- `Subject` and `Principal`
+### Changes in `kroxylicious-api` -- `Subject` and `Principal`
 
 Proposals [005][prop-5] and [006][prop-6] added the functionality for filters to find out authentication information about connected clients in the form of a TLS client certificate and/or a SASL authorized id. 
 Authorization decisions may need to depend on more than just the single string identifier either of these can yield. 
@@ -102,10 +103,13 @@ public interface FilterContext {
 }
 ```
 
-The asynchronous result type is intended to allow a subject to be built using information obtained over the network.
+The asynchronous result type is intended to allow a subject to be built using information obtained over the network, for example role/group information obtained from Active Directory/LDAP.
 
-Eventually we expect to make the creation of the `Subject` instances exposed through this method to be pluggable.
-But for now the internal `SubjectBuilder` interface will look like this:
+### Support for TLS and SASL subjects in `kroxylicious-runtime`
+
+Eventually we expect to make the creation of the `Subject` instances exposed through `FilterContext.authenticatedSubject()` to be pluggable.
+But initiall the `SubjectBuilder` interface will be internal to the `kroxylicious-runtime` module.
+It looks like this:
 
 ```java
 package io.kroxylicious.proxy.internal.subject;
@@ -126,7 +130,7 @@ public interface SubjectBuilder {
 ```
 
 The default `SubjectBuilder` will return anonymous `Subjects`.
-In addition to the default subject builder, initially we will support two built-in `SubjectBuilders` within the `kroxylicious-runtime`:
+In addition to the default subject builder we will support two other `SubjectBuilders` within the `kroxylicious-runtime`:
 1. A builder called `Tls`, for `Subjects` based entirely on TLS client certificate information 
 2. A builder called `Sasl`, for `Subjects` based entirely on the SASL authorized id.
 
@@ -149,13 +153,13 @@ virtualClusters:
     # ...
 ```
 
-The `Tls` builder will support the same [mapping rules as Apache Kafka](https://kafka.apache.org/documentation.html#security_authz_ssl), and also the ability to create principals 
+The `Tls` builder will support the same [mapping rules as Apache Kafka][TLS_MAPPING], and also the ability to create principals 
 from the subject alternative names (with the same regex-based mapping supported).
 
-The `Sasl` builder will support the same [mapping rules as Apache Kafka](https://kafka.apache.org/documentation.html#security_authz_sasl).
+The `Sasl` builder will support the same [mapping rules as Apache Kafka][SASL_MAPPING].
 
 
-## `kroxylicious-authorizer` -- the `Authorizer` interface
+### `kroxylicious-authorizer` -- the `Authorizer` interface
 
 The `Authorizer` interface is quite general and is modelled on Apache Kafka's authorizer, but with some differences:
 
@@ -178,7 +182,8 @@ public interface Authorizer {
 
 Note:
 * The asynchronous return type is intended to permit implementations using technologies such as [OPA][OPA] or [OpenFGA][OpenFGA], which would otherwise need to block the thread making the decision over the network.
-* Because of the possibility of higher latency authorizer implementations, call sites should try to pass as many `actions` as possible so as to benefit from batching requests .
+* Because of the possibility of higher latency authorizer implementations, call sites should try to pass as many `actions` as possible so as to benefit from batching requests.
+* Unlike Apache Kafka we don't currently include in the Authorizer the responsibility to log authorization attempts.
 
 An `Action` describes something the subject may be attempting to do:
 
@@ -195,7 +200,7 @@ public interface ResourceType<V extends Enum<V> & ResourceType<V>> { ... }
 ```
 
 The scary-looking type parameter bound means a `ResourceType` implementation must be an `enum` rather than `class`, `interface`, etc.
-The enum elements are the operations that a particular resource type supports. 
+The `enum`'s elements are the operations that a particular resource type supports. 
 For example we would model a Kafka topic like this:
 
 ```java
@@ -206,7 +211,7 @@ enum Topic implements ResourceType<Topic> {
     // ...
 }
 
-The `java.lang.Class` of a particular ResourceType serves to identity the type of a resource in the API.
+The `java.lang.Class` of a particular ResourceType then serves to identify the type of a resource in the API.
 Thus, the `Action` instance for describing a topic called "foo" would be created like so:
 
 ```java
@@ -214,7 +219,7 @@ new Action(Topic.DESCRIBE, "foo")
 ```
 
 The `AuthorizationDecisions` type provides access to the decisions about each of the actions in the query to `Authorizer.authorize()`.
-That is `authorize()` partitions its `actions` argument into the `allowed` and `denied` lists of the returned `AuthorizationDecisions`.
+That is, `Authorizer.authorize()` partitions its `actions` argument into the `allowed` and `denied` lists of the returned `AuthorizationDecisions`.
 
 ```java
 public enum Decision {
@@ -228,22 +233,25 @@ public record AuthorizationDecisions(
                             List<Action> denied) {
 
     public Decision decision(Operation<?> operation, String resourceName) { ... }
+    
+    // ...
 }
 ```
 
 ### The `kroxylicious-authorizer-acl` module
 
-This new module will provide a implementation of Authorizer using an Access Control List (ACL), called `AclAuthorizer`.
-The ACLs will be defined using a file which enumerates who is allowed to do what.
-The formal syntax of the file will be defined by an [ANTLR][ANTLR] grammar.
-For the purposes of this proposal it is easier to use a few examples.
+The new `kroxylicious-authorizer-acl` module will provide a implementation of `Authorizer` using an Access Control List (ACL), called `AclAuthorizer`.
+The ACLs will be defined in a file (external to the proxy configuration file) which enumerates _who_ is allowed to do _what_.
+The formal syntax of the file will be defined by an [ANTLR][ANTLR] grammar, 
+but for the purposes of this proposal it is easier describe the structure using examples.
 
 The AclAuthorizer will be:
 * deny-by-default. 
 * agnostic of any particular `Principal` implementations
 * agnostic of any particular `ResourceType` implementations
 
-Being agnostic about `Principal` and `ResourceType` implementations means the `AclAuthorizer` can more easily be reused in other filters in the future, but it means the user needs to define their types when they write the file:
+Being agnostic about `Principal` and `ResourceType` implementations means the `AclAuthorizer` can more easily be reused in other filters in the future, but it means the user needs to define their types when they write the file. 
+They do this using an `import` statement:
 
 ```
 import User from org.example.principals;
@@ -278,14 +286,16 @@ To avoid having to enumerate every combination of allowed subject, resource and 
     ```
     allow User with name = "Alice" to READ Topic with name like "foo*";
     ```
-    (Note that the wildcard `*` is only permitted at the end of the prefix).
+    Note that the wildcard `*` is only permitted at the end of the prefix.
 
 * Resources of a given type can be selected if their name matches a given regular expression literal:
     ```
     allow User with name = "Alice" to READ Topic with name matching /(foo+|bar)/;
     ```
+    Note that regex based matching will generally scale less well (in terms of number of rules) than the other selection methods, 
+    so the other methods should be used where possible.
 
-Similarly we can select multiple operations at once:
+Similarly, we can select multiple operations at once:
 
 * All operations of a given resource type can be selected:
     ```
@@ -293,7 +303,7 @@ Similarly we can select multiple operations at once:
     ```
 * Operations of a given resource type can be selected by name with a set literal:
     ```
-    allow User with name = "Alice" to {READ, WRTIE} Topic with name = "foo";
+    allow User with name = "Alice" to {READ, WRITE} Topic with name = "foo";
     ```
 
 Finally, it's also possible to select multiple principals at once:
@@ -327,6 +337,10 @@ otherwise deny;
 
 The syntax requires that `deny` rules must come before `allow` rules. 
 This is to facilitate reading the rules: The first matching rule is the one which applies.
+
+Validation checks on the rule file will be performed at start up. These include things like:
+* checking that the imported principal and resource classes exist and extend the expected Java types
+* checking that regular expressions are syntactically correct
 
 ### Request authorization
 
@@ -396,9 +410,13 @@ filterDefinitions:
 ```
 
 Because the `SubjectBuilder` is configured at the virtual cluster level, it is possible for a filter to be referenced in a virtual cluster which uses a subject builder which yields Subjects that are incompatible with the `Authorization` filter. 
-For example the `SubjectBuilder` might return subjects with `User` principals, while the Authorization filter's rules file might 
-not `import` the `User` class.
-This proposal does not attempt to address that problem.
+For example if the `SubjectBuilder` is not explicitly configured the default one will yield `Anonymous` subjects, while the Authorization filter's rules file might be written in terms of the `User` class.
+Due to the deny-by-default nature of the AclAuthoriser this configuration problem is not a security problem (access cannot be allowed by accident).
+It would be nice if this situation could be detected and warned about during proxy start up. 
+However, there is no obvious way to do this.
+The AclAuthorizer could emit a warning log message if a Subject lacked _any_ of the principal types imported in the rule file.
+However, it's not clear at this time that this is worth checking on _every request_.
+So in this proposal we leave this problem unaddressed.
 
 
 ## Affected/not affected projects
@@ -407,7 +425,7 @@ The kroxylicious repo.
 
 ## Compatibility
 
-No issues - this proposal introduces a new filter./
+The changes described in this proposal are backwards compatible.
 
 ## Rejected alternatives
 
@@ -428,3 +446,5 @@ those considered by Kafka today (such as record-level ACLs).
 [ANTLR]: https://www.antlr.org/
 [OPA]: https://www.openpolicyagent.org/
 [OpenFGA]: https://openfga.dev/
+[TLS_MAPPING]: https://kafka.apache.org/documentation.html#security_authz_ssl
+[SASL_MAPPING]: https://kafka.apache.org/documentation.html#security_authz_sasl
