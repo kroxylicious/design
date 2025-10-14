@@ -81,19 +81,49 @@ class KafkaServerErrorException(org.apache.kafka.common.protocol.Errors error) e
 record TopicNameResult(@Nullable String topicName, @Nullable TopicMappingException exception){}
 
 /**
+ * The result of discovering the topic names for a collection of topic ids
+ * @param topicNameResults
+ */
+public record TopicNameMapping(Map<Uuid, TopicNameResult> topicNameResults) {
+
+    /**
+     * @return a map from topic id to topic name lookup exception for all failed lookups
+     */
+    Map<Uuid, TopicNameLookupException> failedResults() {
+        return topicNameResults.entrySet().stream().filter(e -> e.getValue().exception() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().exception()));
+    }
+
+    /**
+     * @return a map of all successfully discovered topic names
+     */
+    Map<Uuid, String> successfulResults() {
+        return topicNameResults.entrySet().stream().filter(e -> e.getValue().topicName() != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().topicName()));
+    }
+
+    /**
+     * @return true if any of the results were failures
+     */
+    boolean anyFailedResults() {
+        return topicNameResults.values().stream().anyMatch(topicNameResult -> topicNameResult.exception() != null);
+    }
+}
+
+/**
  * Asynchronously resolves a collection of topic UUIDs to their corresponding topic names.
  *
- * @param topicUuids A Set of topic UUIDs to resolve.
- * @return A CompletionStage that will complete with an unmodifiable Map<Uuid, TopicNameResult>,
+ * @param topicUuids A collection of topic UUIDs to resolve.
+ * @return A CompletionStage that will complete with a TopicNameMapping,
  * mapping each topic UUID to its topic name result. Every input topicUuid must have an entry
- * in the result map. The stage may be completed exceptionally with an {@link TimeoutException}
+ * in the TopicNameMapping. The stage may be completed exceptionally with an {@link TimeoutException}
  * if the Server takes too long to respond.
  * <h4>Chained Computation stages</h4>
  * <p>Default and asynchronous default computation stages chained to the returned
  * {@link java.util.concurrent.CompletionStage} are guaranteed to be executed by the thread associated with the
  * connection. See {@link io.kroxylicious.proxy.filter} for more details.
  */
-CompletionStage<Map<Uuid, TopicNameResult>> topicNames(Collection<Uuid> topicUuids);
+CompletionStage<TopicNameMapping> topicNames(Collection<Uuid> topicUuids);
 ```
 
 ### 2. Metadata Request
