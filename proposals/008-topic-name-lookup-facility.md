@@ -117,10 +117,9 @@ information. We will send the highest version supported by both the proxy and up
 the same version that the downstream client would pick, but the proxy may not have observed a Metadata request from 
 a client on any given channel, in which case the Proxy must pick a version to use.
 
-The operation will return as many mappings as it can, and describe any issues with obtaining individual UUIDs, such as
-non-existence or authorization errors. The TopicNameMapping will contain either a name or a kafka `Errors` for each
-requested topic id. If we could not obtain Metadata for all the topic ids for any reason, then the `CompletionStage` will
-be completed exceptionally with a `TopicNameMappingException`.
+The TopicNameMapping will contain either a name or a kafka `Errors` for each requested topic id. If we could not obtain 
+a name or Error from the MetadataResponse, for all the requested topic ids, then the `CompletionStage` will be completed 
+exceptionally with a `TopicNameMappingException`.
 
 ### 3. Composability
 
