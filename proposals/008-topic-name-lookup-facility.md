@@ -19,7 +19,7 @@
 
 ## Summary
 
-This proposal outlines a new feature for the Kroxylicious filter framework: a mechanism to resolve topic names from
+This proposal outlines a new feature for the Kroxylicious filter framework: a mechanism to map topic names from
 their corresponding topic IDs. This will give Filter Authors a simple API that composes neatly with other Filters.
 
 ## Current Situation
@@ -49,7 +49,7 @@ receive messages containing the name.
 Filters in the chain are able to modify topic names and identifiers, therefore the names/identifiers visible to a Filter
 instance depend on the manipulations of these other Filters.
 
-To bridge this gap and allow filters to operate effectively, the framework must provide a reliable way to convert topic
+To bridge this gap and allow filters to operate effectively, the framework must provide a reliable way to map topic
 IDs back to their corresponding names, that composes with other Filters that manipulate the topic identifiers.
 
 ## Proposal
@@ -59,71 +59,55 @@ I propose:
 1. adding a [new method](#1-api-addition) to the `FilterContext` interface that allows filters to look up topic names
    for a given set of topic IDs.
 2. This will drive a [Metadata request](#2-metadata-request) to the upstream to learn the topic names.
-3. If upstream Filters mutate the topic names, these mutations [will be reflected](#3-composability) in the topic names
-   returned by the new API
+3. If upstream Filters mutate the topic names and or errors, these mutations [will be reflected](#3-composability) in 
+   the topic names and errors returned by the new API
 
 ### 1. API Addition
 
-The following method will be added to the `FilterContext`:
+The following members will be added to the `io.kroxylicious.proxy.filter`:
 
 ```java
-class TopicMappingException extends RuntimeException {
+class TopicNameMappingException extends RuntimeException {
 }
-
-// the server responded with an error code
-class KafkaServerErrorException(org.apache.kafka.common.protocol.Errors error) extends TopicMappingException {
-    
-}
-
-/**
-* topicName XOR exception will be non-null
-*/
-record TopicNameResult(@Nullable String topicName, @Nullable TopicMappingException exception){}
 
 /**
  * The result of discovering the topic names for a collection of topic ids
- * @param topicNameResults
  */
-public record TopicNameMapping(Map<Uuid, TopicNameResult> topicNameResults) {
+public interface TopicNameMapping {
+    /**
+     * @return true if there are any failures
+     */
+    boolean anyFailures();
 
     /**
-     * @return a map from topic id to topic name lookup exception for all failed lookups
+     * @return map from topic id to successfully mapped topic name
      */
-    Map<Uuid, TopicNameLookupException> failedResults() {
-        return topicNameResults.entrySet().stream().filter(e -> e.getValue().exception() != null)
-                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().exception()));
-    }
+    Map<Uuid, String> topicNames();
 
     /**
-     * @return a map of all successfully discovered topic names
+     * @return map from topic id to kafka server error
      */
-    Map<Uuid, String> successfulResults() {
-        return topicNameResults.entrySet().stream().filter(e -> e.getValue().topicName() != null)
-                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().topicName()));
-    }
-
-    /**
-     * @return true if any of the results were failures
-     */
-    boolean anyFailedResults() {
-        return topicNameResults.values().stream().anyMatch(topicNameResult -> topicNameResult.exception() != null);
-    }
+    Map<Uuid, Errors> failures();
 }
 
+```
+The following method will be added to the `io.kroxylicious.proxy.filter.FilterContext`:
+
+```java
 /**
- * Asynchronously resolves a collection of topic UUIDs to their corresponding topic names.
- *
- * @param topicUuids A collection of topic UUIDs to resolve.
- * @return A CompletionStage that will complete with a TopicNameMapping,
- * mapping each topic UUID to its topic name result. Every input topicUuid must have an entry
- * in the TopicNameMapping. The stage may be completed exceptionally with an {@link TimeoutException}
- * if the Server takes too long to respond.
+ * Maps all of the given {@code topicIds} to the current corresponding topic names.
+ * @param topicIds topic ids to resolve
+ * @return CompletionStage for a TopicNameMapping. The TopicNameMapping is guaranteed to contain either
+ * a name or {@link org.apache.kafka.common.protocol.Errors} for each topic id requested. If a name or
+ * error cannot be determined for any topic id then this stage will be completed exceptionally with a
+ * {@link TopicNameMappingException}.
  * <h4>Chained Computation stages</h4>
  * <p>Default and asynchronous default computation stages chained to the returned
  * {@link java.util.concurrent.CompletionStage} are guaranteed to be executed by the thread associated with the
  * connection. See {@link io.kroxylicious.proxy.filter} for more details.
+ * </p>
  */
-CompletionStage<TopicNameMapping> topicNames(Collection<Uuid> topicUuids);
+CompletionStage<TopicNameMapping> topicNames(Collection<Uuid> topicIds);
 ```
 
 ### 2. Metadata Request
@@ -134,7 +118,9 @@ the same version that the downstream client would pick, but the proxy may not ha
 a client on any given channel, in which case the Proxy must pick a version to use.
 
 The operation will return as many mappings as it can, and describe any issues with obtaining individual UUIDs, such as
-non-existence or authorization errors.
+non-existence or authorization errors. The TopicNameMapping will contain either a name or a kafka `Errors` for each
+requested topic id. If we could not obtain Metadata for all the topic ids for any reason, then the `CompletionStage` will
+be completed exceptionally with a `TopicNameMappingException`.
 
 ### 3. Composability
 
