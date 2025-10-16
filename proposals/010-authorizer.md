@@ -125,6 +125,8 @@ public interface SubjectBuilder {
         Optional<ClientTlsContext> clientTlsContext();
 
         Optional<ClientSaslContext> clientSaslContext();
+        
+        String sessionId();
     }
 }
 ```
