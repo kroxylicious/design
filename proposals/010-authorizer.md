@@ -58,9 +58,14 @@ public interface Principal {
     String name();
 }
 
-public record Anonymous(String name) implements Principal {
-    public static Anonymous newAnonymous() {
-        return new Anonymous(UUID.randomUUID().toString());
+public class Anonymous implements Principal {
+    private static final Anonymous INSTANCE = new Anonymous();
+    public static Anonymous anonymous() {
+        return INSTANCE;
+    }
+    @Override
+    public String name() {
+        return "";
     }
 }
 
@@ -87,7 +92,17 @@ public record Anonymous(String name) implements Principal {
  *
  * @param principals
  */
-public record Subject(Set<Principal> principals) { ... }
+public record Subject(Set<Principal> principals) {
+   Subject {
+       if (principals.isEmpty()) {
+           throw new IllegalArgumentException("The principals of a Subject may not be empty");
+       }
+   }
+   private static final Subject ANONYMOUS = new Subject(Set.of(Anonymous.anonymous()));
+   static Subject anonymous() {
+       return ANONYMOUS;
+   }
+}
 ```
 
 A filter will be able to obtain the `Subject` from the `FilterContext`:
