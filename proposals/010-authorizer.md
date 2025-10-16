@@ -153,8 +153,8 @@ public interface SubjectBuilder {
 
 The default `SubjectBuilder` will return `Subjects` with a singleton `principals` set whose element is an anonymous `User`.
 In addition to the default subject builder we will support two other `SubjectBuilders` within the `kroxylicious-runtime`:
-1. A builder called `Tls`, for `Subjects` based entirely on TLS client certificate information 
-2. A builder called `Sasl`, for `Subjects` based entirely on the SASL authorized id.
+1. A builder called `Tls`, which will return `Subjects` with a `User` based entirely on TLS client certificate information 
+2. A builder called `Sasl`, which will return `Subjects` with a `User` based entirely on the SASL authorized id.
 
 The user will be able to configure a virtual cluster with one of these subject builders:
 
@@ -174,6 +174,9 @@ virtualClusters:
       - authz
     # ...
 ```
+In other words, all the filters in a virtual cluster will share a common "shape" of `Subjects` based on the `subjectBuilder`.
+Filter implementations which consume the `FilterContext.authenticatedSubject()` will be able to query the `principals` is contains 
+and make policy decisions based on the presence or absence of particular principal types or (principal type, name) pairs.
 
 The `Tls` builder will support the same [mapping rules as Apache Kafka][TLS_MAPPING], and also the ability to create principals 
 from the subject alternative names (with the same regex-based mapping supported).
@@ -193,19 +196,24 @@ public interface Authorizer {
     /**
      * Determines whether the given {@code subject} is allowed to perform the given {@code actions}.
      * The implementation must ensure that the returned authorization partitions all the given {@code actions}
-     * between {@link Authorization#allowed()} and {@link Authorization#denied()}.
+     * between {@link AuthorizeResult#allowed()} and {@link AuthorizeResult#denied()}.
      * @param subject The subject.
      * @param actions The actions.
      * @return The outcome.
      */
-    CompletionStage<AuthorizationDecisions> authorize(Subject subject, List<Action> actions);
+    CompletionStage<AuthorizeResult> authorize(Subject subject, List<Action> actions);
+    
+    /**
+     * All the resource types supported by this authorizer.
+     */
+    Set<Class<?>> resourceTypes();
 }
 ```
 
 Note:
 * The asynchronous return type is intended to permit implementations using technologies such as [OPA][OPA] or [OpenFGA][OpenFGA], which would otherwise need to block the thread making the decision over the network.
 * Because of the possibility of higher latency authorizer implementations, call sites should try to pass as many `actions` as possible so as to benefit from batching requests.
-* Unlike Apache Kafka we don't currently include in the Authorizer the responsibility to log authorization attempts.
+* Unlike Apache Kafka we don't currently include in the Authorizer the responsibility to audit log authorization attempts.
 
 An `Action` describes something the subject may be attempting to do:
 
@@ -218,12 +226,17 @@ public record Action(
 Where `ResourceType` has this declaration:
 
 ```java
+/**
+ * Interface to be implemented by {@code enum} types which represent a type of resource, such as a 
+ * Kafka topic or consumer group. The enum elements represent the operations that instances of that resource type support.
+ * For example a Kafka topic supports a CREATE, DESCRIBE, READ and WRITE operations (among others).
+ */
 public interface ResourceType<V extends Enum<V> & ResourceType<V>> { ... }
 ```
 
 The scary-looking type parameter bound means a `ResourceType` implementation must be an `enum` rather than `class`, `interface`, etc.
 The `enum`'s elements are the operations that a particular resource type supports. 
-For example we would model a Kafka topic like this:
+We would model a Kafka topic like this:
 
 ```java
 enum Topic implements ResourceType<Topic> {
@@ -233,15 +246,15 @@ enum Topic implements ResourceType<Topic> {
     // ...
 }
 
-The `java.lang.Class` of a particular ResourceType then serves to identify the type of a resource in the API.
-Thus, the `Action` instance for describing a topic called "foo" would be created like so:
+The `java.lang.Class` of a particular `ResourceType` then serves to identify the type of a resource in the API.
+In this way, the `Action` instance for describing a topic called "foo" would be created like so:
 
 ```java
 new Action(Topic.DESCRIBE, "foo")
 ```
 
-The `AuthorizationDecisions` type provides access to the decisions about each of the actions in the query to `Authorizer.authorize()`.
-That is, `Authorizer.authorize()` partitions its `actions` argument into the `allowed` and `denied` lists of the returned `AuthorizationDecisions`.
+The `AuthorizeResult` type provides access to the decisions about each of the actions in the query to `Authorizer.authorize()`.
+That is, `Authorizer.authorize()` partitions its `actions` argument into the `allowed` and `denied` lists of the returned `AuthorizeResult`.
 
 ```java
 public enum Decision {
@@ -249,10 +262,14 @@ public enum Decision {
     DENY;
 }
 
-public record AuthorizationDecisions(
-                            Subject subject,
-                            List<Action> allowed,
-                            List<Action> denied) {
+public class AuthorizeResult {
+                            
+	AuthorizeResult(
+		Subject subject,
+		List<Action> allowed,
+		List<Action> denied) {
+        // ...
+    }
 
     public Decision decision(Operation<?> operation, String resourceName) { ... }
     
@@ -334,6 +351,12 @@ Finally, it's also possible to select multiple principals at once:
     ```
     allow User with name * to READ Topic with name = "foo";
     ```
+    Note that the principal must have a `name` to match this rule; it does **not** match anonymous `Users`.
+    
+* Subjects which are anonymous in some given principal type can be selected:
+    ```
+    allow anonymous User to READ Topic with name = "foo";
+    ```
 
 * All subjects with a given principal type and a name starting with a given prefix can be selected:
     ```
@@ -394,7 +417,7 @@ For the initial version, the system will be capable of making authorization deci
 Future versions may support authorization decisions for other Kafka resources types (e.g. consumer group and transactional id).
 The Authorizer will be designed to be open for extension so that it may be used to make authorization decisions about other entities (beyond those defined by Apache Kafka).
 
-The table below sets out the authorization checks and filters will be implemented.
+The table below sets out the authorization checks and filters will be implemented initially.
 
 | Operation | Resource Type | Kafka Message                                                                                                                                                                                                          |
 |-----------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -406,7 +429,28 @@ The table below sets out the authorization checks and filters will be implemente
 | DESCRIBE  | Topic         | ListOffset, OffsetFetch, OffsetFetchForLeaderEpoch DescribeProducers, ConsumerGroupHeartbeat, ConsumerGroupDescribe, ShareGroupHeartbeat, ShareGroupDescribe, MetaData, DescribeTopicPartitions, ConsumerGroupDescribe |
 | CONNECT   | Cluster       | SaslAuthenticate                                                                                                                                                                                                       |
 
-In general, the filter will make access decisions in the same manner as Kafka itself.  This means it will apply the same authorizer checks that Kafka enforces itself and generate error responses in the same way.  It will
+# Fail-safe behaviours
+
+Extending the API coverage of the filter over multiple releases brings a compatibility wrinkle.
+Consider an ACL rules file for version X which contains rules for `Topic` resources.
+When upgrading to version Y > X where the filter has gained support for rules on `ConsumerGroup` resources an unmodified rules file would deny-by-default any APIs which refer to groups. 
+
+While inconvenient (the user will need to add additional rules to their file), this behaviour is consistent with avoiding inadvertant information disclosure.
+
+However, there's a further wrinkle: What about ACL rules files which contain rules about resource types which are not-yet supported, such as `TransactionalId`? From an end user's point of view they have an access control for transactional ids. But the filter is not actually enforing this access control. To avoid this the `Authorzation` filter will check that its configured rules file only refers to the resource types it is actually providing enforcement over. It will use the `Authorizer.resourceTypes()` method to enforce this check.
+
+Finally we need to consider evolution of the Kafka protocol itself. Even a complete and bug-free `Authorization` filter implementation could cease to provide complete control if:
+
+* A new version of a Kafka API starts to refer to a resource (such as a `Topic`) which the filter was not coded to handle.
+* A new API is added which refers to a resource (such as a `Topic`) which the filter was not coded to handle (consider as an example the addition of the Share Groups RPCs).
+
+For this reason the `Authorization` filter will use strict controls over what APIs and API versions it supports, and will reject requests which don't meet these criteria.
+
+The combination of these behaviours should provide good guarantees that the rules configured by the end user are actually being understood and honoured by the filter, even as both it and the Kafka protocol itself evolves.
+
+# Kafka equivalence
+
+In general, the `Authorization` filter will make access decisions in the same manner as Kafka itself.  This means it will apply the same authorizer checks that Kafka enforces itself and generate error responses in the same way.  It will
 From the client's perspective, it will be impossible for it to distinguish between the proxy and kafka cluster itself.
 It will also use the same implied operation semantics as implemented by Kafka itself, such as where `ALTER` implies `DESCRIBE`, as described by 
 `org.apache.kafka.common.acl.AclOperation`.
@@ -432,7 +476,6 @@ filterDefinitions:
 ```
 
 Because the `SubjectBuilder` is configured at the virtual cluster level, it is possible for a filter to be referenced in a virtual cluster which uses a subject builder which yields Subjects that are incompatible with the `Authorization` filter. 
-For example if the `SubjectBuilder` is not explicitly configured the default one will yield `Anonymous` subjects, while the Authorization filter's rules file might be written in terms of the `User` class.
 Due to the deny-by-default nature of the AclAuthoriser this configuration problem is not a security problem (access cannot be allowed by accident).
 It would be nice if this situation could be detected and warned about during proxy start up. 
 However, there is no obvious way to do this.
