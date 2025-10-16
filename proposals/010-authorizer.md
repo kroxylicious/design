@@ -52,42 +52,62 @@ To do this we will use a similar model to JAAS, but using our own types:
 package io.kroxylicious.proxy.authentication;
 
 /**
- * An identifier held by a {@link Subject}.
- */
-public interface Principal {
-    String name();
-}
-
-public record Anonymous(String name) implements Principal {
-    public static Anonymous newAnonymous() {
-        return new Anonymous(UUID.randomUUID().toString());
-    }
-}
-
-/**
  * <p>Represents an actor in the system.
- * Subjects are composed of a non-empty set of identifiers represented as {@link Principal} instances.</p>
+ * Subjects are composed of a set of identifiers represented as {@link Principal} instances.</p>
  *
  * <p>The principals chosen depend on the calling code, but in general might comprise the following:</p>
  * <ul>
  * <li>information proven by a client, such as a SASL authorized id,</li>
- * <li>information known about the client, such as the remote peer's IP address,</li>
+ * <li>information known about the client, such as the remote peer's IP address, 
+       or obtained from some trusted source of information about users,</li>
  * <li>information provided by the client, such as its Kafka client id</li>
  * </ul>
  * <p>
  *     <strong>Security best practice says you should only trust information that's proven about the client.</strong>
- *     However, it is sometimes useful to have access to the other information for making authorization decisions.
+ *     However, it is sometimes useful to have access to the other information for making policy decisions.
  *     An example would be to deny a misbehaving client application identified by a
  *     (authorized id, client id)-pair from connecting to a cluster while the underlying problem is fixed.
- *     Such a decision narrowed access to a client based on untrusted information (the client id)
+ *     Such a decision narrows access to a client based on untrusted information (the client id)
  *     to a client which would otherwise be allowed access (based on the SASL authorized id) on
- *     the premise that such a client is not malicious.
- *     Crucially, it does not expand access to clients based on that untrusted information.
+ *     the premise that such a client is not malicious, merely misbehaving.
+ *     Crucially, this kind of usage does not <em>expand access</em> to clients based on that <em>untrusted information</em>.
  * </p>
  *
  * @param principals
  */
 public record Subject(Set<Principal> principals) { ... }
+
+
+/**
+ * A typed identifier held by a {@link Subject}.
+ * The fully qualified java class name of concrete implementation classes are used to externally identify the type of principal.
+ * For example a plugin might supply implementation classes {@code com.example.kafka.proxy.auth.User} and 
+ {@code com.example.kafka.proxy.auth.Role} which are treated as distinct namespaces for the 
+ names of their instances: {@code User("foo")} and {@code Role("foo")} are two different things.
+ */
+public interface Principal {
+    /** 
+     * The name of the principal.
+     * The empty string should be used for types of principal which are global therefore lack a natural identifier.
+     * An empty Optional indicates an anonymous instance of this kind of principal.
+     */
+    Optional<String> name();
+}
+
+public class User implements Principal {
+    public static final User ANONYMOUS = new User(null);
+    
+    Optional<String> name;
+    
+    public User(@Nullable String name) {
+        this.name = Optional.ofNullable(name);
+    }
+    
+    Optional<String> name() {
+        return this.name;
+    }
+    
+}
 ```
 
 A filter will be able to obtain the `Subject` from the `FilterContext`:
@@ -103,7 +123,7 @@ public interface FilterContext {
 }
 ```
 
-The asynchronous result type is intended to allow a subject to be built using information obtained over the network, for example role/group information obtained from Active Directory/LDAP.
+The asynchronous result type allows a subject to be built using information obtained over the network, for example role/group information obtained from Active Directory/LDAP.
 
 ### Support for TLS and SASL subjects in `kroxylicious-runtime`
 
@@ -131,7 +151,7 @@ public interface SubjectBuilder {
 }
 ```
 
-The default `SubjectBuilder` will return anonymous `Subjects`.
+The default `SubjectBuilder` will return `Subjects` with a singleton `principals` set whose element is an anonymous `User`.
 In addition to the default subject builder we will support two other `SubjectBuilders` within the `kroxylicious-runtime`:
 1. A builder called `Tls`, for `Subjects` based entirely on TLS client certificate information 
 2. A builder called `Sasl`, for `Subjects` based entirely on the SASL authorized id.
