@@ -32,7 +32,7 @@ We propose to add authorization-related APIs to Kroxylicious, as follows:
 4. Add a new `kroxylicious-authorizer-acl` module implementing the `Authorizer` plugin interface using Access Control Lists (ACLs).
 5. Add a new `kroxylicious-authorization` module implementing an `Authorization` protocol filter plugin which uses an `Authorizer` instance to provide Kafka-equivalent authorization.
 
-The following subections will explain these pieces in detail.
+The following subsections will explain these pieces in detail.
 
 Ultimately, the `Authorization` filter gives the ability to layer authorization checks into a Kafka system with those authorization checks being enforced by the filter. These authorization checks are in addition to any that may be imposed by the Kafka Cluster itself. This means that for an action to be allowed both the proxy’s authorizer and the Kafka broker’s authorizer will need to reach an ALLOW decision.
 
@@ -68,7 +68,7 @@ public record Anonymous(String name) implements Principal {
  * <p>Represents an actor in the system.
  * Subjects are composed of a non-empty set of identifiers represented as {@link Principal} instances.</p>
  *
- * <p>The principals chosen depend on the calling code but in general might comprise the following:</p>
+ * <p>The principals chosen depend on the calling code, but in general might comprise the following:</p>
  * <ul>
  * <li>information proven by a client, such as a SASL authorized id,</li>
  * <li>information known about the client, such as the remote peer's IP address,</li>
@@ -108,7 +108,7 @@ The asynchronous result type is intended to allow a subject to be built using in
 ### Support for TLS and SASL subjects in `kroxylicious-runtime`
 
 Eventually we expect to make the creation of the `Subject` instances exposed through `FilterContext.authenticatedSubject()` to be pluggable.
-But initiall the `SubjectBuilder` interface will be internal to the `kroxylicious-runtime` module.
+But initially the `SubjectBuilder` interface will be internal to the `kroxylicious-runtime` module.
 It looks like this:
 
 ```java
