@@ -346,6 +346,7 @@ Finally, it's also possible to select multiple principals at once:
     ```
     allow anonymous User to READ Topic with name = "foo";
     ```
+    This means that none of the subject's principals are of type `User`.
 
 * All subjects with a given principal type and a name starting with a given prefix can be selected:
     ```
