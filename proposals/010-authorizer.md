@@ -429,7 +429,7 @@ The table below sets out the authorization checks and filters will be implemente
 | DESCRIBE  | Topic         | ListOffset, OffsetFetch, OffsetFetchForLeaderEpoch DescribeProducers, ConsumerGroupHeartbeat, ConsumerGroupDescribe, ShareGroupHeartbeat, ShareGroupDescribe, MetaData, DescribeTopicPartitions, ConsumerGroupDescribe |
 | CONNECT   | Cluster       | SaslAuthenticate                                                                                                                                                                                                       |
 
-# Fail-safe behaviours
+# Fail-closed behaviours
 
 Extending the API coverage of the filter over multiple releases brings a compatibility wrinkle.
 Consider an ACL rules file for version X which contains rules for `Topic` resources.
