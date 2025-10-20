@@ -271,7 +271,7 @@ public class AuthorizeResult {
         // ...
     }
 
-    public Decision decision(Operation<?> operation, String resourceName) { ... }
+    public Decision decision(ResourceType<?> operation, String resourceName) { ... }
     
     // ...
 }
