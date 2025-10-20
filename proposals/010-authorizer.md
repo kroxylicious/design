@@ -45,6 +45,9 @@ We want an API capable of supporting:
 * Mapping from a TLS client certificate subject and/or subject alternative names (SAN) to a different string identifier.
 * Making authorization decisions based on information about the client learned from a trusted source (e.g. Active Directory, or OAuth token introspection)
 * Making some authorization decisions based on identity and others based on this additional information.
+* Providing information for other uses in the future. Examples include grouping clients together to report an aggregated metric, or grouping clients together for quotaing purposes. 
+
+So for example, in a future verions of the proxy that supported multitenancy we might have `Subjects` composed of `User`, `Role` and `Tenant` principals. `User` and `Role` might be used for authorization, while `Tenant` might be used for enforcement of a bandwidth quota covering all the clients with the same `Tenant`.
 
 To do this we will use a similar model to JAAS, but using our own types:
 
