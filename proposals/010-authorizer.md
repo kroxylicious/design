@@ -91,25 +91,11 @@ public record Subject(Set<Principal> principals) { ... }
 public interface Principal {
     /** 
      * The name of the principal.
-     * The empty string should be used for types of principal which are global therefore lack a natural identifier.
-     * An empty Optional indicates an anonymous instance of this kind of principal.
      */
-    Optional<String> name();
+    String name();
 }
 
-public class User implements Principal {
-    public static final User ANONYMOUS = new User(null);
-    
-    Optional<String> name;
-    
-    public User(@Nullable String name) {
-        this.name = Optional.ofNullable(name);
-    }
-    
-    Optional<String> name() {
-        return this.name;
-    }
-    
+public class User(String name) implements Principal {
 }
 ```
 
@@ -154,7 +140,7 @@ public interface SubjectBuilder {
 }
 ```
 
-The default `SubjectBuilder` will return `Subjects` with a singleton `principals` set whose element is an anonymous `User`.
+The default `SubjectBuilder` will return `Subjects` with an empty `principals` set.
 In addition to the default subject builder we will support two other `SubjectBuilders` within the `kroxylicious-runtime`:
 1. A builder called `Tls`, which will return `Subjects` with a `User` based entirely on TLS client certificate information 
 2. A builder called `Sasl`, which will return `Subjects` with a `User` based entirely on the SASL authorized id.
