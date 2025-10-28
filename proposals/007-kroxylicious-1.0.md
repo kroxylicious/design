@@ -86,7 +86,7 @@ This proposal concerns the kroxylicious/kroxylicious github projects, and the re
 
 ## Compatibility
 
-This the subject of this proposal and has already been described, above.
+This is the subject of this proposal and has already been described, above.
 
 ## Rejected alternatives
 
