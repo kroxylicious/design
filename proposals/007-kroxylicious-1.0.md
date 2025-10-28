@@ -32,11 +32,7 @@ For the avoidance of doubt, this compatibilty guarantee would cover:
     * `kroxylicious-api`
     * `kroxylicious-kms`
 2. The format of the proxy configuration file, including the configuration of certain plugins provided by the project. Compatibility here means that a released version `1.y` would accept any configuration file that was accepted as valid in any released `1.x` version, where `y > x`. "Valid" means the proxy starts up cleanly.
-3. The plugins covered under item 2. are:
-    * `kroxylicious-record-encryption`
-    * `kroxylicious-kms-provider-aws-kms`
-    * `kroxylicious-kms-provider-fortanix-dsm`
-    * `kroxylicious-kms-provider-hashicorp-vault`
+3. The plugins covered under item 2. are all those implementations of the APIs listed in 1. provided by the project, excluding those implementations in test packages and modules. This implies the contined inclusion of these plugins in the `1.x` series of releases. However, the existing multi-tenancy plugin will be marked as deprecated.
 4. The Kubernetes custom resource APIs defined by the kroxylicious-operator.
 
 If the compatibility guarantee is broken we will treat that as a bug.
@@ -54,7 +50,7 @@ If you want a bug fixed, but the maintainers do not think it's a priority, you w
 
 We expect the process to work similarly to the Kafka project itself:
 
-Fixes should always be made to the tip-most branch that is affected by the bug, and subsequently back-ported to the branches for other affected versions. Often, this will mean PRs should be opened against `main`, and back ported to the `1.x` minor branch.
+Fixes should always be made to the tip-most branch that is affected by the bug, and subsequently back-ported to the branches for other affected versions. Often, this will mean PRs should be opened against `main`, and back ported to the `1.x` branch, and eventually released under a `1.x.y` tag.
 
 Under semver, patch releases only contain bug fixes. They do not contain new features.
 We interpret "bug fixes" to include:
@@ -63,9 +59,11 @@ We interpret "bug fixes" to include:
 * exploitable CVEs in dependencies and transitive dependencies, where a fixed version of the dependency has been released.
 * exploitable CVEs in Docker images, including in a base image, where a fixed version of the base image has been released.
 
-Note that if a bug is fixed by a new feature merged to `main` then it won't be eligable to be merged to a patch release branch.
+Note that new features merged to `main` will not be eligible to be backported to a minor release branch.
 
 # Patch releases
+
+Although described in terms of `1.x`, the following would apply `2.0` and future major versions.
 
 We propose to provide patch releases for current `1.x`, plus up to the previous two minor releases. I.e. If the current release is `1.x.y` then we are prepared to release a `1.x.(y+1)`, `1.(x-1).z` and `1.(x-2).z`.
 However, the "up to" is limited to 6 months after the initial minor release. 
