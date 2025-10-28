@@ -22,7 +22,7 @@ A 1.0 release would be a signal that we believe Kroxylicious is production-ready
 
 ### What will have a compatibility guarantee?
 
-We propose that the release that was going to be called `0.18.0` instead be called `1.0`.
+We propose that the release that was going to be called `0.18.0` instead be called `1.0.0`.
 By implication of Semantic Versioning, that means we would be committing to not breaking compatibilty until some future `2.0` release.
 The time of such a `2.0` release is currently neither known nor planned.
 
