@@ -1,4 +1,4 @@
-# Proposal 008: Resolve Topic Names from Topic IDs in the Filter Framework
+# Proposal 007: Resolve Topic Names from Topic IDs in the Filter Framework
 
 <!-- TOC -->
 * [Proposal 008: Resolve Topic Names from Topic IDs in the Filter Framework](#proposal-008-resolve-topic-names-from-topic-ids-in-the-filter-framework)
@@ -67,7 +67,28 @@ I propose:
 The following members will be added to the `io.kroxylicious.proxy.filter`:
 
 ```java
-class TopicNameMappingException extends RuntimeException {
+/**
+ * Indicates there was some problem obtaining a name for a topic id
+ */
+public class TopicNameMappingException extends RuntimeException {
+    private final Errors error;
+
+    public TopicNameMappingException(Errors error) {
+        this(error, error.message(), error.exception());
+    }
+
+    public TopicNameMappingException(Errors error, String message) {
+        this(error, message, error.exception());
+    }
+
+    public TopicNameMappingException(Errors error, String message, Throwable cause) {
+        super(message, cause);
+        this.error = Objects.requireNonNull(error);
+    }
+
+    public Errors getError() {
+        return error;
+    }
 }
 
 /**
@@ -80,34 +101,41 @@ public interface TopicNameMapping {
     boolean anyFailures();
 
     /**
-     * @return map from topic id to successfully mapped topic name
+     * @return immutable map from topic id to successfully mapped topic name
      */
     Map<Uuid, String> topicNames();
 
     /**
-     * @return map from topic id to kafka server error
+     * Describes the reason for every failed mapping. Expected exception types are:
+     * <ul>
+     *     <li>{@link TopLevelMetadataErrorException} indicates that we attempted to obtain Metadata from upstream, but received a top-level error in the response</li>
+     *     <li>{@link TopicLevelMetadataErrorException} indicates that we attempted to obtain Metadata from upstream, but received a topic-level error in the response</li>
+     *     <li>{@link TopicNameMappingException} can be used to convey any other exception</li>
+     * </ul>
+     * All the exception types offer {@link TopicNameMappingException#getError()} for conveniently determining the cause. Unhandled
+     * exceptions will be mapped to an {@link Errors#UNKNOWN_SERVER_ERROR}. Callers will be able to use this to detect expected
+     * cases like {@link Errors#UNKNOWN_TOPIC_ID}.
+     * @return immutable map from topic id to kafka server error
      */
-    Map<Uuid, Errors> failures();
+    Map<Uuid, TopicNameMappingException> failures();
 }
-
 ```
 The following method will be added to the `io.kroxylicious.proxy.filter.FilterContext`:
 
 ```java
-/**
- * Maps all of the given {@code topicIds} to the current corresponding topic names.
- * @param topicIds topic ids to resolve
- * @return CompletionStage for a TopicNameMapping. The TopicNameMapping is guaranteed to contain either
- * a name or {@link org.apache.kafka.common.protocol.Errors} for each topic id requested. If a name or
- * error cannot be determined for any topic id then this stage will be completed exceptionally with a
- * {@link TopicNameMappingException}.
- * <h4>Chained Computation stages</h4>
- * <p>Default and asynchronous default computation stages chained to the returned
- * {@link java.util.concurrent.CompletionStage} are guaranteed to be executed by the thread associated with the
- * connection. See {@link io.kroxylicious.proxy.filter} for more details.
- * </p>
- */
-CompletionStage<TopicNameMapping> topicNames(Collection<Uuid> topicIds);
+     /**
+     * Attempts to map all the given {@code topicIds} to the current corresponding topic names.
+     * @param topicIds topic ids to map to names
+     * @return a CompletionStage that will be completed with a complete mapping, with every requested topic id mapped to either an
+     * {@link TopicNameMappingException} or a name. All failure modes should complete the stage with a TopicNameMapping, with the
+     * TopicNameMapping used to convey the reason for failure, rather than failing the Stage.
+     * <h4>Chained Computation stages</h4>
+     * <p>Default and asynchronous default computation stages chained to the returned
+     * {@link java.util.concurrent.CompletionStage} are guaranteed to be executed by the thread
+     * associated with the connection. See {@link io.kroxylicious.proxy.filter} for more details.
+     * </p>
+     */
+    CompletionStage<TopicNameMapping> topicNames(Collection<Uuid> topicIds);
 ```
 
 ### 2. Metadata Request
@@ -117,9 +145,10 @@ information. We will send the highest version supported by both the proxy and up
 the same version that the downstream client would pick, but the proxy may not have observed a Metadata request from 
 a client on any given channel, in which case the Proxy must pick a version to use.
 
-The TopicNameMapping will contain either a name or a kafka `Errors` for each requested topic id. If we could not obtain 
-a name or Error from the MetadataResponse, for all the requested topic ids, then the `CompletionStage` will be completed 
-exceptionally with a `TopicNameMappingException`.
+The TopicNameMapping will contain either a name or a kafka `TopicNameMappingException` for each requested topic id.
+We strive to always provide a `TopicNameMapping` under the various failure scenarios, preferring to Map every
+id to an exception, rather than fail the stage. The TopicNameMappingException offers a Kafka Errors enum for conveniently
+detecting expected cases like `UNKNOWN_TOPIC_ID`, internal exceptions will be mapped to `UNKNOWN_SERVER_ERROR`.
 
 ### 3. Composability
 
