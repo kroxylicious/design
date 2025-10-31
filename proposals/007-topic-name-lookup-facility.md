@@ -1,7 +1,7 @@
 # Proposal 007: Resolve Topic Names from Topic IDs in the Filter Framework
 
 <!-- TOC -->
-* [Proposal 008: Resolve Topic Names from Topic IDs in the Filter Framework](#proposal-008-resolve-topic-names-from-topic-ids-in-the-filter-framework)
+* [Proposal 007: Resolve Topic Names from Topic IDs in the Filter Framework](#proposal-007-resolve-topic-names-from-topic-ids-in-the-filter-framework)
   * [Summary](#summary)
   * [Current Situation](#current-situation)
   * [Motivation](#motivation)
