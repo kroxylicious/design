@@ -47,7 +47,7 @@ We want an API capable of supporting:
 * Making some authorization decisions based on identity and others based on this additional information.
 * Providing information for other uses in the future. Examples include grouping clients together to report an aggregated metric, or grouping clients together for quotaing purposes. 
 
-So for example, in a future verions of the proxy that supported multitenancy we might have `Subjects` composed of `User`, `Role` and `Tenant` principals. `User` and `Role` might be used for authorization, while `Tenant` might be used for enforcement of a bandwidth quota covering all the clients with the same `Tenant`.
+For example, in a future verion of the proxy that supported multitenancy we might have `Subjects` composed of `User`, `Role` and `Tenant` principals. `User` and `Role` might be used for authorization, while `Tenant` might be used for enforcement of a bandwidth quota covering all the clients with the same `Tenant`.
 
 To do this we will use a similar model to JAAS, but using our own types:
 
@@ -56,25 +56,17 @@ package io.kroxylicious.proxy.authentication;
 
 /**
  * <p>Represents an actor in the system.
- * Subjects are composed of a set of identifiers represented as {@link Principal} instances.</p>
+ * Subjects are composed of a possibly-empty set of identifiers represented as {@link Principal} instances.
+ * An anonymous actor is represented by a Subject with an empty set of principals.
+ * As a convenience, {@link Subject#anonymous()} returns such a subject.
+ * </p>
  *
- * <p>The principals chosen depend on the calling code, but in general might comprise the following:</p>
+ * <p>The principals included in a subject might comprise the following:</p>
  * <ul>
  * <li>information proven by a client, such as a SASL authorized id,</li>
- * <li>information known about the client, such as the remote peer's IP address, 
-       or obtained from some trusted source of information about users,</li>
- * <li>information provided by the client, such as its Kafka client id</li>
+ * <li>information known about the client, such as the remote peer's IP address,</li>
+ * <li>information obtained about the client from a trusted source, such as lookup up role or group information from a directory.</li>
  * </ul>
- * <p>
- *     <strong>Security best practice says you should only trust information that's proven about the client.</strong>
- *     However, it is sometimes useful to have access to the other information for making policy decisions.
- *     An example would be to deny a misbehaving client application identified by a
- *     (authorized id, client id)-pair from connecting to a cluster while the underlying problem is fixed.
- *     Such a decision narrows access to a client based on untrusted information (the client id)
- *     to a client which would otherwise be allowed access (based on the SASL authorized id) on
- *     the premise that such a client is not malicious, merely misbehaving.
- *     Crucially, this kind of usage does not <em>expand access</em> to clients based on that <em>untrusted information</em>.
- * </p>
  *
  * @param principals
  */
@@ -82,11 +74,11 @@ public record Subject(Set<Principal> principals) { ... }
 
 
 /**
- * A typed identifier held by a {@link Subject}.
- * The fully qualified java class name of concrete implementation classes are used to externally identify the type of principal.
- * For example a plugin might supply implementation classes {@code com.example.kafka.proxy.auth.User} and 
- {@code com.example.kafka.proxy.auth.Role} which are treated as distinct namespaces for the 
- names of their instances: {@code User("foo")} and {@code Role("foo")} are two different things.
+ * <p>An identifier held by a {@link Subject}.</p>
+ *
+ * <p>Implementations <strong>must</strong> override {@code hashCode()} and {@code equals(Object)} such
+ * instances are equal if, and only if, they have the same implementation class and their names that are the same
+ * (according to {@code equals()}). One easy way to achieve this is to use a {@code record} class with a single {@code name} component.</p>
  */
 public interface Principal {
     /** 
@@ -94,83 +86,177 @@ public interface Principal {
      */
     String name();
 }
-
-public class User(String name) implements Principal {
-}
 ```
 
-A filter will be able to obtain the `Subject` from the `FilterContext`:
+A Filter will be able public a Subject as a result of SASL authentication and to obtain the `Subject` from the `FilterContext`:
 
 ```java
 package io.kroxylicious.proxy.filter;
 
 public interface FilterContext {
     // ... existing methods ...
+
+    // new methods:
+    /**
+     * Allows a filter (typically one which implements {@link SaslAuthenticateRequestFilter})
+     * to announce a successful authentication outcome with the Kafka client to other plugins.
+     * After calling this method the results of {@link #clientSaslContext()}
+     * and {@link #authenticatedSubject()} will both be non-empty for this and other filters.
+     *
+     * In order to support reauthentication, calls to this method and
+     * {@link #clientSaslAuthenticationFailure(String, String, Exception)}
+     * may be arbitrarily interleaved during the lifetime of a given filter instance.
+     * @param mechanism The SASL mechanism used
+     * @param subject The subject
+     */
+    void clientSaslAuthenticationSuccess(String mechanism,
+                                         Subject subject);
     
-    // new method:
-    CompletionStage<Subject> authenticatedSubject();
+    /**
+     * <p>Returns the client subject.</p>
+     *
+     * <p>Depending on configuration, the subject can be based on network-level or Kafka protocol-level information (or both):</p>
+     * <ul>
+     *   <li>This will return an
+     *   anonymous {@code Subject} (one with an empty {@code principals} set) when
+     *   no authentication is configured, or the transport layer cannot provide authentication (e.g. TCP or non-mutual TLS transports).</li>
+     *   <li>When client mutual TLS authentication is configured this will
+     *   initially return a non-anonymous {@code Subject} based on the TLS certificate presented by the client.</li>
+     *   <li>At any point, if a filter invokes {@link #clientSaslAuthenticationSuccess(String, Subject)} then that subject
+     *   will override the existing subject.</li>
+     *   <li>Because of the possibility of <em>reauthentication</em> it is also possible for the
+     *   subject to change even after then initial SASL reauthentication.</li>
+     * </ul>
+     *
+     * <p>Because the subject can change, callers are advised to be careful to avoid
+     * caching subjects, or decisions derived from them.</p>
+     *
+     * <p>Which principals are present in the returned subject, and what their {@code name}s look like,
+     * depends on the configuration of network
+     * and/or {@link #clientSaslAuthenticationSuccess(String, Subject)}-calling filters.
+     * In general, filters should be configurable with respect to the principal type when interrogating the returned
+     * subject.</p>
+     *
+     * @return The client subject
+     * @see #clientSaslAuthenticationSuccess(String, Subject)
+     */
+    Subject authenticatedSubject();
 }
 ```
 
-The asynchronous result type allows a subject to be built using information obtained over the network, for example role/group information obtained from Active Directory/LDAP.
+There's strong no need, at the API level, to be prescriptive about the implementations of `Principal` that are allowed.
+In particular, we don't want to limit `Principal` implementations to being provided by the API module.
+However, in order to guaranteeing that `authenticatedSubject()` cannot return `null` and also support backwards compatibility for the existing API (e.g. `FilterContext.clientSaslAuthenticationSuccess(String mechanism, String authorizedId)` and `ClientSaslContext.authorizationId()`), we need the runtime to have a way of making a `Subject` out of an `authorizedId`, and providing an `authorizedId` from a `Subject`
+For this reason we will provide a `User` class in the runtime, and initially require that the `Subjects` with non-empty `principals` published via `clientSaslAuthenticationSuccess(String mechanism, Subject subject)` always have a single `User` principal. This allows `ClientSaslContext.authorizationId()` to work even when the new API is used.
+
+```
+/**
+ * A principal identifying an authenticated client.
+ * It is currently required to use this principal to represent clients that have authenticated via
+ * TLS or SASL.
+ * @param name The name of the user.
+ */
+public record User(String name) implements Principal {}
+```
+
+
 
 ### Support for TLS and SASL subjects in `kroxylicious-runtime`
 
-Eventually we expect to make the creation of the `Subject` instances exposed through `FilterContext.authenticatedSubject()` to be pluggable.
-But initially the `SubjectBuilder` interface will be internal to the `kroxylicious-runtime` module.
-It looks like this:
+Kroxylicious supports APIs that allow authentication information to be obtained from TLS or SASL. 
+SASL itself supports a variety of mechanisms, and although successful SASL authentication in the abstract yields an `authorizedId`, specific mechanism might have more information about the subject available. For example:
+
+* Some configurations of OAUTH can provide information about claims about the Subject perhaps via an introspection endpoint.
+* TLS client certificates might include useful information in the Subject Alternative Names.
+* There might be information about users roles and groups stored in a directory service.
+
+To provide flexibility for making use of such richer context about the subject, we will introduce plugin APIs for how `Subjects` get built.
+
+To provide better type safety we will have two distinct types, one for Subjects built from transport-level context (usually TLS, though it's not required to configure this API), and one for Subjects built from a SASL authentication exchange.
+The `TransportSubjectBuilder` will be cofigurable at the virtual cluster level. 
+The `SaslSubjectBuilder` is an opt-in API which may be supported by SASL authentication plugins, but does not have to be.
+
+/**
+ * <p>Builds a {@link Subject} based on information available at the transport layer,
+ * before any requests have been received from the client.</p>
+ *
+ * <p>A {@code TransportSubjectBuilder} instance is constructed by a {@link TransportSubjectBuilderService},
+ * which in turn is specified on a virtual cluster.</p>
+ *
+ * <p>See {@link SaslSubjectBuilder} for a similar interface use for building a {@code Subject} based on SASL authentication.</p>
+ */
+public interface TransportSubjectBuilder {
+
+    /**
+     * Returns an asynchronous result which completes with the {@code Subject} built
+     * from the given {@code context}.
+     * @param context The context of the connection.
+     * @return The Subject. The returned stage should fail with an {@link SubjectBuildingException} if the builder was not able to
+     * build a subject.
+     */
+    CompletionStage<Subject> buildTransportSubject(Context context);
+
+    interface Context {
+        /**
+         * @return The TLS context for the client connection, or empty if the client connection is not TLS.
+         */
+        Optional<ClientTlsContext> clientTlsContext();
+    }
+}
+
 
 ```java
 package io.kroxylicious.proxy.internal.subject;
 /**
- * Builds a {@link Subject} based on information
- * proven by, known about, or provided by it.
+ * <p>Builds a {@link Subject} based on information available from a successful SASL authentication.</p>
+ *
+ * <p>A {@code SaslSubjectBuilder} instance is constructed by a {@link SaslSubjectBuilderService}.</p>
+ *
+ * <p>A SASL-authenticating {@link io.kroxylicious.proxy.filter.Filter Filter}
+ * <em>may</em> use a {@code SaslSubjectBuilder} in order to construct the
+ * {@link Subject} with which it calls
+ * {@link io.kroxylicious.proxy.filter.FilterContext#clientSaslAuthenticationSuccess(String, Subject)
+ * FilterContext.clientSaslAuthenticationSuccess(String, Subject)}.
+ * As such, {@code SaslSubjectBuilder} is an opt-in way of decoupling the building of Subjects
+ * from the mechanism of SASL authentication.
+ * SASL-authenticating filters are not obliged to use this abstraction.</p>
+ *
+ * <p>{@link TransportSubjectBuilder} is a similar interface use for building a
+ * {@code Subject} based on transport-layer information.
+ * However, note that a {@code SaslSubjectBuilder} is not specified directly
+ * on a virtual cluster as a {@code TransportSubjectBuilder} is.</p>
  */
-public interface SubjectBuilder {
+public interface SaslSubjectBuilder {
 
-    CompletionStage<Subject> buildSubject(Context context);
+    /**
+     * Returns an asynchronous result which completes with the {@code Subject} built
+     * from the given {@code context}.
+     * @param context The context of a successful SASL authentication.
+     * @return The Subject. The returned stage should fail with an {@link SubjectBuildingException} if the builder was not able to
+     * build a subject.
+     */
+    CompletionStage<Subject> buildSaslSubject(SaslSubjectBuilder.Context context);
 
+    /**
+     * The context that's passed to {@link #buildSaslSubject(Context)}.
+     */
     interface Context {
+        /**
+         * @return The TLS context for the client connection, or empty if the client connection is not TLS.
+         */
         Optional<ClientTlsContext> clientTlsContext();
 
-        Optional<ClientSaslContext> clientSaslContext();
-        
-        String sessionId();
+        /**
+         * @return The SASL context for the client connection.
+         */
+        ClientSaslContext clientSaslContext();
     }
 }
 ```
 
-The default `SubjectBuilder` will return `Subjects` with an empty `principals` set.
-In addition to the default subject builder we will support two other `SubjectBuilders` within the `kroxylicious-runtime`:
-1. A builder called `Tls`, which will return `Subjects` with a `User` based entirely on TLS client certificate information 
-2. A builder called `Sasl`, which will return `Subjects` with a `User` based entirely on the SASL authorized id.
-
-The user will be able to configure a virtual cluster with one of these subject builders:
-
-```yaml
-virtualClusters:
-  - name: whatever
-    subjectBuilder:
-      type: Tls
-      config:
-        subjectMappingRules:
-          - RULE:^CN=(.*?),OU=ServiceUsers.*$/$1/
-          - RULE:^CN=(.*?),OU=(.*?),O=(.*?),L=(.*?),ST=(.*?),C=(.*?)$/$1@$2/L
-          - RULE:^.*[Cc][Nn]=([a-zA-Z0-9.]*).*$/$1/L
-          - DEFAULT
-    filters:
-      - authn
-      - authz
-    # ...
-```
-In other words, all the filters in a virtual cluster will share a common "shape" of `Subjects` based on the `subjectBuilder`.
-Filter implementations which consume the `FilterContext.authenticatedSubject()` will be able to query the `principals` is contains 
-and make policy decisions based on the presence or absence of particular principal types or (principal type, name) pairs.
-
-The `Tls` builder will support the same [mapping rules as Apache Kafka][TLS_MAPPING], and also the ability to create principals 
-from the subject alternative names (with the same regex-based mapping supported).
-
-The `Sasl` builder will support the same [mapping rules as Apache Kafka][SASL_MAPPING].
+A default implmentation of each of these interfaces will be provided.
+This will support some simple string operations on the TLS subject DN, the TLS SANs or the SASL `authorizedId`.
+Alternative implementation can be provided at runtime.
 
 
 ### `kroxylicious-authorizer` -- the `Authorizer` interface
@@ -188,14 +274,22 @@ public interface Authorizer {
      * between {@link AuthorizeResult#allowed()} and {@link AuthorizeResult#denied()}.
      * @param subject The subject.
      * @param actions The actions.
-     * @return The outcome.
+     * @return The outcome. The returned stage should fail with an {@link AuthorizerException} if the authorizer was not able to
+     * make a decision.
      */
     CompletionStage<AuthorizeResult> authorize(Subject subject, List<Action> actions);
     
     /**
-     * All the resource types supported by this authorizer.
+     * <p>Returns the types of resource that this authorizer is able to make decisions about.
+     * If this is not known to the implementation it should return empty.</p>
+     *
+     * <p>This is provided so that an access control policy enforcement point can confirm that it
+     * is capable of providing access control to all the resource types in the access control policy
+     * backing this authorizer.</p>
+     *
+     * @return the types of resource that this authorizer is able to make decisions about.
      */
-    Set<Class<?>> resourceTypes();
+    Optional<Set<Class<? extends ResourceType<?>>>> supportedResourceTypes();
 }
 ```
 
@@ -216,11 +310,26 @@ Where `ResourceType` has this declaration:
 
 ```java
 /**
- * Interface to be implemented by {@code enum} types which represent a type of resource, such as a 
- * Kafka topic or consumer group. The enum elements represent the operations that instances of that resource type support.
- * For example a Kafka topic supports a CREATE, DESCRIBE, READ and WRITE operations (among others).
+ * A {@code ResourceType} is an {@code enum} of the possible operations on a resource of a particular type.
+ * We use a one-enum-per-resource-type pattern so that the {@link Class} an implementation also
+ * serves to identify the resource type.
+ * For this reason, implementations of this interface should be named for the type of resource
+ * (for example {@code Topic}, or {@code ConsumerGroup}) rather than the operations
+ * enumerated (so not {@code TopicOperations} or {@code ConsumerGroupOperations}).
+ * @param <S> The self type.
  */
-public interface ResourceType<V extends Enum<V> & ResourceType<V>> { ... }
+public interface ResourceType<S extends Enum<S> & ResourceType<S>> {
+    /**
+     * Returns a set of operations that are implied by this operation.
+     * This must return the complete transitive closure of all such implied operations.
+     * In other words, if logically speaking {@code A} implies {@code B}, and {@code B} implies {@code C} then
+     * programmatically speaking {@code A.implies()} must contain both {@code B} <em>and {@code C}</em>.
+     * @return The operations that are implied by this operation.
+     */
+    default Set<S> implies() {
+        return Set.of();
+    }
+}
 ```
 
 The scary-looking type parameter bound means a `ResourceType` implementation must be an `enum` rather than `class`, `interface`, etc.
@@ -262,7 +371,17 @@ public class AuthorizeResult {
 
     public Decision decision(ResourceType<?> operation, String resourceName) { ... }
     
-    // ...
+    /**
+     * Partitions the given {@code items}, whose names can be obtained via the given {@code toName} function, into two lists
+     * based on whether the {@link #subject()} is allowed to perform the given {@code operation} on them.
+     * @param items The items to partition
+     * @param operation The operation
+     * @param toName A function that returns the name of each item.
+     * @return A pair of lists of the items which the subject is allowed to, or denied from, performing the operation on.
+     * It is guaranteed that there is always an entry for both {@code ALLOW} and {@code DENY} in the returned map.
+     * @param <T> The type of item.
+     */
+    public <T> Map<Decision, List<T>> partition(Collection<T> items, ResourceType<?> operation, Function<T, String> toName) { ... }
 }
 ```
 
@@ -279,11 +398,11 @@ The AclAuthorizer will be:
 * agnostic of any particular `ResourceType` implementations
 
 Being agnostic about `Principal` and `ResourceType` implementations means the `AclAuthorizer` can more easily be reused in other filters in the future, but it means the user needs to define their types when they write the file. 
-They do this using an `import` statement:
+They do this using a `from ... import ...` statement:
 
 ```
-import User from org.example.principals;
-import Topic from org.example.resources;
+from org.example.principals import User;
+from org.example.resources import Topic ;
 // ...
 ```
 
@@ -427,7 +546,7 @@ When upgrading to version Y > X where the filter has gained support for rules on
 
 While inconvenient (the user will need to add additional rules to their file), this behaviour is consistent with avoiding inadvertant information disclosure.
 
-However, there's a further wrinkle: What about ACL rules files which contain rules about resource types which are not-yet supported, such as `TransactionalId`? From an end user's point of view they have an access control for transactional ids. But the filter is not actually enforing this access control. To avoid this the `Authorzation` filter will check that its configured rules file only refers to the resource types it is actually providing enforcement over. It will use the `Authorizer.resourceTypes()` method to enforce this check.
+However, there's a further wrinkle: What about ACL rules files which contain rules about resource types which are not-yet supported, such as `TransactionalId`? From an end user's point of view they have an access control for transactional ids. But the filter is not actually enforing this access control. To avoid this the `Authorzation` filter will check that its configured rules file only refers to the resource types it is actually providing enforcement over. It will use the `Authorizer.supportedResourceTypes()` method to enforce this check.
 
 Finally we need to consider evolution of the Kafka protocol itself. Even a complete and bug-free `Authorization` filter implementation could cease to provide complete control if:
 
