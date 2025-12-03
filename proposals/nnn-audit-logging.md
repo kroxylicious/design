@@ -45,7 +45,7 @@ The events we define here aim to capture:
 
 It is not intended to provide a complete capture of the protocol-level conversation between the client, the proxy and the broker.
 
-The logical event schemas described below contain the minimal information about that event. This keeps events as small as possible, at the cost of requiring event log post-processing to  reconstruct a complete picture.  
+The logical event schemas described below contain the minimal information about that event. This keeps events as small as possible, at the cost of requiring event log post-processing to  reconstruct a complete picture.
 
 #### Proxy-scoped events
 
@@ -53,7 +53,7 @@ The logical event schemas described below contain the minimal information about 
     - `processUuid` — identifies this process uniquely in time and space.
     - `instanceName` — is optionally provided by the user to identify this instance.
     - `currentTimeMillis` — The number of milliseconds since the UNIX epoch.
-    - `hostName` — The name of the host on which the proxy is running.   
+    - `hostName` — The name of the host on which the proxy is running.
 * `ProxyCleanShutdown` — Emitted when the proxy shuts down normally. Obviously it's not possible to emit anything in the case of a crash (e.g. `SIGKILL`).
   The absence of a `ProxyCleanShutdown` in a stream of events with the same `processUuid`
   would indicate a crash (or that the process is still alive). 
@@ -92,6 +92,13 @@ Session-scoped events all have at least the following  attributes:
     - `topicName` — The name of the topic.
     - `partition` — The index of the partition.
     - `offsets` — Offsets are included so that it's possible to record exactly which data has been read by a client.
+* `Delete` — Emitted when a client successfully delete topics or records in a topic. 
+    - `topicName` — The name of the topic.
+    - `partition` — The index of the partition.
+    - `offsets` — Offsets are included so that it's possible to record exactly which data has been delete by a client.
+* Similarly events covering the following API Keys: `DESCRIBE_ACLS`, `CREATE_ACLS`, `DELETE_ACLS`
+* Similarly events covering the following API Keys: `DESCRIBE_USER_SCRAM_CREDENTIALS` or `ALTER_USER_SCRAM_CREDENTIALS`
+* Similarly events covering the following API Keys: `CREATE_DELEGATION_TOKEN`, `RENEW_DELEGATION_TOKEN`, `EXPIRE_DELEGATION_TOKEN`, `DESCRIBE_DELEGATION_TOKEN`
 * `ClientClose` — Emitted when a client connection is closed (whether client or proxy initiated)
 * `BrokerClose` — Emitted when a broker connection is closed (whether broker or proxy initiated).
     
