@@ -33,6 +33,7 @@ Non-goals:
 
 * collecting events which are *not* security-related.
 * create a replacement for a logging facade API (like the existing use of SLF4J already used by the proxy).
+* creating audit logs which are tamper-resistent (this could be a future extension)
 
 ## Proposal
 
