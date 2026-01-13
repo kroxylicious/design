@@ -27,6 +27,7 @@ This proposal suggests that the Kroxylicious repository moves to Java 21 with im
 ### Affected
 
 - `kroxylicious`
+- `kroxylicious-operator`
 
 ## Compatibility
 
