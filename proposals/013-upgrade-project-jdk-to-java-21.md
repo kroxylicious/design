@@ -2,8 +2,6 @@
 
 Kroylicious is currently developed, built, and distributed as a Java 17 project. Java 17 has been used since early 2023, for almost three years.
 
-The only exception is the `kroxylicious-integration-tests` module. This module targets language level 21 to access some new language features.
-
 This proposal suggests fully moving the Kroylicious build, compilation, and container runtime to Java 21.
 
 ## Current situation
@@ -30,15 +28,11 @@ This proposal suggests that the Kroxylicious repository moves to Java 21 with im
 
 - `kroxylicious`
 
-### Not Affected
-
-- `kroxylicious-junit5-extension`
-
 ## Compatibility
 
 Considering that the Kroxylicious documentation has listed JDK version 21 or newer as a prerequisite since late 2024, the compatibility impact for users should hopefully be minimal.
 
-Kroxylicious has Strimzi as a production dependency in the `kroxylicious-operators` module and a test dependency in the `kroxylicious-systemtests` module. Strimzi is planned to move to Java 21 in the 0.50.0 release. Strimzi's `api` module is planned to move to Java 21 after Strimzi 0.51 but before Strimzi 1.0.0.
+Kroxylicious has Strimzi as a production dependency in the `kroxylicious-operators` module. Strimzi is planned to move to Java 21 in the 0.50.0 release. Strimzi's `api` module is planned to move to Java 21 after Strimzi 0.51 but before Strimzi 1.0.0.
 
 ## Rejected alternatives
 
