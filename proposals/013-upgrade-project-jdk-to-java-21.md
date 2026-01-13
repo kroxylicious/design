@@ -31,7 +31,7 @@ This proposal suggests that the Kroxylicious repository moves to Java 21 with im
 
 ## Compatibility
 
-Considering that the Kroxylicious documentation has listed JDK version 21 or newer as a prerequisite since late 2024, the compatibility impact for users should hopefully be minimal.
+Users running Kroxylicious on bare metal will need to upgrade JDK, if they are running <21. So this will be a breaking change for those users.
 
 Kroxylicious has Strimzi as a production dependency in the `kroxylicious-operators` module. Strimzi is planned to move to Java 21 in the 0.50.0 release. Strimzi's `api` module is planned to move to Java 21 after Strimzi 0.51 but before Strimzi 1.0.0.
 
