@@ -2,7 +2,7 @@
 
 Kroylicious is currently developed, built, and distributed as a Java 17 project. Java 17 has been used since early 2023, for almost three years.
 
-This proposal suggests fully moving the Kroylicious build, compilation, and container runtime to Java 21.
+This proposal suggests moving the Kroylicious build, compilation, and container runtime to Java 21 in two stages.
 
 ## Current situation
 
@@ -20,7 +20,13 @@ In addition, Java 17 is superseded by two newer LTS releases (21 and 25). Moving
 
 ## Proposal
 
-This proposal suggests that the Kroxylicious repository moves to Java 21 with immediate effect. This should include the runtime in the container images as well as the language level of all the modules.
+This proposal suggests that the Kroxylicious repository should move to Java 21 in two stages. This should include the runtime in the container images as well as the language level of all the modules.
+
+In order to comply with the project's [deprecation policy](https://github.com/kroxylicious/kroxylicious/blob/main/DEV_GUIDE.md#deprecation-policy), the upgrade should be staged as so:
+
+1. Kroxylicious running on JDK 17 should be deprecated and a warning should be emitted to users doing so. The containers should be upgraded to JDK 21.
+
+2. A subsequent release should remove support for JDK 17. This will have to be done before adopting a Strimzi `api` release that switches to JDK 21.
 
 ## Affected/not affected projects
 
