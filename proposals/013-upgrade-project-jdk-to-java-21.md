@@ -24,9 +24,9 @@ This proposal suggests that the Kroxylicious repository should move to Java 21 i
 
 In order to comply with the project's [deprecation policy](https://github.com/kroxylicious/kroxylicious/blob/main/DEV_GUIDE.md#deprecation-policy), the upgrade should be staged as so:
 
-1. Kroxylicious running on JDK 17 should be deprecated and a warning should be emitted to users doing so. The containers should be upgraded to JDK 21.
+1. Kroxylicious running on JDK 17 should be deprecated and a warning should be emitted to users doing so. Kroxylicious should be built/compiled with JDK 21, but produce a JDK 17 compatible jar. The containers should be upgraded to JDK 21.
 
-2. A subsequent release should remove support for JDK 17. This will have to be done before adopting a Strimzi `api` release that switches to JDK 21.
+2. A subsequent release should remove support for JDK 17 and move the target release to Java 21. This will have to be done before adopting a Strimzi `api` release that switches to JDK 21.
 
 ## Affected/not affected projects
 
