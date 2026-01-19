@@ -26,7 +26,7 @@ In order to comply with the project's [deprecation policy](https://github.com/kr
 
 1. Kroxylicious running on JDK 17 should be deprecated and a warning should be emitted to users doing so. Kroxylicious should be built/compiled with JDK 21, but produce a JDK 17 compatible jar. The containers should be upgraded to JDK 21.
 
-2. A subsequent release should remove support for JDK 17 and move the target release to Java 21. This will have to be done before adopting a Strimzi `api` release that switches to JDK 21.
+2. A subsequent release should remove support for JDK 17 and move the target release to Java 21. **This will be a breaking change for users running on bare metal with JDK 17 (see [Compatibility](#compatibility) section).** This will have to be done before adopting a Strimzi `api` release that switches to JDK 21.
 
 ## Affected/not affected projects
 
@@ -37,7 +37,7 @@ In order to comply with the project's [deprecation policy](https://github.com/kr
 
 ## Compatibility
 
-Users running Kroxylicious on bare metal will need to upgrade JDK, if they are running <21. So this will be a breaking change for those users.
+After Step 2 in the [Proposal](#proposal) section is completed, users running Kroxylicious on bare metal will need to upgrade to JDK 21 or above. So this will be a breaking change for those users.
 
 Kroxylicious has Strimzi as a production dependency in the `kroxylicious-operators` module. Strimzi is planned to move to Java 21 in the 0.50.0 release. Strimzi's `api` module is planned to move to Java 21 after Strimzi 0.51 but before Strimzi 1.0.0.
 
