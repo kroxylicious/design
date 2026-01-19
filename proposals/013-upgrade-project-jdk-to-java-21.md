@@ -46,3 +46,7 @@ Kroxylicious has Strimzi as a production dependency in the `kroxylicious-operato
 ### Move directly to Java 25
 
 Java 25 is currently the latest available Java LTS release. Moving directly to Java 25 would let us to use the newest and most up-to-date Java version and Java features. Given the minimal effort required to move to Java 21, the proposal recommends adopting Java 21 first. This will allow experience to be gathered before considering a move to Java 25 in the future.
+
+### Move both build execution and compilation target to Java 21 simultaneously
+
+This would reduce the total number of releases required to move to Java 21. However, bare metal JDK 17 support would be removed without prior deprecation (see [Compatibility](#compatibility) section). This violates the project's [deprecation policy](https://github.com/kroxylicious/kroxylicious/blob/main/DEV_GUIDE.md#deprecation-policy), which requires a feature to be deprecated and announced in the [CHANGELOG](https://github.com/kroxylicious/kroxylicious/blob/main/CHANGELOG.md) before being removed.
