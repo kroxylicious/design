@@ -1,10 +1,11 @@
 <!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
 
-# User Namespace Filter
+# Resource Isolation Filter
 
-Proposes the introduction of a "User Namespace Filter" to Kroxylicious's core filters.
 
-The role of the User Namespace Filter is to give the client a private space within the kafka cluster space that is isolated from other users sharing the cluster.  Namespacing can be applied selectively to different resource types.  This allows 
+Proposes the introduction of a "Resource Isolation Filter" to Kroxylicious's core filters.
+
+The role of the Resource Isolation Filter is to give the client a private space within the kafka cluster space that is isolated from other users sharing the cluster.  Isolation can be applied selectively to different resource types.  This allows 
 the possibility for some resource types (probably topics) to be shared between users whereas only resource instances exist in the private space.
 
 ## Current situation
@@ -17,7 +18,7 @@ We encountered a use-case where the desire was to share topics but maintain isol
 
 ## Proposal
 
-The role of the user namespace filter is to give the client the impression of a private kafka cluster space that is isolated from other clients sharing the cluster.  Namespacing can be applied selectively to different resource types.
+The role of the Resource Isolation filter is to give the client the impression of a private kafka cluster space that is isolated from other clients sharing the cluster.  Namespacing can be applied selectively to different resource types.
 
 The filter will use a pluggable API to determine how to map the name of each resource.  Operations that retrieve lists of resources will see only those that fall within the namespace. 
 
@@ -31,7 +32,7 @@ The principal will be added to the resource as it is sent to the server, and rem
 #### Filter Configuration
 
 ```yaml
-type: UserNamespaceFilter
+type: ResourceIsolation
 config:
 resourceNameMappers:
 - resourceTypes: [TRANSACTIONAL_ID, GROUP_ID]
