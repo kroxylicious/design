@@ -1,7 +1,7 @@
 # Changing Active Proxy Configuration
 
-This proposal describes a mechanism for applying configuration changes to a running Kroxylicious proxy without a full restart.
-The proxy exposes a core `applyConfiguration(Configuration)` operation that accepts a complete configuration, detects what changed, and converges the running state to match — restarting only the affected virtual clusters while leaving unaffected clusters available.
+This proposal introduces a mechanism for applying configuration changes to a running Kroxylicious proxy without a full restart.
+It proposes a core `applyConfiguration(Configuration)` operation that would accept a complete configuration, detect what changed, and converge the running state to match — restarting only the affected virtual clusters while leaving unaffected clusters available.
 
 ## Current situation
 
@@ -14,11 +14,11 @@ Both cause a service interruption that is disproportionate to the scope of the c
 
 ## Motivation
 
-Operators need to be able to modify proxy configuration in place.
+Administrators need to be able to modify proxy configuration in place.
 Common scenarios include:
 
 - **Adding or removing virtual clusters** as tenants are onboarded or offboarded.
-- **Updating filter configuration** (e.g. changing encryption keys, adjusting rate limits, modifying ACL rules).
+- **Updating filter configuration** (e.g. updating a KMS endpoint, changing a key selection pattern, modifying ACL rules).
 - **Rotating TLS certificates or credentials** that filters reference.
 
 The proxy should apply these changes with minimal disruption: only the virtual clusters affected by the change should experience downtime.
@@ -46,8 +46,9 @@ The `applyConfiguration()` operation is the internal interface that any trigger 
 How the new configuration arrives — whether via an HTTP endpoint, a file watcher detecting a changed ConfigMap, or a Kubernetes operator callback — is a separate concern.
 Deferring this keeps the proposal focused and avoids blocking on unresolved questions about trigger design (see [Trigger mechanisms](#trigger-mechanisms-future-work) below).
 
-**Failure behaviour is deployment-level static configuration, not a per-call parameter.**
-Whether the proxy rolls back, terminates, or continues on failure will vary between deployments (a multi-tenant ingress has different requirements than a sidecar), but it should not vary between invocations within the same deployment.
+**Failure behaviour is deployment-level static configuration.**
+Whether the proxy rolls back, terminates, or continues on failure will vary between deployments (a multi-tenant ingress has different requirements than a sidecar), but it should not vary between invocations or between trigger mechanisms within the same deployment.
+A configuration apply triggered by an HTTP endpoint should behave identically to one triggered by a file watcher or an operator callback.
 These decisions belong in the proxy's static configuration, keeping the `applyConfiguration()` signature simple.
 
 ### Configuration change detection
@@ -77,6 +78,7 @@ Clients connected to the cluster will be disconnected during the drain phase.
 This is a deliberate design choice.
 More surgical approaches — such as swapping the filter chain on existing connections without dropping them, or performing a rolling handoff — would reduce disruption, but they add significant complexity (connection migration, state transfer between filter chain instances, partial rollback of in-flight connections).
 The remove+add approach is the right starting point: it is straightforward, predictable, and consistent with how the proxy handles startup failures today.
+The remove+add approach also creates a thundering herd when all disconnected clients reconnect simultaneously after the cluster comes back up; mitigation strategies (e.g. staggered connection acceptance) are future work.
 More surgical alternatives are worth exploring as future work once the foundation is solid.
 
 Changes are processed in the order: **remove → modify → add**.
@@ -101,7 +103,7 @@ The initial default is **all-or-nothing rollback**: if any cluster operation fai
 Added clusters are removed, modified clusters are reverted to their original configuration, and removed clusters are re-added.
 
 This is consistent with startup behaviour, where a failure in any virtual cluster fails the entire proxy.
-It produces a predictable outcome: after a failed apply, the proxy is in its previous known-good state, and the operator can investigate and retry.
+It produces a predictable outcome: after a failed apply, the proxy is in its previous known-good state, and the administrator can investigate and retry.
 
 Other deployment models may need different behaviour:
 
@@ -162,7 +164,7 @@ Each of these can be designed and implemented independently once the core `apply
 
 ## Rejected alternatives
 
-- **File watcher as the primary trigger**: The original proposal used filesystem watching to detect configuration changes. This was set aside in favour of decoupling the trigger from the apply operation, since the trigger mechanism has unresolved design questions (security, delivery method, Kubernetes integration) that should not block the core capability.
+- **File watcher as the primary trigger**: Earlier iterations of this proposal used filesystem watching to detect configuration changes. This was set aside in favour of decoupling the trigger from the apply operation, since the trigger mechanism has unresolved design questions (security, delivery method, Kubernetes integration) that should not block the core capability.
 - **`ReloadOptions` as a per-call parameter**: An approach where each call to `reload()` could specify failure behaviour (rollback/terminate/continue) and whether to persist to disk. Rejected because these decisions vary by deployment, not by invocation — they belong in static configuration.
 - **`ConfigurationReconciler` naming**: Considered to describe the "compare desired vs current and converge" pattern, but rejected because Kubernetes reconcilers already exist in the Kroxylicious codebase and overloading the term would cause confusion.
 - **Plan/apply split on the public interface**: Considered exposing separate `plan()` and `apply()` methods to enable dry-run validation. Decided this is an internal concern — the trigger just needs `applyConfiguration()`. A validate/dry-run capability can be added later without changing the interface.
