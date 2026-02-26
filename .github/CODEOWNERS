@@ -1,4 +1,3 @@
 # We write CODEOWNERS files in terms of Github teams.
 
-/.github/ @kroxylicious/admins
-* @kroxylicious/developers
+* @kroxylicious/committers
