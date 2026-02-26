@@ -184,6 +184,10 @@ Runtime health is also inherently perspectival: different observers (direct clie
 
 The lifecycle model's job is to track what the proxy is doing with a cluster — setting it up, accepting connections, draining, or torn down. Whether the cluster can successfully serve traffic is a separate, orthogonal concern better addressed by readiness probes, health endpoints, or metrics that can evolve independently.
 
+### Runtime health model
+
+We considered defining a broader health model alongside the lifecycle — covering upstream broker reachability, KMS availability, filter readiness, and similar runtime concerns. This was ruled out of scope. Health depends on what the proxy is being used for: a proxy doing record encryption has different health criteria from one doing schema validation. The appropriate health model will vary by deployment, and may need to account for request-level routing where health is per-destination rather than per-cluster. Defining a health model prematurely would constrain future design options without providing immediate value. The lifecycle model intentionally leaves room for health to be addressed separately.
+
 ## Future Enhancements
 
 ### Reload without draining
