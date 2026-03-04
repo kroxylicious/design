@@ -8,12 +8,13 @@ Currently, the proxy has no organized audit logging.
 Security-related events are logged though the same SLF4J API used for general application logging.
 Someone deploying the proxy would need to:
 
-* know which logger names contained security-related events (these are not documented)
-* handle the fact that non-security relevant messages may be emitted through those loggers
-* handle the fact that the security relevant messages emitted through those loggers are not structured
+* know which logger names contained security-related events (these are not documented).
+* handle the fact that non-security relevant messages may be emitted through those loggers.
+* handle the fact that the security relevant messages emitted through those loggers are not structured.
 * accept the maintenance burden implied by the fact that the log messages are not considered part of the proxy API
+  — for example, it's possible that the same logical event type emitted via logger A gets emitted via logger B in a later version, due to internal refactoring. 
 * use custom plugins to generate logging messages for which there is no existing logging in place. 
-  This might not even be possible if the events are only really visible within the runtime. 
+  This might not even be possible if the events are only really visible within the runtime.
 
 Overall this results in:
 * a poor user experience in getting anything set up in the first place 
@@ -28,12 +29,24 @@ Goals:
 * enable users to _easily_ collect a _complete_ log of security-related events
 * for the security events to be structured and amenable to automated post-processing
 * for the security events to be an API of the project, with the same compatibility guarantees as other APIs
+* audit events must be self-contained and independently interpretable without joining against other events [1]
+* the proxy logs its own decisions, not the outcomes of operations beyond its control
+* enable correlation with broker audit logs via shared identifiers (`sessionId`, `correlationId`)
+* filters can contribute proxy decision events to the audit stream 
 
 Non-goals:
 
 * collecting events which are *not* security-related.
 * create a replacement for a logging facade API (like the existing use of SLF4J already used by the proxy).
 * creating audit logs which are tamper-resistent (this could be a future extension)
+* capturing the broker's authorization decisions — those are the broker's to log
+* deeper integrations with specific SIEM systems
+* witness events (proxy observations rather than proxy decisions) — **TODO**
+
+
+[1] The self-contained event goal has compliance implications worth noting: https://doi.org/10.6028/NIST.SP.800-92 and PCI DSS Requirement 10.3 both require that each audit record independently contain the event's timestamp, origin, and identity context.
+
+
 
 ## Proposal
 
