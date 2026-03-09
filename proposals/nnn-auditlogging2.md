@@ -71,7 +71,7 @@ We will now elaborate on these ideas while progressively building out the API of
 ```java
 /** 
  * Describes an auditable action taken by the proxy or one of its plugins.
- * Action implementations must extend {@link java.lang.Record}. 
+ * Action implementations must be Java record types.
  * Implementations records should avoid declaring components beyond those required by the methods in this interface. 
  * They should instead make use of the {@link context()} method.
  */
@@ -80,7 +80,7 @@ interface BaseAction {
 }
 ```
 
-Constaining BaseAction implementations to be `record` classes ensures that there is a uniform way to generically operate on actions (in terms of their components). 
+Constraining BaseAction implementations to be `record` classes ensures that there is a uniform way to generically operate on actions (in terms of their components). 
 This enabled desirable functionality such as a guarantee that actions are JSON-serializable.
 
 ##### When
@@ -140,14 +140,14 @@ interface BaseAction {
 
 /** 
  * An actor that has performed an auditable action.
- * Implementation are required to extend `java.lang.Record`. 
+ * Implementation must be Java record types.
  */
 interface Actor {}
 
 ```
 
 * `Actor` is a `non-sealed` `interface` so that it's possible to for set set of actors to be extened either by plugins or by the runtime at a later time.
-* We constain implementations to be `record` classes. 
+* We constrain implementations to be `record` classes. 
   This is to make it easier to write emitters which handle actions generically without having to be aware of the complete set of Actor types in use.
   For example, this simplfies serializing actors to JSON without needing to use serialization-specific mechansims like annotations. 
 
@@ -186,15 +186,6 @@ including but not limited to a Kafka broker.
 ##### Which
  
 **Which** is about describing which object or resource is the _target of the action_.
-As such we need a uniform coordinate system for such objects and resources.
-
-In full generality, a pluggable proxy such as Kroxylicious can talk to systems other than a Kafka broker.
-For example existing 1st party plugins make use of schema registries, and key management systems.
-This means we need a coordinate system that is open: It should be able to describe objects that the runtime doesn't know about.
-However, we don't want an API that is as heavyweight and difficult to use as X500-style Object Names.
-
-Instead we propose a hierarchical naming schema which should about collisions in practice:
-Which is about describing which object or resource is the target of the action.
 As such we need a uniform coordinate system for such objects and resources.
 
 In full generality, a pluggable proxy such as Kroxylicious can talk to systems other than a Kafka broker.
@@ -254,16 +245,27 @@ interface BaseAction {
      */
     Record correlation();
 }
+```
 
+The proxy runtime will use the following implementation:
+
+```java
 /**
  * Identifiers for correlating actions.
  * @param clientRequest The Kafka client's correlation ID (usually an Int32).
  * @param serverRequest The broker's correlation ID.
+ * @param traceId Reserved for future use.
+ * @param spanId Reserved for future use.
  */
 record BaseCorrelation(
     @Nullable Integer clientRequest,
-    @Nullable Integer serverRequest) {}
+    @Nullable Integer serverRequest
+    @Nullable String traceId,
+    @Nullable String spanId) {}
 ```
+
+Plugins are allowed to define their own correlation schemas by returning a custom Record, but when they do they should 
+ensure that their components are not inconsistent with those of `BaseCorrelation`.
 
 Because the notion of correlation is based on the initiator of the action we don't need different fields to represent the client's `correlationId` and the broker's `correlationId`. 
 However, this means care should be taken that an action is an broker-initiated action before attempting to correlate it with an event in the the broker logs.
@@ -419,7 +421,8 @@ Plugins **should not** use this facility to record observations, for example, ab
 
 ```java
 /**
- * A way to record an auditable action
+ * A way to record an auditable action.
+ * This interface is implemented exclusively by the Kroxylicious runtime and is merely consumed by plugins.
  */
 interface AuditLogger {
   /**
@@ -472,7 +475,7 @@ Additionally, the `Authorization` filter will add support an action for each of 
 * `ClusterAction`
 * `DescribeConfigs`
 * `AlterConfigs`
-* `IdempotentWrtie`
+* `IdempotentWrite`
 * `CreateTokens`
 * `DescribeTokens`
 * `TwoPhaseCommit`
@@ -487,7 +490,7 @@ interface AuditEmitter extends AutoClosable {
 
   /** 
    * Emits the auditable action 
-   * Implementations are expected not to block. 
+   * Implementations are expected to be be thread safe and to not block.
    * If necessary they should handle their own asynchronous buffering.
    * @param action The action to be emitted.
    */
