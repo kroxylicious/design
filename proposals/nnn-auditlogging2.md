@@ -123,7 +123,7 @@ interface BaseAction {
 Modelling this accurately is a little complex.
 The first complication is that Kafka client applications, Kafka brokers and the proxy itself can all initiate actions. 
 The second complication is that prior to authentication the proxy knows has a network-level understanding of actors;
-later on, the proxy might become aware of application-level actors (principles).
+later on, the proxy might become aware of application-level actors (principals).
 
 ```java
 interface BaseAction {
@@ -194,6 +194,16 @@ This means we need a coordinate system that is open: It should be able to descri
 However, we don't want an API that is as heavyweight and difficult to use as X500-style Object Names.
 
 Instead we propose a hierarchical naming schema which should about collisions in practice:
+Which is about describing which object or resource is the target of the action.
+As such we need a uniform coordinate system for such objects and resources.
+
+In full generality, a pluggable proxy such as Kroxylicious can talk to systems other than a Kafka broker.
+For example existing 1st party plugins make use of schema registries, and key management systems.
+This means we need a coordinate system that is open: It should be able to describe objects that the runtime doesn't know about.
+However, we don't want an API that is as heavyweight and difficult to use as X500-style Object Names.
+
+Instead we propose a flattened map structure which avoids collisions in practice while keeping JSON payload size minimal and SIEM queries intuitive:
+Java
 
 ```java
 interface BaseAction {
@@ -201,40 +211,33 @@ interface BaseAction {
     // ...
     
     /**
-     * The coordinates of the target objects. 
-     * The scopes of the returned coordinates should be ordered from larget to smallest.
-     * For example, the top level scope might be "vc" (virtual cluster), which contains smaller scope called "topicId". 
-     * Together these uniqely identify a topic, and identify it as as being contained within a given virtual cluster.
+     * The coordinates of the target object. 
+     * The keys represent the scope (e.g., "vc", "topicId"), and the values are the unique identifiers within that scope.
+     * Multiple scopes should usually represent a hierarchy from largest to smallest.
+     * For example the "vc" scope logically contains a sub-scopes for topic names, group ids, transactional ids, and so on.
      * Plugins providing their own coordinates should package-prefix their scope names.
      */
-    List<ObjectCoord> objectRef()
+    Map<String, String> objectRef();
     
     // ...
 }
-
-/**
- * A coordinate for identifying an object.
- * @param scope The name of a scope. This identifies a namespace within which the id uniquely identifies an object (but not necessary the target object).
- * @param id The unique identified on the object within the given scope.
- */
-record ObjectCoordinate(String scope, String id) {}
 ```
 
 Both scopes and ids are open for extension, subject to the following:
 
-* `scope` can be nested. In order words the `topicName` scope makes not sense on its own, it must be preceeded (in the list returned by `objectRef`) by a `vc` coordinate. 
-* An `id` must be unique within a `scope` at any given time. 
-* A `id` may have stronger uniqueness properties (e.g. unique over time, rather than just instantaneously), but may not have weaker properties.
+* `scope` can be nested. In order words the `topicName` scope makes no sense on its own, a `vc` coordinate must be included to make it unambiguous.
+* An unique identifier must be unique within a `scope` at any given time. 
+* A unique identifier may have stronger uniqueness properties (e.g. unique over time, rather than just instantaneously), but may not have weaker properties.
 
 In this proposal we define the following scopes:
 
-* `vc`: A virtual cluster.
+* `addr`: A network address.
+* `vc`: A virtual cluster, as defined in the proxy's configuration.
+* `tc`: A target cluster, as defined in the proxy's configuration.
 * `nodeId`: A Kafka server with a cluster.
-* `topicName`: A topic within a cluster.
-* `topicId`: A topic within a cluster.
-* `groupId`: A topic within a cluster.
-* `transactionalId`: A topic within a cluster.
-* `addr` A network address.
+* `topicName` and `topicId`: A topic within a cluster. Either can be used. Both should be included if known.
+* `groupId`: A group within a cluster.
+* `transactionalId`: A transactional within a cluster.
 
 ##### Correlation
 
@@ -246,13 +249,20 @@ interface BaseAction {
     // ...
     
     /** 
-     * A unique string which can be used to join this action with others cause by the same initiating event.
-     * This should be unique within a given connection. 
-     * When the initiating event is a Kafka client request, this can be the request's `correlationId`. 
-     * Likewise when the initiating event is a Kafka broker response, this can be the response's `correlationId`. 
+     * Contextual identifiers for correlating this action with external systems, 
+     * client requests, or distributed traces.
      */
-    String correlation();
+    Record correlation();
+}
 
+/**
+ * Identifiers for correlating actions.
+ * @param clientRequest The Kafka client's correlation ID (usually an Int32).
+ * @param serverRequest The broker's correlation ID.
+ */
+record BaseCorrelation(
+    @Nullable Integer clientRequest,
+    @Nullable Integer serverRequest) {}
 ```
 
 Because the notion of correlation is based on the initiator of the action we don't need different fields to represent the client's `correlationId` and the broker's `correlationId`. 
@@ -297,12 +307,10 @@ A client application connecting successfully to a proxy socket associated with a
     "addr": "123.123.123.123:32456", # the TCP client address
     "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
   }
-  "objectRef": [
-    { "scope": "vc"
-      "id": "my-cluster" },
-    { "scope": "nodeId"
-      "id": "1" }
-  ]
+  "objectRef": {
+    "vc": "my-cluster",
+    "nodeId": "1"
+  }
   # "status": "null" => success
 }
 ```
@@ -330,16 +338,14 @@ Here's the same client application authenticating successfully:
   "actor": {
     "addr": "123.123.123.123:32456",
     "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee" # same session => same client
-    principles: [ # The principles resulting from the successful authentication
-      "User": "alice"
+    "principals": [ # The principals resulting from the successful authentication
+      { "User": "alice" }
     ]
   }
-  "objectRef": [
-    { "scope": "vc"
-      "id": "my-cluster" },
-    { "scope": "nodeId"
-      "id": "1" }
-  ]
+  "objectRef": {
+    "vc": "my-cluster",
+    "nodeId": "1"
+  }
   # "status": "null" => success
 }
 ```
@@ -356,17 +362,17 @@ And same client application being allowed access to topic 'foo' and denied acces
   "actor": {
     "addr": "123.123.123.123:32456",
     "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
-    principles: [
-      "User": "alice"
+    "principals": [
+      { "User": "alice" }
     ]
   }
-  "objectRef": [
-    { "scope": "vc"
-      "id": "my-cluster" },
-    { "scope": "nodeId"
-      "id": "1" }
-  ],
-  "correlation": 4
+  "objectRef": {
+    "vc": "my-cluster",
+    "topicName": "foo"
+  },
+  "correlation": {
+    "clientRequest": 4
+  }
   # "status": "null" => success
 }
 # 2nd action
@@ -376,22 +382,23 @@ And same client application being allowed access to topic 'foo' and denied acces
   "actor": {
     "addr": "123.123.123.123:32456",
     "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
-    principles: [
-      "User": "alice"
+    "principals": [
+      { "User": "alice" }
     ]
   }
-  "objectRef": [
-    { "scope": "vc"
-      "id": "my-cluster" },
-    { "scope": "nodeId"
-      "id": "1" }
-  ],
-  "correlation": 4, # the same correlation => same request
+  "objectRef": {
+    "vc": "my-cluster",
+    "topicName": "bar"
+  },
+  "correlation": {
+    "clientRequest": 4, # the same correlation => same request
+  },
   "status": "29"
   "reason": "Topic authorization failed."
 }
 ```
 
+Because a topic is not broker-local it is not necessary to include a "nodeId" in the "objectRef" in this case.
 
 ### The API used by plugins to report auditable actions
 
@@ -411,8 +418,16 @@ Plugins **should not** use this facility to record observations, for example, ab
 
 
 ```java
+/**
+ * A way to record an auditable action
+ */
 interface AuditLogger {
-  <A extends BaseAction & Record> void logAction(A action);
+  /**
+   * Record an auditable action that's be performed by the proxy.
+   * Actions must not contain sensitive data such as passwords, PII or (generally speaking) data obtained from a Kafka Record.
+   * @param action The action to be logged.
+   */
+  <A extends Record & BaseAction> void logAction(A action);
 }
 ```
 
@@ -434,7 +449,7 @@ interface FilterContext {
 
 ### Actions
 
-Having seen some examples of how actions are modelled, let's enumerate the full set of actions the proxy and its 1st party plugins will support as a result of this proposal:
+Having seen some examples of how actions are modelled, let's enumerate the full set of actions the proxy runtime will support as a result of this proposal:
 
 * `ProxyStartup` -- the proxy application starting
 * `ProxyShutdown` -- the proxy application shutting down
@@ -445,20 +460,44 @@ Having seen some examples of how actions are modelled, let's enumerate the full 
 * `ServerConnect` -- the proxy connecting to a server
 * `ServerClose` -- a server connection being closed
 * `ClientAuthenticate` -- a client's subjects changing (e.g. via `FilterContext.clientSaslAuthenticationSuccess()` or successful TLS handshake) or an authentication failure (e.g. via `FilterContext.clientSaslAuthenticationFailure()` or a failed TLS handshake). Note that SASL Inspectors and SASL Terminators do not need to use `FilterContext.auditLogger()`, instead audit logging happens as a side-effect of calling `FilterContext.clientSaslAuthenticationSuccess()` and `FilterContext.clientSaslAuthenticationSuccess()`.
-* `Authorize` -- from the `Authorization` filter, via `FilterContext.auditLogger()`.
+
+Additionally, the `Authorization` filter will add support an action for each of the operations it enforces:
+
+* `Read`
+* `Write`
+* `Create`
+* `Delete`
+* `Alter`
+* `Describe`
+* `ClusterAction`
+* `DescribeConfigs`
+* `AlterConfigs`
+* `IdempotentWrtie`
+* `CreateTokens`
+* `DescribeTokens`
+* `TwoPhaseCommit`
 
 ### The `Emitter` Java API
 
 ```java
+/**
+ * Exposes auditable actions, or data derived from them, outside of this proxy process. 
+ */
 interface AuditEmitter extends AutoClosable {
 
-  <A extends BaseAction & Record> void emitAction(A action);
+  /** 
+   * Emits the auditable action 
+   * Implementations are expected not to block. 
+   * If necessary they should handle their own asynchronous buffering.
+   * @param action The action to be emitted.
+   */
+  <A extends Record & BaseAction> void emitAction(A action);
   
   public abstract void close();
 }
 ```
 
-The awkward-looking type parameter `<A extends BaseAction & Record>` provides type safety that actions really are `record` classes that implement  `BaseAction`.
+The awkward-looking type parameter `<A extends Record & BaseAction>` provides type safety that actions really are `record` classes that implement  `BaseAction`.
 
 Similarly to existing plugins we'll use the `ServiceLoader` mechanism is discover a factory class, instantiate it and use that to instantiate the emitter. 
 
@@ -520,7 +559,6 @@ This proposal covers the proxy.
     - in itself, guarantee that the logged event were structured or formatted as valid JSON.
     - be as robust when it comes to guaranteeing the API goal.
     - ensure that metrics and logging were based on a single source of truth about events
-    - provide the Kafka topic output included in this proposal
     - provide an easy way to add new emitters in the future.
   
 * Use a different format than JSON.
@@ -530,9 +568,5 @@ This proposal covers the proxy.
   Repeated object properties mean it can be space inefficient, though compression often helps.
   However, no other format is as ubiquitous as JSON, so using JSON ensures compatibility with the widest range of external tools and systems.
 
-* Deeper integrations with specific SIEM systems.
-  Having Kafka itself as an output provides a natural way to decouple the Kroxylicious project from having to provide SIEM integrations.
-  The choice we're making in this proposal can be contrasted with the "batteries included" approach we've taken with KMSes in the `RecordEncryption` filter.
-  Implementing a KMS (and doing so correctly) is fundamental to the `RecordEncryption` functionality, where the filter unavoidably needs to consume the services provided by the KMS.
 
 
