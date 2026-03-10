@@ -24,149 +24,618 @@ Overall this results in:
 
 We want to make security audit logging a first-class responsibility of the proxy.
 
-Goals:
+### Goals
 
-* enable users to _easily_ collect a _complete_ log of security-related events
-* for the security events to be structured and amenable to automated post-processing
-* for the security events to be an API of the project, with the same compatibility guarantees as other APIs
-* audit events must be self-contained and independently interpretable without joining against other events [1]
-* the proxy logs its own decisions, not the outcomes of operations beyond its control
-* enable correlation with broker audit logs via shared identifiers (`sessionId`, `correlationId`)
-* filters can contribute proxy decision events to the audit stream 
+* Emit an audit trail of security-relevant events from the runtime for security and compliance purposes.
+* Plugins can contribute events to the audit stream.
+* The events represent **actions that the proxy has taken**, along with their outcome.
+* The events are structured and amenable to automated post-processing
+* The events are an API of the project, with the same compatibility guarantees as other APIs
+* Provide an API for emitting actions which can be extended in the future.
+* Provide a built-in implementation which emits JSON-encoded actions as application logging messages.
+* Define an initial set of actions to be emitted.
 
-Non-goals:
+### Non-goals
 
-* collecting events which are *not* security-related.
-* create a replacement for a logging facade API (like the existing use of SLF4J already used by the proxy).
-* creating audit logs which are tamper-resistent (this could be a future extension)
-* capturing the broker's authorization decisions — those are the broker's to log
-* deeper integrations with specific SIEM systems
-* witness events (proxy observations rather than proxy decisions) — **TODO**
-
-
-[1] The self-contained event goal has compliance implications worth noting: https://doi.org/10.6028/NIST.SP.800-92 and PCI DSS Requirement 10.3 both require that each audit record independently contain the event's timestamp, origin, and identity context.
-
-
+* Replace application logging or reinvent a logging facade (e.g. SLF4J). 
+* Reinvent tracing (e.g. OTel). 
+* Replace Kafka's own logging and auditing functionality. The audit trails from both systems should be used in conjunction.
+* Making the emitted audit log tamper-resistent or verifiable. This depends on action serialization and as such is an implementation detail of an emitter.
+* Deeper integrations with specific SIEM systems or audit log standard: This proposal is primarily about APIs which enable such integations, not providing such integrations themselves.
 
 ## Proposal
 
-### Covered events
+We can break down the proposal into the following parts:
 
-The events we define here aim to capture:
-* who the client was (authentication)
-* what the client tried to do (authorization)
-* what a client actually did, in terms of writing, reading or deleting Kafka records.
+1. The common structure for all actions that the proxy can emit. For example the proxy making a connection to a broker in a target cluster.
+2. The API used by plugins which are reporting auditable actions. This is necessary because some actions of interest are taken by plugins rather than the proxy runtime. For example, a plugin making an authorization decision about access to a Kafka topic.
+3. The `Emitter` API, through which the auditable actions are make visible outside a proxy process. 
+4. The configuration API of an `Emitter` implementation which renders the auditable actions as JSON and logs them using the application logging stack.
 
-It is not intended to provide a complete capture of the protocol-level conversation between the client, the proxy and the broker.
+We describe these parts in the following sections.
 
-The logical event schemas described below contain the minimal information about that event. This keeps events as small as possible, at the cost of requiring event log post-processing to  reconstruct a complete picture.
+#### The structure of actions
 
-#### Proxy-scoped events
+Let's start with some key ideas:
 
-* `ProxyStartup` — Emitted when the proxy starts up, before it binds to any sockets.
-    - `processUuid` — identifies this process uniquely in time and space.
-    - `instanceName` — is optionally provided by the user to identify this instance.
-    - `currentTimeMillis` — The number of milliseconds since the UNIX epoch.
-    - `hostName` — The name of the host on which the proxy is running.
-* `ProxyCleanShutdown` — Emitted when the proxy shuts down normally. Obviously it's not possible to emit anything in the case of a crash (e.g. `SIGKILL`).
-  The absence of a `ProxyCleanShutdown` in a stream of events with the same `processUuid`
-  would indicate a crash (or that the process is still alive). 
-    - `processAgeMicros` — The time of the event, measured as the number of microseconds since proxy startup.
+* At a high level, each action is a fact descibing **who** has attempted to do **what** on **which** object, **when** they did this, and **what** was the outcome.
+  Having a common structure makes it easy to perform common queries against actions without having to know the schema or semantics for each type of action. For example it makes is easier to ask "what has Eve done?" if every action represents the principal for Eve in the same way.
+* Each audit action represents _one_ action on _one_ resource. 
+  Again, this is to simplify querying for actions which match common criteria.
+* When a single event (such as the arrival of a batched client request) relates to several objects we will emit multiple _correlated_ actions.
 
-#### Session-scoped events
+##### `AuditableAction`
 
-Session-scoped events all have at least the following  attributes: 
-- `processAgeMicros` — The time of the event, measured as the number of microseconds since proxy startup.
-- `sessionId` — A UUID that uniquely identifies the session in time and space.
+We will now elaborate on these ideas while progressively building out the API of the `AuditableAction` type.
 
-* `ClientAccept` — Emitted when the proxy accepts a connection from a client
-    - `processUuid` — Allows sessions of the same proxy process to be correlated.
-    - `virtualCluster` — The name of the virtual cluster the client is connecting to
-    - `peerAddress` — The IP address and port number of the remote peer.
-* `BrokerConnect` — Emitted when the proxy connects to a broker
-    - `brokerAddress` — The IP address and port number of the remote peer.
-* `ClientSaslAuthFailure` — Emitted when a client completes SASL authentication unsuccessfully
-    - `attemptedAuthorizedId` — The authorized id the client attempted to use, if known.
-* `ClientSaslAuthSuccess` — Emitted when a client completes SASL authentication successfully
-    - `authorizedId` — The authorised id
-* `OperationAllowed` — Emitted when an `Authorizer` allows access to a resource.
-    - `op` — The operation that was allowed (e.g. `READ`)
-    - `resourceType` — The type of the resource (e.g. `Topic`)
-    - `resourceName` — The name of the resource (e.g. `my-topic`
-* `OperationDenied` — Emitted when an `Authorizer` denies access to a resource.
-    - `op` — The operation that was denied (e.g. `READ`)
-    - `resourceType` — The type of the resource (e.g. `Topic`)
-    - `resourceName` — The name of the resource (e.g. `my-topic`
-* `Read` — Emitted when a client successfully reads records from a topic. It is called `Read` rather than `Fetch` because it covers reads generally, including the `ShareFetch` API key. It will be possible to disable these events, because of the potential for high volume. 
-    - `topicName` — The name of the topic.
-    - `partition` — The index of the partition.
-    - `offsets` — Offsets are included so that it's possible to record exactly which data has been read by a client.
+```java
+/** 
+ * Describes an auditable action that has been taken by the proxy or one of its plugins.
+ */
+interface AuditableAction {
+    // ...
+}
+```
 
-* `Write` — Emitted when a client successfully writes records to a topic. It is called `Write` rather than `Produce` for symmetry with `Read` (which also allows introduction of other produce-like APIs in the future). It will be possible to disable these events, because of the potential for high volume. 
-    - `topicName` — The name of the topic.
-    - `partition` — The index of the partition.
-    - `offsets` — Offsets are included so that it's possible to record exactly which data has been read by a client.
-* `Delete` — Emitted when a client successfully delete topics or records in a topic. 
-    - `topicName` — The name of the topic.
-    - `partition` — The index of the partition.
-    - `offsets` — Offsets are included so that it's possible to record exactly which data has been delete by a client.
-* Similarly events covering the following API Keys: `DESCRIBE_ACLS`, `CREATE_ACLS`, `DELETE_ACLS`
-* Similarly events covering the following API Keys: `DESCRIBE_USER_SCRAM_CREDENTIALS` or `ALTER_USER_SCRAM_CREDENTIALS`
-* Similarly events covering the following API Keys: `CREATE_DELEGATION_TOKEN`, `RENEW_DELEGATION_TOKEN`, `EXPIRE_DELEGATION_TOKEN`, `DESCRIBE_DELEGATION_TOKEN`
-* `ClientClose` — Emitted when a client connection is closed (whether client or proxy initiated)
-* `BrokerClose` — Emitted when a broker connection is closed (whether broker or proxy initiated).
+Constraining AuditableAction implementations to be `record` classes ensures that there is a uniform way to generically operate on actions (in terms of their components). 
+This enabled desirable functionality such as a guarantee that actions are JSON-serializable.
+
+##### When
+
+**When** is simply _when the action happened_. It is modelled trivially:
+
+```java
+interface AuditableAction {
+    /**
+     * When the event happened.
+     * @return The instant that the action happened.
+     */
+    Instant time();
     
+    // ...
+}
+```
 
-### Log emitter
+##### What
+ 
+**What** encompasses _what action was attempted_, and whether it was _performed successfully_.
 
-We will provide an emitter which will simply emit the above events in JSON format to an SLF4J `Logger` with a 
-given name (e.g. `security`).
+```java
+interface AuditableAction {
 
-The intent of offering this emitter is to provide the simplest possible mechanism for providing access to an audit log. It requires no additional infrastructure.
+    // ...
+
+    /**
+     * What action was attempted.
+     * @return The type of the event.
+     * Plugins should package-qualify their actions.
+     * Actions generated by the runtime are not prefixed.
+     */
+    String action();
+    
+    /**
+     * What the outcome of the {@link #action()} was.
+     * @return {@code null} if-and-only-if the action was successful, otherwise a
+     * machine-readable indication of the reason why the action was unsuccessful.
+     * This could be an exception class name or a Kafka error code
+     */
+    String status();
+    
+    /**
+     * What the reason for the outcome of the {@link #action()} was.
+     * @return {@code null} if the action was successful, otherwise an optional
+     * human-readable explanation of why the action was unsuccessful.
+     */
+    String reason();
+        
+    // ...
+}
+```
+
+##### Who
+
+**Who** covers the _actor that initiated the action_. 
+Modelling this accurately is a little complex.
+The first complication is that Kafka client applications, Kafka brokers and the proxy itself can all initiate actions. 
+The second complication is that prior to authentication the proxy knows has a network-level understanding of actors;
+later on, the proxy might become aware of application-level actors (principals).
+
+```java
+interface AuditableAction {
+
+    // ...
+
+    /**
+     * Who initiated the action.
+     * @return the actor that initiated the action.
+     */
+    Actor actor();
+        
+    // ...
+}
+
+/** 
+ * An actor that has performed an auditable action.
+ */
+public sealed interface Actor permits ClientActor, ServerActor, ProxyActor {
+}
+```
 
 
-### Metric counting emitter
+Let's enumerate the actors used by the runtime:
 
-We will provide an emitter which increments a count the number of occurrences of each type of event and makes these available though the existing metrics scrape endpoint.
-The metric name will be fixed, and metric tags will be used to distinguish the different event types.
+```java
 
-The intent of offering this emitter is to provide a _simple_ way for users to set up basic alerting on security events, such as a sudden increase in the number of failed authentication attempts. 
-A more detailed understanding would require consulting a log of security events obtained using one of the other emitters. 
+/** 
+ * A TCP client. If the client is a Kafka client, then the proxy might also know the client principals.
+ */
+public non-sealed interface ClientActor extends Actor {
+    SocketAddress srcAddr();
+    String session();
+    @Nullable
+    Set<Principal> principals();
+}
 
-### Kafka emitter
+/** 
+ * A TCP server. If the server is a Kafka server, then the proxy might also know the nodeId.
+ */
+public non-sealed interface ServerActor extends Actor {
+    SocketAddress tgtAddr();
+    String hostname();
+    @Nullable Integer nodeId();
+}
 
-We will provide an emitter which produces the above events to a Kafka topic. 
+/**
+ * An actor representing this proxy instance
+ */
+public non-sealed interface ProxyActor extends Actor {
+}
 
-The intent of offering this emitter is to decouple the proxy from systems consuming these security events, such as [SIEM systems](https://en.wikipedia.org/wiki/Security_information_and_event_management). 
-For example, users or 3rd parties can provide their own Kafka Streams application 
-which converts this message format to the format required by a SIEM, or perform aggregations 
-to better understand the events (e.g. number of failed authentications in a 15-minute window).
+``` 
 
-The events will be JSON encoded.
-The configuration for the producer will be configurable.
-In particular, the bootstrap brokers for the destination cluster could be any of:
+The `ProxyActor` can be useful for actions which happen outside of the context of a Kafka request or response. 
+This could be used as the actor for applications startup and shutdown events.
 
-* An unrelated (not proxied) cluster,
-* The address of one of the proxy's target clusters,
-* The address of one of the proxy's virtual cluster gateways.
+The `ClientActor` can minimally represent a TCP client connected to the proxy by using the `attr` and `session` components.
+This is the case for clients of the HTTP management server and for Kafka clients at the start of their session.
+Once a Kafka client has authenticated we may become aware of the client's subject. 
 
-In the latter case the user would need to take care to avoid infinite write amplification, where a initial client activity generates audit records which themselves require auditing. This results in an infinite feedback cycle. 
+Similarly the `ServerActor` can be used to represent the proxy's side of a connection to a server, 
+including but not limited to a Kafka broker. 
 
-A possible technical measure to avoid this infinite feedback would be to use a securely random `client.id` for the `KafkaProducer`, and intentionally not record security events associated with this `client.id`. However, this only works in the direct case. Infinite feedback would still be possible between two proxies each configured as the other's audit logging cluster.
+##### Which
+ 
+**Which** is about describing which object or resource is the _target of the action_.
+As such we need a uniform coordinate system for such objects and resources.
 
-The topic name will be configurable.
-The partitioning of proxy-scoped events will be based on the proxy instance name.
-The partitioning of session-scoped events will be based on the session id.
-A total order for events from the same process will be recoverable using the `processAgeMicros`. The `processUuid` of the `ClientConnect` event allows for correlation of sessions from the same proxy instance stored in different topic partitions.
+In full generality, a pluggable proxy such as Kroxylicious can talk to systems other than a Kafka broker.
+For example existing 1st party plugins make use of schema registries, and key management systems.
+This means we need a coordinate system that is open: It should be able to describe objects that the runtime doesn't know about.
+However, we don't want an API that is as heavyweight and difficult to use as X500-style Object Names.
 
-### APIs
+Instead we propose a flattened map structure which avoids collisions in practice while keeping JSON payload size minimal and SIEM queries intuitive:
+Java
 
-Under this proposal the following new APIs would be established:
+```java
+interface AuditableAction {
 
-* The JSON representation of the events exposed via the SLF4J and Kafka emitters.
-* The metric name and tag names exposed by the metrics emitter.
+    // ...
+    
+    /**
+     * The coordinates of the target object.
+     * Each key represents scope (e.g., "vc", "topicId"), and the corresponding value is the unique identifier within that scope.</p>
+     *
+     * <p>Multiple scopes should be used when:</p>
+     * <ul>
+     *   <li>a single scope does not provide sufficient uniqueness;
+     *     for example an identifier in the "topicName" scope
+     *     is only unique within some Kafka cluster, so a scope identifying that
+     *     cluster is needed to provide uniqueness.</li>
+     *   <li>an identifier is unique but unhelpfully opaque;
+     *     for example an identifier in the "topicId" scope is universally unique but does not identify
+     *     the containing cluster</li>
+     * </ul>
+     *
+     * <p>Plugins providing their own coordinates should package-prefix their scope names.</p>
+     */
+    Map<String, String> objectRef();
+    
+    // ...
+}
+```
 
-The future evolution of these APIs would follow the usual compatibility rules. 
+Both scopes and ids are open for extension, subject to the following:
+
+* `scope` can be nested. In order words the `topicName` scope makes no sense on its own, a `vc` coordinate must be included to make it unambiguous.
+* An unique identifier must be unique within a `scope` at any given time. 
+* A unique identifier may have stronger uniqueness properties (e.g. unique over time, rather than just instantaneously), but may not have weaker properties.
+
+In this proposal we define the following scopes:
+
+* `addr`: A network address.
+* `vc`: A virtual cluster, as defined in the proxy's configuration.
+* `tc`: A target cluster, as defined in the proxy's configuration.
+* `nodeId`: A Kafka server with a cluster.
+* `topicName` and `topicId`: A topic within a cluster. Either can be used. Both should be included if known.
+* `groupId`: A group within a cluster.
+* `transactionalId`: A transactional within a cluster.
+
+##### Correlation
+
+_Correlation_ is used when multiple actions result from a single initating event.
+
+```java
+interface AuditableAction {
+
+    // ...
+    
+    /** 
+     * Contextual identifiers for correlating this action with external systems, 
+     * client requests, or distributed traces.
+     */
+    Correlation correlation();
+}
+
+```
+
+The proxy runtime will use the following implementation:
+
+```java
+/**
+ * Identifiers for correlating actions.
+ * @param clientRequest The Kafka client's correlation ID (usually an Int32).
+ * @param serverRequest The broker's correlation ID.
+ */
+public record Correlation(@Nullable Integer clientCorrelationId,
+                          @Nullable Integer serverCorrelationId) {
+}
+
+```
+
+##### Context
+
+_Context_ provides a single place for action-specific information which is under control of the people defining that kind of action.
+This avoids the possibility of a conflict should a future proposal add to the core components/JSON properties described here.
+
+```java
+interface AuditableAction {
+
+    // ...
+    
+    /**
+     * {@link #action() action}-specific additional data about this action.
+     * @return additional data about this action, or null if there is no additional information.
+     */
+    @Nullable
+    Map<String, String> context();
+
+```
+
+This could be used to:
+* Provide more detail about the _what_, such as providing the topic id as well as the name.
+* Correlate to other systems than the Kafka broker. For example a plugin might add a `traceId` to link to an OTel trace.
+
+
+#### Examples
+
+Here are some examples of how certain actions would be rendered as JSON, based on the above Java schema.
+
+##### `ClientConnect`
+
+A client application connecting successfully to a proxy socket associated with a virtual cluster
+
+```json
+{
+  "time": "20260313T12:30:00.000000",
+  "action": "ClientConnect",
+  "actor": {
+    "srcAddr": "123.123.123.123:32456", # the TCP client address
+    "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
+  }
+  "objectRef": {
+    "vc": "my-cluster",
+    "nodeId": "1"
+  }
+  # "status": "null" => success
+}
+```
+
+It's worth noting that `ClientConnect` need not be associated with a particular virtual cluster. 
+For example we could reuse the same action for HTTP connections to the management server: 
+The `objectRef` might be:
+
+```json
+{ "addr": "127.0.0.1:8080" }
+```
+
+##### `ClientAuthenticate`
+
+Here's the same client application authenticating successfully:
+
+```json
+{
+  "time": "20260313T12:30:00.001378",
+  "action": "ClientAuthenticate",
+  "actor": {
+    "srcAddr": "123.123.123.123:32456",
+    "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee" # same session => same client
+    "principals": [ # The principals resulting from the successful authentication
+      { "User": "alice" }
+    ]
+  }
+  "objectRef": {
+    "vc": "my-cluster",
+    "nodeId": "1"
+  }
+  # "status": "null" => success
+}
+```
+
+##### `Write`
+
+And same client application being allowed access to topic 'foo' and denied access to topic 'bar' in a single produce request:
+
+```json
+# 1st action
+{
+  "time": "20260313T12:30:00.002840",
+  "action": "Write",
+  "actor": {
+    "srcAddr": "123.123.123.123:32456",
+    "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
+    "principals": [
+      { "User": "alice" }
+    ]
+  }
+  "objectRef": {
+    "vc": "my-cluster",
+    "topicName": "foo"
+  },
+  "correlation": {
+    "clientRequest": 4
+  }
+  # "status": "null" => success
+}
+# 2nd action
+{
+  "time": "20260313T12:30:00.002840",
+  "action": "Write",
+  "actor": {
+    "srcAddr": "123.123.123.123:32456",
+    "session": "1bd07921-c2b6-43a3-95f0-1c2244933aee"
+    "principals": [
+      { "User": "alice" }
+    ]
+  }
+  "objectRef": {
+    "vc": "my-cluster",
+    "topicName": "bar"
+  },
+  "correlation": {
+    "clientRequest": 4, # the same correlation => same request
+  },
+  "status": "29"
+  "reason": "Topic authorization failed."
+}
+```
+
+Because a topic is not broker-local it is not necessary to include a "nodeId" in the "objectRef" in this case.
+
+### The API used by plugins to report auditable actions
+
+Kroxylicious allows plugins to determine behaviour. 
+That means sometimes an auditable action is known only to a plugin.
+The `Authorization` filter is a concrete example: It allows or denies client interactions with Kafka entities on the target broker, and the runtime doesn't have any visiblity into the decision or the outcome.
+Another example would be the `RecordEncryption` filter recording the connections it makes to a KMS.
+
+To enable uses like this we need an API through which such plugins can contribute their actions to the audit log.
+Other filters may make use of this functionality where they need to record their auditable actions.
+
+Plugins **should not** use this facility to record observations, for example, about what the broker or client is observed to have done.
+* The broker is best placed to record its own actions.
+* A proxy is poorly placed to provide an authoratative record of what the broker has actually done. 
+  The 'two generals problem' means the proxy log cannot always be both complete and correct
+
+```java
+/**
+ * The means to record an auditable action.
+ * This interface is implemented exclusively by the Kroxylicious runtime for consumption by plugins.
+ */
+interface AuditLogger {
+
+    /**
+     * Start describing a successful auditable action.
+     * To actually be recorded {@link AuditableActionBuilder#log()} must be called on the returned builder.
+     * @param action The action. Plugins should package-qualify their action names.
+     * @return A builder with which to complete the recording of the action.
+     */
+    AuditableActionBuilder action(String action);
+    
+    /**
+     * Start describing an unsuccessful auditable action.
+     * The failure to permit access to a resource is one example of an unsuccessful auditable action.
+     * To actually be recorded {@link AuditableActionBuilder#log()} must be called on the returned builder.
+     * <p>Callers are responsible for scrubbing sensitive payloads, passwords, or PII before adding them to the context</p>
+     * @param action The action. Plugins should package-qualify their action names.
+     * @return A builder with which to complete the recording of the action.
+     */
+    AuditableActionBuilder actionWithOutcome(String action, String status, String reason);
+}
+```
+
+We're using the "fluent builder" pattern. 
+The builder itself looks like this:
+
+```java
+/**
+ * A builder for completing the recording of an auditable action that was started by a call to
+ * {@link AuditLogger#action(String)} or {@link AuditLogger#actionWithOutcome(String, String, String)}.
+ */
+interface AuditableActionBuilder {
+    /**
+     * <p>Add the target of the action as a set of coordinates.
+     * Each key represents scope (e.g., "vc", "topicId"), and the corresponding value is the unique identifier within that scope.</p>
+     *
+     * <p>Multiple scopes must be used when:</p>
+     * <ul>
+     *   <li>a single scope does not provide sufficient uniqueness;
+     *     for example an identifier in the "topicName" scope
+     *     is only unique within some Kafka cluster, so a scope identifying that
+     *     cluster is needed to provide uniqueness.</li>
+     *   <li>an identifier is unique but unhelpfully opaque;
+     *     for example an identifier in the "topicId" scope is universally unique but does not identify
+     *     the containing cluster</li>
+     * </ul>
+     *
+     * <p>Plugins providing their own coordinates must package-prefix their scope names.</p>
+     *
+     * @param objectRef Coordinates identifying the target object of the action.
+     * @return the builder for describing the rest of the action, and ultimately {@linkplain #log()} recording it}.
+     */
+    AuditableActionBuilder withObjectRef(Map<String, String> objectRef);
+    
+    /**
+     * <p>Add some additional context to be included with the action.</p>
+     * <p>This allows plugins to provide information not known to the runtime.</p>
+     * <p>Callers are responsible for scrubbing sensitive payloads, passwords, or PII before adding them to the context</p>
+     * @param context additional context to be included with the action.</p>
+     * @return the builder for describing the rest of the action, and ultimately {@linkplain #log()} recording it}.
+     */
+    AuditableActionBuilder withContext(Map<String, String> context);
+    
+    /**
+     * Records the action.
+     */
+    void log();
+}
+```
+
+The dedicated `AuditLogger` type means that different plugin context interfaces (such as `FilterContext`) can expose an `AuditLogger`, and pass that logger on to any subplugins, if necessary.
+
+The `FilterContext` will gain the following method:
+
+```java
+
+interface FilterContext {
+
+    /** 
+     * Get an audit logger for recording auditable actions.
+     */
+    AuditLogger auditLogger();
+    
+}
+```
+
+### Actions
+
+We saw above some examples of how actions are modelled.
+Let's now enumerate the full set of actions the proxy runtime will support as a result of this proposal:
+
+* `ProxyStart` -- the proxy application starting
+* `ProxyStop` -- the proxy application shutting down
+* `VirtualClusterStart` -- a virtual cluster starting (assuming dynamic VC reloading)
+* `VirtualClusterStop` -- a virtual cluster stopping (assuming dynamic VC reloading)
+* `ClientConnect` -- a client connecting to the proxy
+* `ClientClose` -- a client connection being closed
+* `ServerConnect` -- the proxy connecting to a server
+* `ServerClose` -- a server connection being closed
+* `ClientAuthenticate` -- a client's subjects changing (e.g. via `FilterContext.clientSaslAuthenticationSuccess()` or successful TLS handshake) or an authentication failure (e.g. via `FilterContext.clientSaslAuthenticationFailure()` or a failed TLS handshake). Note that SASL Inspectors and SASL Terminators do not need to use `FilterContext.auditLogger()`, instead audit logging happens as a side-effect of calling `FilterContext.clientSaslAuthenticationSuccess()` and `FilterContext.clientSaslAuthenticationSuccess()`.
+
+Additionally, the `Authorization` filter will add support an action for each of the operations it enforces:
+
+* `Read`
+* `Write`
+* `Create`
+* `Delete`
+* `Alter`
+* `Describe`
+* `ClusterAction`
+* `DescribeConfigs`
+* `AlterConfigs`
+* `IdempotentWrite`
+* `CreateTokens`
+* `DescribeTokens`
+* `TwoPhaseCommit`
+
+### The `Emitter` Java API
+
+```java
+/**
+ * Exposes auditable actions, or data derived from them, outside of this proxy process. 
+ * Emitter implementations are expected to be thread-safe and non-blocking.
+ */
+interface AuditEmitter extends AutoCloseable {
+
+    /**
+     * Allows the emitter to short-circuit the creation of an audit event
+     * if it has no interest in routing it.
+     */
+    boolean isInterested(String action, @Nullable String status);
+
+    /**
+     * Emit the given action.
+     * @param action The action
+     * @param context The context
+     */
+    void emitAction(AuditableAction action, Context context);
+
+    @Override
+    void close();
+}
+```
+
+The `Context` object is following the established pattern and allows for API evolution in future.
+In this proposal, it provides only a helper method for rendering an `AuditableAction` as JSON:
+
+```java
+    interface Context {
+        String asJsonString(AuditableAction action);
+    }
+```
+
+
+`AuditEmitter` instances are created like existing plugins, using the `ServiceLoader` mechanism is discover a factory class, instantiate it and use that to instantiate the emitter. 
+
+```java
+interface AuditEmitterFactory<C> {
+    initialize(C configuration);
+    AuditEmitter createEmitter();
+}
+```
+
+A point of difference from other plugins is that the `AuditEmitter` has the `close()` method, and the factory does not. 
+This is because the emitters are intentionally instantiated once on application startup and will not be dynamically reconfigurable.
+This absence of reconfigurability makes it harder for an attacker to turn the logging off during an attack.
+
+### The Emitter configuration API
+
+Emitters will specified in the proxy configuration in a new top-level `audit` property.
+Here's an example:
+
+```yaml
+audit:
+  - name: my-emitter
+    type: MyCustomAuditEmitter
+    config: 
+      myCustomConfig: true
+filterDefinitions:
+  - name: encryption
+    type: RecordEncryption
+    config:
+      # ...
+virtualClusters:
+# ...
+```
+
+The items in the `audit` array work exactly like `filterDefinitions`. 
+
+
+### The `LoggingAuditEmitter` implementation
+
+`LoggingAuditEmitter` will implement the `AuditEmitter` interface. 
+It will simply render the actions as JSON and log them at `info` level using the proxy's application logging stack.
+It will not require or allow any configuration.
+
 
 ## Affected/not affected projects
 
@@ -175,7 +644,7 @@ This proposal covers the proxy.
 ## Compatibility
 
 * This change is backwards compatible.
-* This change adds a new API (the schema of the events), which future proposals will need to consider for compatibility.
+* This change adds a new APIs (specifically the schema of the events), which future proposals will need to consider for compatibility.
 
 ## Rejected alternatives
 
@@ -185,7 +654,6 @@ This proposal covers the proxy.
     - in itself, guarantee that the logged event were structured or formatted as valid JSON.
     - be as robust when it comes to guaranteeing the API goal.
     - ensure that metrics and logging were based on a single source of truth about events
-    - provide the Kafka topic output included in this proposal
     - provide an easy way to add new emitters in the future.
   
 * Use a different format than JSON.
@@ -195,9 +663,5 @@ This proposal covers the proxy.
   Repeated object properties mean it can be space inefficient, though compression often helps.
   However, no other format is as ubiquitous as JSON, so using JSON ensures compatibility with the widest range of external tools and systems.
 
-* Deeper integrations with specific SIEM systems.
-  Having Kafka itself as an output provides a natural way to decouple the Kroxylicious project from having to provide SIEM integrations.
-  The choice we're making in this proposal can be contrasted with the "batteries included" approach we've taken with KMSes in the `RecordEncryption` filter.
-  Implementing a KMS (and doing so correctly) is fundamental to the `RecordEncryption` functionality, where the filter unavoidably needs to consume the services provided by the KMS.
 
-    
+
