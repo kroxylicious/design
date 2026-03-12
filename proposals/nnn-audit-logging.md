@@ -614,10 +614,11 @@ Here's an example:
 
 ```yaml
 audit:
-  - name: my-emitter
-    type: MyCustomAuditEmitter
-    config: 
-      myCustomConfig: true
+  emitters: 
+    - name: my-emitter
+      type: MyCustomAuditEmitter
+      config: 
+        myCustomConfig: true
 filterDefinitions:
   - name: encryption
     type: RecordEncryption
