@@ -634,9 +634,53 @@ The items in the `audit` array work exactly like `filterDefinitions`.
 ### The `LoggingAuditEmitter` implementation
 
 `LoggingAuditEmitter` will implement the `AuditEmitter` interface. 
-It will simply render the actions as JSON and log them at `info` level using the proxy's application logging stack.
-It will not require or allow any configuration.
+It will simply render the actions as JSON and log them using the proxy's application logging stack.
+Since the number of action is expected to be small it will use a different logger for each action, simply by prefixing the action with 
+`audit.`.
+For example `audit.ClientAuthenticate` will be the logger for all `ClientAuthenticate` actions. 
+This will allow users to easily use their logging configuration to filter out any actions they're not interested in.
 
+It will also provide a simple way to cusomise the level used for different actions (and whether the action was successful or not).
+One use case for this is to raise the level of particular events of interest. 
+For example, actions might be logged at `INFO` by default, but failed `ClientAuthenticate` actions could be logged at `WARN` level.
+And because the `Write` action might involve very verbose logging we might configure to log it at `DEBUG`:
+
+```yaml
+logAt: INFO
+except:
+  - action: ClientAuthenticate
+    logFailureAt: WARN
+  - action: Write
+    logAt: DEBUG
+```
+
+### The `MetricsEmitter` implementation
+
+`MetricsEmitter` will implement the `AuditEmitter` interface. 
+It simply increment a counter for each success and failure action.
+One use case for this is for metric-based alerting to prompt users of the need to inspect the logs.
+Reusing the above example, some organizations might want an alert on failed authentications. 
+
+In order to have some specificity it will be possible to tag the counters with the scopes from an action's `objectRef`.
+
+This will be done by the emitter supporting an optional scope-to-tag-key mapping:
+
+```yaml
+objectScopeMapping:
+  vc: virtual_cluster
+  topicName: topic_name
+```
+
+If an action's objectRefs includes scopes not in the mapping (e.g. `addr`) then those scopes are not included in the counter's tags.
+If an action's objectRefs omits scopes in the mapping (say an action lacks a `topicName`) they will be ignored.
+The user will need to take care to avoid including scopes where the identifiers have high cardinality.
+
+Using the above mapping, and the example `ClientAuthenticate` and `Write` actions described earlier, we could have meters like this:
+
+* `kroxylicious_audit_ClientAuthenticate_success[virtual_cluster=my-cluster]`
+* `kroxylicious_audit_ClientAuthenticate_failure[virtual_cluster=my-cluster]`
+* `kroxylicious_audit_Write_success[virtual_cluster=my-cluster, topic_name=my-topic]`
+* `kroxylicious_audit_Write_failure[virtual_cluster=my-cluster, topic_name=my-topic]`
 
 ## Affected/not affected projects
 
