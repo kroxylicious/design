@@ -10,15 +10,15 @@ Today a virtual cluster is either fully registered (ports bound, accepting conne
 
 This has several consequences:
 
-1. **Startup is all-or-nothing.** If one virtual cluster fails to start (e.g. port conflict, filter initialisation failure), the entire proxy process fails. Other clusters that could have started successfully are taken down with it.
+1. **Startup is all-or-nothing.** If one virtual cluster fails to start (e.g. port conflict, filter initialisation failure), the entire proxy process fails. Other clusters that could have started successfully never become available.
 
-2. **Shutdown is unstructured.** The proxy stops accepting connections and closes channels, but there is no formal draining phase that ensures in-flight Kafka requests complete before the connection is torn down.
+2. **Shutdown is unstructured.** The proxy stops accepting connections and closes channels, but there is no formal draining phase that ensures in-flight Kafka requests complete before the connection is torn down. While this does not violate any of the guarantees of the Kafka protocol (which needs to cope with network partitions), it would be good to shutdown more gracefully in situations where that's possible.
 
 3. **No foundation for partial failure.** Proposals such as [012 - Hot Reload](https://github.com/kroxylicious/design/pull/83) need the ability to express "cluster-b failed to apply new configuration but cluster-a is still serving traffic." Without a lifecycle model this state is undefined and unreportable.
 
 ## Motivation
 
-A virtual cluster is the natural unit of independent operation — the smallest scope at which the proxy can contain a failure without affecting unrelated traffic. Today this independence is not modelled: the proxy treats all clusters as a single unit that either starts completely or fails completely.
+A virtual cluster is the natural unit of independent operation — the smallest scope at which the proxy can contain a failure without affecting unrelated traffic. Today this independence is notional: the proxy treats all clusters as a single unit that either starts completely or fails completely.
 
 Making per-cluster independence explicit enables the proxy to isolate configuration errors, startup failures, and runtime problems to the cluster that caused them, rather than treating them as proxy-wide events.
 
@@ -85,7 +85,7 @@ proxy:
   # startupPolicy: best-effort  # start with whatever clusters succeed
 ```
 
-In best-effort mode, the proxy starts and serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be accepting" vs "at least one cluster must not be failed"). The operator would typically set this policy.
+In best-effort mode, the proxy starts and serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be accepting" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
 
 ### Graceful Shutdown
 
@@ -109,29 +109,6 @@ proxy:
 
 Cluster lifecycle state should be observable — through management endpoints, logging, or metrics — so that operators and tooling can determine which clusters are accepting connections, which have failed, and why. The specific reporting mechanism is an implementation concern and not prescribed by this proposal.
 
-### Internal Representation
-
-Each virtual cluster holds a state object:
-
-```java
-public record ClusterState(
-        LifecyclePhase phase,
-        Instant since,
-        @Nullable String reason) {
-
-    public enum LifecyclePhase {
-        INITIALIZING,
-        ACCEPTING,
-        DRAINING,
-        FAILED,
-        STOPPED
-    }
-}
-```
-
-State transitions should be validated — e.g. a cluster cannot move from `stopped` to any other state. Invalid transitions indicate a programming error and should throw.
-
-The component responsible for managing cluster state (likely an evolution of the existing `EndpointRegistry` or a new `ClusterLifecycleManager`) should be the single source of truth for state transitions, ensuring they are logged and observable.
 
 ## Affected/not affected projects
 
