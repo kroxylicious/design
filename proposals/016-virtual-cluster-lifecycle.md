@@ -105,6 +105,8 @@ proxy:
   drainTimeout: 60s  # default TBD
 ```
 
+Graceful draining reduces unnecessary client errors during planned shutdowns, and aligns with how the broader Kafka ecosystem behaves — brokers drain before stopping and operators expect the same from any Kafka component. It is best-effort rather than a guarantee: the drain timeout is the hard backstop. Kafka clients are required to handle connection loss regardless, so forced closure after timeout remains protocol-compliant.
+
 ### Observability
 
 Cluster lifecycle state should be observable — through management endpoints, logging, or metrics — so that operators and tooling can determine which clusters are accepting connections, which have failed, and why. The specific reporting mechanism is an implementation concern and not prescribed by this proposal.
