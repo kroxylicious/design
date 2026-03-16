@@ -113,7 +113,16 @@ Graceful draining reduces unnecessary client errors during planned shutdowns, an
 
 ### Observability
 
-Cluster lifecycle state should be observable — through management endpoints, logging, or metrics — so that operators and tooling can determine which clusters are accepting connections, which have failed, and why. The specific reporting mechanism is an implementation concern and not prescribed by this proposal.
+Cluster lifecycle state is public API. Two mechanisms must be provided:
+
+**Management endpoint**: a queryable endpoint returning the current state and failure reason (where applicable) of each virtual cluster, for on-demand inspection by operators and tooling.
+
+**Metrics**: at a minimum, metrics should capture:
+- Current state of each virtual cluster (e.g. `kroxylicious_virtual_cluster_state`)
+- Time spent in the current state (e.g. `kroxylicious_virtual_cluster_state_duration_seconds`) — enables alerting on clusters stuck in `failed` or `initializing`
+- Total state transitions per cluster (e.g. `kroxylicious_virtual_cluster_transitions_total`) — enables detection of instability or flapping
+
+Implementations may expose additional metrics. Metric names and endpoint paths are confirmed in the implementation and documented as public API at that point.
 
 
 ## Affected/not affected projects
