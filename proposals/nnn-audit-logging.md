@@ -170,8 +170,19 @@ Let's enumerate the actors used by the runtime:
  * A TCP client. If the client is a Kafka client, then the proxy might also know the client principals.
  */
 public non-sealed interface ClientActor extends Actor {
+    /**
+     * @return the client's socket address
+     */
     SocketAddress srcAddr();
-    String session();
+    
+    /** 
+     * @return A unique identifer for this connection.
+     */ 
+    String sessionId();
+    
+    /** 
+     * @return The principals if the client has authenticated. Null if the client has not authenticated.
+     */ 
     @Nullable
     Set<Principal> principals();
 }
@@ -180,8 +191,14 @@ public non-sealed interface ClientActor extends Actor {
  * A TCP server. If the server is a Kafka server, then the proxy might also know the nodeId.
  */
 public non-sealed interface ServerActor extends Actor {
+    /**
+     * @return the server's socket address
+     */
     SocketAddress tgtAddr();
     String hostname();
+    /**
+     * @return the nodeId if the server is known to be a Kafka server, otherwise null.
+     */
     @Nullable Integer nodeId();
 }
 
@@ -189,6 +206,10 @@ public non-sealed interface ServerActor extends Actor {
  * An actor representing this proxy instance
  */
 public non-sealed interface ProxyActor extends Actor {
+    /**
+     * @returns A unique identifier for this execution of the proxy.
+     */
+    String executionId();
 }
 
 ``` 
@@ -196,7 +217,7 @@ public non-sealed interface ProxyActor extends Actor {
 The `ProxyActor` can be useful for actions which happen outside of the context of a Kafka request or response. 
 This could be used as the actor for applications startup and shutdown events.
 
-The `ClientActor` can minimally represent a TCP client connected to the proxy by using the `attr` and `session` components.
+The `ClientActor` can minimally represent a TCP client connected to the proxy by using the `srcAddr` and `sessionId` components.
 This is the case for clients of the HTTP management server and for Kafka clients at the start of their session.
 Once a Kafka client has authenticated we may become aware of the client's subject. 
 
@@ -206,7 +227,7 @@ including but not limited to a Kafka broker.
 ##### Which
  
 **Which** is about describing which object or resource is the _target of the action_.
-As such we need a uniform coordinate system for such objects and resources.
+As such we need a uniform 'coordinate system' for such identifying objects and resources.
 
 In full generality, a pluggable proxy such as Kroxylicious can talk to systems other than a Kafka broker.
 For example existing 1st party plugins make use of schema registries, and key management systems.
@@ -222,8 +243,9 @@ interface AuditableAction {
     // ...
     
     /**
-     * The coordinates of the target object.
-     * Each key represents scope (e.g., "vc", "topicId"), and the corresponding value is the unique identifier within that scope.</p>
+     * A unique identifier of the target object.
+     * Each key represents a scope (e.g., "vc", "topicId"), and the corresponding value is the unique identifier within that scope.
+     * All the unique identifiers together must uniquely identify the object.</p>
      *
      * <p>Multiple scopes should be used when:</p>
      * <ul>
@@ -236,7 +258,7 @@ interface AuditableAction {
      *     the containing cluster</li>
      * </ul>
      *
-     * <p>Plugins providing their own coordinates should package-prefix their scope names.</p>
+     * <p>Plugins may use their own scope names, but these must be package-name prefixed.</p>
      */
     Map<String, String> objectRef();
     
@@ -246,8 +268,9 @@ interface AuditableAction {
 
 Both scopes and ids are open for extension, subject to the following:
 
-* `scope` can be nested. In order words the `topicName` scope makes no sense on its own, a `vc` coordinate must be included to make it unambiguous.
-* An unique identifier must be unique within a `scope` at any given time. 
+* A unique identifier must be unique within a `scope` at any given time. 
+* Multiple scopes must be used if a scope is not universal. For example, the `topicName` scope is an identifier for a topic within a cluster, but not across all clusters, so an identifier in the `vc` scope (or the `tc` scope) could be included to make it unambiguous.
+
 * A unique identifier may have stronger uniqueness properties (e.g. unique over time, rather than just instantaneously), but may not have weaker properties.
 
 In this proposal we define the following scopes:
