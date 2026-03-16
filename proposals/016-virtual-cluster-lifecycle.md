@@ -20,6 +20,10 @@ This has several consequences:
 
 A virtual cluster is the natural unit of independent operation — the smallest scope at which the proxy can contain a failure without affecting unrelated traffic. Today this independence is notional: the proxy treats all clusters as a single unit that either starts completely or fails completely.
 
+Virtual clusters are entities in the Domain-Driven Design sense: each has a persistent identity that carries through state changes. Each cluster's identifier is its name — it is what distinguishes one cluster from another. Users reason about clusters by name — "cluster-b failed during reload, cluster-a is still serving traffic" — and the lifecycle model matches that intuition. The state machine tracks the lifecycle of the entity, not a specific configuration instance; a reload is a transition the entity passes through, not a replacement of it.
+
+Because the name is the identity, renaming a cluster in the configuration is a destructive operation: the proxy has no way to distinguish a rename from a remove-and-add of a different cluster. Documentation should make this explicit.
+
 Making per-cluster independence explicit enables the proxy to isolate configuration errors, startup failures, and runtime problems to the cluster that caused them, rather than treating them as proxy-wide events.
 
 A lifecycle model provides:
@@ -45,7 +49,7 @@ Each virtual cluster has exactly one state at any time:
 | **accepting** | The proxy has completed setup for this cluster and is accepting connections. This state makes no claim about the availability of upstream brokers or other runtime dependencies — it means the proxy is ready to handle connection attempts. |
 | **draining** | New connections are rejected. Existing connections remain open to give in-flight requests the opportunity to complete. Connections are closed once idle or when the drain timeout is reached. |
 | **failed** | The proxy determined the configuration not to be viable. All partially-acquired resources are released on entry to this state. The proxy retains the cluster's configuration and failure reason for diagnostics and retry. |
-| **stopped** | The cluster is no longer operational. All resources have been released. This is a terminal state. |
+| **stopped** | The cluster has been permanently removed from the configuration. All resources have been released. This is a terminal state — `stopped` is reached when a cluster is explicitly removed or the proxy shuts down, not as part of reload or rollback. |
 
 ### State Transitions
 
@@ -66,7 +70,7 @@ Each virtual cluster has exactly one state at any time:
 - `initializing` → `accepting`: new configuration applied successfully.
 - `initializing` → `failed`: new configuration could not be applied. Partial resources are cleaned up.
 
-Whether a previous configuration is available for rollback is implementation context that the runtime tracks, not a property of the lifecycle state.
+Because the cluster is an entity, these transitions happen on the same entity — it is not replaced on reload. A failed reconfiguration leaves the entity in `failed` state; the recovery transition (`failed` → `initializing`) covers any subsequent retry, whether with a corrected configuration or otherwise.
 
 **Recovery transitions:**
 - `failed` → `initializing`: a retry is requested (e.g. operator action, reload with corrected config). Since `failed` clusters have already released all resources, this is a clean start from scratch.
