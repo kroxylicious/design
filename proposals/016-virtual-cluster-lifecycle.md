@@ -47,7 +47,7 @@ Each virtual cluster has exactly one state at any time:
 |-------|-------------|
 | **initializing** | The cluster is being set up. Not yet accepting connections. Used on first boot, when retrying from `failed`, and during configuration reload. |
 | **accepting** | The proxy has completed setup for this cluster and is accepting connections. This state makes no claim about the availability of upstream brokers or other runtime dependencies — it means the proxy is ready to handle connection attempts. |
-| **draining** | New connections are rejected. Existing connections remain open to give in-flight requests the opportunity to complete. Connections are closed once idle or when the drain timeout is reached. |
+| **draining** | New connections are rejected. New requests on existing connections are also rejected. Existing in-flight requests are given the opportunity to complete. Connections are closed once all in-flight requests are complete or the drain timeout is reached. |
 | **failed** | The proxy determined the configuration not to be viable. All partially-acquired resources are released on entry to this state. The proxy retains the cluster's configuration and failure reason for diagnostics and retry. |
 | **stopped** | The cluster has been permanently removed from the configuration. All resources have been released. This is a terminal state — `stopped` is reached when a cluster is explicitly removed or the proxy shuts down, not as part of reload or rollback. |
 
@@ -97,8 +97,8 @@ When the proxy receives a shutdown signal:
 
 1. All `accepting` clusters transition to `draining`.
 2. All `failed` clusters transition directly to `stopped`.
-3. New connections are rejected for draining clusters.
-4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout.
+3. New connections are rejected for draining clusters. New requests on existing connections are also rejected.
+4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout. The proxy takes the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
 5. Once drained (or timed out), connections are closed and clusters move to `stopped`.
 6. The proxy process exits.
 
@@ -175,6 +175,8 @@ We considered splitting the `accepting` state into `healthy` and `degraded` to m
 Runtime health is also inherently perspectival: different observers (direct clients, load balancers, monitoring systems) may define "healthy" differently, and health signals depend on polling mechanisms with inherent delays. Baking a health model into the lifecycle commits us to a definition we do not yet have and that may not be the same for all consumers.
 
 The lifecycle model's job is to track what the proxy is doing with a cluster — setting it up, accepting connections, draining, or torn down. Whether the cluster can successfully serve traffic is a separate, orthogonal concern better addressed by readiness probes, health endpoints, or metrics that can evolve independently.
+
+Connection-level resilience mechanisms such as circuit-breaking are a manifestation of the same runtime health concerns: the decision to temporarily reject connections is driven by runtime signals such as upstream availability or load. The same reasoning applies — these are not cluster lifecycle transitions in the scope of this proposal, and excluding runtime health from the lifecycle model excludes circuit-breaking with it.
 
 ### Runtime health model
 
