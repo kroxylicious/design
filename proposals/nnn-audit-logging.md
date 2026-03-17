@@ -689,7 +689,7 @@ In order to have some specificity it will be possible to tag the counters with t
 This will be done by the emitter supporting an optional scope-to-tag-key mapping:
 
 ```yaml
-objectScopeMapping:
+scopeMapping:
   vc: virtual_cluster
   topicName: topic_name
 ```
