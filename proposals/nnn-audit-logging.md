@@ -556,8 +556,8 @@ Let's now enumerate the full set of actions the proxy runtime will support as a 
 
 * `ProxyStart` -- the proxy application starting
 * `ProxyStop` -- the proxy application shutting down
-* `VirtualClusterStart` -- a virtual cluster starting (assuming dynamic VC reloading)
-* `VirtualClusterStop` -- a virtual cluster stopping (assuming dynamic VC reloading)
+* `VirtualClusterStart` -- a virtual cluster starting
+* `VirtualClusterStop` -- a virtual cluster stopping
 * `ClientConnect` -- a client connecting to the proxy
 * `ClientClose` -- a client connection being closed
 * `ServerConnect` -- the proxy connecting to a server
