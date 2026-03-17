@@ -608,13 +608,43 @@ interface AuditEmitter extends AutoCloseable {
 ```
 
 The `Context` object is following the established pattern and allows for API evolution in future.
-In this proposal, it provides only a helper method for rendering an `AuditableAction` as JSON:
+In this proposal, it provides only a couple of helper methods for rendering an `AuditableAction` as JSON:
 
 ```java
     interface Context {
-        String asJsonString(AuditableAction action);
+        String asString(AuditableAction action, TextFormat format);
+        byte[] asBytes(AuditableAction action, BinaryFormat format);
+    }
+    enum TextFormat {
+        /**
+         * JSON, using the built-in JSON format.
+         * A schema describing this JSON is available at
+         * <a href="https://kroxylicious.io/schemas/audit_v1.json">https://kroxylicious.io/schemas/audit_v1.json</a>.
+         */
+        KROXYLICIOUS_JSON_V1
+    }
+
+    enum BinaryFormat {
+        /**
+         * UTF-8 encoded JSON, using the built-in JSON format.
+         * A schema describing this JSON is available at
+         * <a href="https://kroxylicious.io/schemas/audit_v1.json">https://kroxylicious.io/schemas/audit_v1.json</a>.
+         */
+        KROXYLICIOUS_JSON_V1
     }
 ```
+
+Providing a JSON-converting method on the `Context` means saves that there is a common JSON representation for audit actions. 
+That saves Emitters from having to invent their own serialization (in cases where the Emitter is not targetting a specific flavour of JSON for output).
+
+A stated goal of this proposal is for audit logging to be an API of the project.
+It is desirable for this to extend to the JSON format produced via the `Context.asString()` and `Context.asBytes()`, 
+so that users can reliably build tooling around the emitted JSON.
+However, because arbitrary plugins are able to generate their own events, it's not possible to 
+rigourously guarantee that all actions that get rendered to JSON adhere to the contracts defined in the JavaDoc.
+For this reason the JSON schema referenced above is provided primarily for documentation purposes, rather than for validation. 
+However, it is expected that the JSON produced for all artifacts produced by the project will be valid to that schema.
+Note also that the schema is versioned independently of any particular release of the proxy.
 
 
 `AuditEmitter` instances are created like existing plugins, using the `ServiceLoader` mechanism is discover a factory class, instantiate it and use that to instantiate the emitter. 
