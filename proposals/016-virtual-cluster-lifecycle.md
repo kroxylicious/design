@@ -111,6 +111,8 @@ proxy:
 
 Graceful draining reduces unnecessary client errors during planned shutdowns, and aligns with how the broader Kafka ecosystem behaves — brokers drain before stopping and operators expect the same from any Kafka component. It is best-effort rather than a guarantee: the drain timeout is the hard backstop. Kafka clients are required to handle connection loss regardless, so forced closure after timeout remains protocol-compliant.
 
+The proxy cannot replicate the Kafka broker's clean shutdown mechanism — brokers coordinate partition leader migration before closing connections, meaning producers can follow the new leader without session disruption. The proxy has no equivalent, so connection drops during draining cause idempotent producers to lose their session state on reconnect. This is an existing proxy limitation; a reload mechanism building on this lifecycle model can improve the situation by confining disruption to a single virtual cluster rather than requiring a full process restart. To assess whether this is acceptable, consider how analogous situations are handled without the proxy — a broker crash or network split has the same effect on idempotent producer sessions, and Kafka clients must already be prepared for this. Users requiring exactly-once guarantees across reconnections should use transactional producers.
+
 ### Observability
 
 Cluster lifecycle state is public API. Two mechanisms must be provided:
