@@ -6,13 +6,13 @@ Introduce a lifecycle state model for virtual clusters so that each cluster has 
 
 ## Current Situation
 
-Today a virtual cluster is either fully registered (ports bound, accepting connections) or it does not exist. There is no intermediate or error state.
+Today a virtual cluster is either fully registered (ports bound, serving traffic) or it does not exist. There is no intermediate or error state.
 
 This has several consequences:
 
 1. **Startup is all-or-nothing.** If one virtual cluster fails to start (e.g. port conflict, filter initialisation failure), the entire proxy process fails. Other clusters that could have started successfully never become available.
 
-2. **Shutdown is unstructured.** The proxy stops accepting connections and closes channels, but there is no formal draining phase that ensures in-flight Kafka requests complete before the connection is torn down. While this does not violate any of the guarantees of the Kafka protocol (which needs to cope with network partitions), it would be good to shutdown more gracefully in situations where that's possible.
+2. **Shutdown is unstructured.** The proxy stops serving traffic and closes channels, but there is no formal draining phase that ensures in-flight Kafka requests complete before the connection is torn down. While this does not violate any of the guarantees of the Kafka protocol (which needs to cope with network partitions), it would be good to shutdown more gracefully in situations where that's possible.
 
 3. **No foundation for partial failure.** Proposals such as [012 - Hot Reload](https://github.com/kroxylicious/design/pull/83) need the ability to express "cluster-b failed to apply new configuration but cluster-a is still serving traffic." Without a lifecycle model this state is undefined and unreportable.
 
@@ -45,8 +45,8 @@ Each virtual cluster has exactly one state at any time:
 
 | State | Description |
 |-------|-------------|
-| **initializing** | The cluster is being set up. Not yet accepting connections. Used on first boot, when retrying from `failed`, and during configuration reload. |
-| **accepting** | The proxy has completed setup for this cluster and is accepting connections. This state makes no claim about the availability of upstream brokers or other runtime dependencies — it means the proxy is ready to handle connection attempts. |
+| **initializing** | The cluster is being set up. Not yet serving traffic. Used on first boot, when retrying from `failed`, and during configuration reload. |
+| **serving** | The proxy has completed setup for this cluster and is serving traffic. This state makes no claim about the availability of upstream brokers or other runtime dependencies — it means the proxy is ready to handle connection attempts. |
 | **draining** | New connections are rejected. New requests on existing connections are also rejected. Existing in-flight requests are given the opportunity to complete. Connections are closed once all in-flight requests are complete or the drain timeout is reached. |
 | **failed** | The proxy determined the configuration not to be viable. All partially-acquired resources are released on entry to this state. The proxy retains the cluster's configuration and failure reason for diagnostics and retry. |
 | **stopped** | The cluster has been permanently removed from the configuration. All resources have been released. This is a terminal state — `stopped` is reached when a cluster is explicitly removed or the proxy shuts down, not as part of reload or rollback. |
@@ -56,18 +56,18 @@ Each virtual cluster has exactly one state at any time:
 ![Virtual cluster lifecycle state diagram](diagrams/016-virtual-cluster-lifecycle.png)
 
 **Startup transitions:**
-- `initializing` → `accepting`: configuration applied successfully. The proxy is ready to handle connection attempts for this cluster.
+- `initializing` → `serving`: configuration applied successfully. The proxy is ready to handle connection attempts for this cluster.
 - `initializing` → `failed`: configuration could not be applied. Any partially-acquired resources are released before entering `failed`. The error is captured against the cluster state.
 
 **Shutdown transitions:**
-- `accepting` → `draining`: the cluster is being shut down or removed. New connections are rejected; existing connections are given the opportunity to complete.
+- `serving` → `draining`: the cluster is being shut down or removed. New connections are rejected; existing in-flight requests are given the opportunity to complete.
 - `draining` → `stopped`: connections are closed (gracefully or via timeout). Terminal.
 - `failed` → `stopped`: the cluster is being removed or the proxy is shutting down. Since `failed` clusters have already released their resources, this is a bookkeeping transition. Terminal.
 
 **Reload transitions:**
-- `accepting` → `draining`: connections are drained before reconfiguration.
+- `serving` → `draining`: connections are drained before reconfiguration.
 - `draining` → `initializing`: drain is complete, cluster begins applying new configuration.
-- `initializing` → `accepting`: new configuration applied successfully.
+- `initializing` → `serving`: new configuration applied successfully.
 - `initializing` → `failed`: new configuration could not be applied. Partial resources are cleaned up.
 
 Because the cluster is an entity, these transitions happen on the same entity — it is not replaced on reload. A failed reconfiguration leaves the entity in `failed` state; the recovery transition (`failed` → `initializing`) covers any subsequent retry, whether with a corrected configuration or otherwise.
@@ -77,7 +77,7 @@ Because the cluster is an entity, these transitions happen on the same entity �
 
 ### Proxy Startup Behaviour
 
-On startup, the proxy attempts to initialise each virtual cluster in the configuration. Clusters that succeed move to `accepting`. Clusters that fail move to `failed` with a captured reason.
+On startup, the proxy attempts to initialise each virtual cluster in the configuration. Clusters that succeed move to `serving`. Clusters that fail move to `failed` with a captured reason.
 
 By default, the proxy serves no traffic if any cluster fails to initialise. This is the correct behaviour for most deployments — configuration errors should be surfaced immediately, especially in development and bare-metal environments.
 
@@ -89,13 +89,13 @@ proxy:
   # partialInitialisationPolicy: serve-others  # serve clusters that initialised successfully
 ```
 
-In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be accepting" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
 
 ### Graceful Shutdown
 
 When the proxy receives a shutdown signal:
 
-1. All `accepting` clusters transition to `draining`.
+1. All `serving` clusters transition to `draining`.
 2. All `failed` clusters transition directly to `stopped`.
 3. New connections are rejected for draining clusters. New requests on existing connections are also rejected.
 4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout. The proxy takes the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
@@ -137,9 +137,9 @@ Implementations may expose additional metrics. Metric names and endpoint paths a
 
 ## Compatibility
 
-The default startup policy is fail-fast, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
+The default `partialInitialisationPolicy` is `serve-none`, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
 
-The new best-effort startup policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect partially-started proxies.
+The `serve-others` policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect proxies that are only partially serving traffic.
 
 ## Rejected Alternatives
 
@@ -166,15 +166,15 @@ We considered a separate `reinitializing` state to distinguish first-time initia
 
 ### Reload through `stopped`
 
-We considered having the reload path go through `stopped` (`accepting` → `draining` → `stopped` → `initializing` → `accepting`). This would make `stopped` a non-terminal state, changing its meaning from "this cluster is done" to "this cluster might come back." This complicates the model — during shutdown, all clusters reach `stopped`, but some might be re-entering `initializing` for reload while others are genuinely finished. Keeping `stopped` terminal and routing reload through `draining` → `initializing` avoids this ambiguity.
+We considered having the reload path go through `stopped` (`serving` → `draining` → `stopped` → `initializing` → `serving`). This would make `stopped` a non-terminal state, changing its meaning from "this cluster is done" to "this cluster might come back." This complicates the model — during shutdown, all clusters reach `stopped`, but some might be re-entering `initializing` for reload while others are genuinely finished. Keeping `stopped` terminal and routing reload through `draining` → `initializing` avoids this ambiguity.
 
 ### Runtime health as lifecycle state
 
-We considered splitting the `accepting` state into `healthy` and `degraded` to model runtime health (upstream broker availability, KMS connectivity, etc.) as part of the lifecycle. However, `healthy` and `degraded` had identical inward and outward transitions — both could transition to `draining` for shutdown or reload, and neither gated any lifecycle decision. This is a strong signal that they are not lifecycle states.
+We considered splitting the `serving` state into `healthy` and `degraded` to model runtime health (upstream broker availability, KMS connectivity, etc.) as part of the lifecycle. However, `healthy` and `degraded` had identical inward and outward transitions — both could transition to `draining` for shutdown or reload, and neither gated any lifecycle decision. This is a strong signal that they are not lifecycle states.
 
 Runtime health is also inherently perspectival: different observers (direct clients, load balancers, monitoring systems) may define "healthy" differently, and health signals depend on polling mechanisms with inherent delays. Baking a health model into the lifecycle commits us to a definition we do not yet have and that may not be the same for all consumers.
 
-The lifecycle model's job is to track what the proxy is doing with a cluster — setting it up, accepting connections, draining, or torn down. Whether the cluster can successfully serve traffic is a separate, orthogonal concern better addressed by readiness probes, health endpoints, or metrics that can evolve independently.
+The lifecycle model's job is to track what the proxy is doing with a cluster — setting it up, serving traffic, draining, or torn down. Whether the cluster can successfully serve traffic is a separate, orthogonal concern better addressed by readiness probes, health endpoints, or metrics that can evolve independently.
 
 Connection-level resilience mechanisms such as circuit-breaking are a manifestation of the same runtime health concerns: the decision to temporarily reject connections is driven by runtime signals such as upstream availability or load. The same reasoning applies — these are not cluster lifecycle transitions in the scope of this proposal, and excluding runtime health from the lifecycle model excludes circuit-breaking with it.
 
@@ -186,9 +186,9 @@ We considered defining a broader health model alongside the lifecycle — coveri
 
 ### Reload without draining
 
-The current reload path requires draining connections before reinitialising (`accepting` → `draining` → `initializing`). In the future, it may be possible to skip the drain step for certain types of configuration change — for example, swapping the filter chain in place or reconnecting upstream without dropping client connections.
+The current reload path requires draining connections before reinitialising (`serving` → `draining` → `initializing`). In the future, it may be possible to skip the drain step for certain types of configuration change — for example, swapping the filter chain in place or reconnecting upstream without dropping client connections.
 
-This would introduce a direct `accepting` → `initializing` transition. The state model as proposed accommodates this without structural changes: `initializing` already represents "setting up the cluster," and its exit transitions (`accepting` on success, `failed` on failure) remain the same regardless of whether draining preceded it.
+This would introduce a direct `serving` → `initializing` transition. The state model as proposed accommodates this without structural changes: `initializing` already represents "setting up the cluster," and its exit transitions (`serving` on success, `failed` on failure) remain the same regardless of whether draining preceded it.
 
 Some configuration changes will likely always require draining — for example, changes to the upstream cluster identity or TLS configuration that invalidate existing connections. The optimisation is about identifying changes where draining can be safely skipped, not eliminating it.
 
