@@ -79,17 +79,17 @@ Because the cluster is an entity, these transitions happen on the same entity �
 
 On startup, the proxy attempts to initialise each virtual cluster in the configuration. Clusters that succeed move to `accepting`. Clusters that fail move to `failed` with a captured reason.
 
-By default, the proxy fails to start if any cluster fails to initialise (fail-fast). This is the correct behaviour for most deployments — configuration errors should be surfaced immediately, especially in development and bare-metal environments.
+By default, the proxy serves no traffic if any cluster fails to initialise. This is the correct behaviour for most deployments — configuration errors should be surfaced immediately, especially in development and bare-metal environments.
 
-A configurable startup policy allows deployments where partial availability is preferable to no availability:
+The policy is configurable and applies whenever clusters initialise, whether on first startup or during reload:
 
 ```yaml
 proxy:
-  startupPolicy: fail-fast  # default — any cluster failure prevents startup
-  # startupPolicy: best-effort  # start with whatever clusters succeed
+  partialInitialisationPolicy: serve-none  # default — any cluster failure prevents serving traffic
+  # partialInitialisationPolicy: serve-others  # serve clusters that initialised successfully
 ```
 
-In best-effort mode, the proxy starts and serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be accepting" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be accepting" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
 
 ### Graceful Shutdown
 
