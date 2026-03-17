@@ -724,16 +724,19 @@ scopeMapping:
   topicName: topic_name
 ```
 
+By default, the `scopeMapping` will be the empty mapping `{}`. 
+
 If an action's objectRefs includes scopes not in the mapping (e.g. `addr`) then those scopes are not included in the counter's tags.
 If an action's objectRefs omits scopes in the mapping (say an action lacks a `topicName`) they will be ignored.
-The user will need to take care to avoid including scopes where the identifiers have high cardinality.
+The user will need to take care to avoid including scopes where the identifiers have high cardinality, 
+however the default ensures this high cardinality metrics are avoided unless the user explicitly opts in.
 
 Using the above mapping, and the example `ClientAuthenticate` and `Write` actions described earlier, we could have meters like this:
 
-* `kroxylicious_audit_ClientAuthenticate_success[virtual_cluster=my-cluster]`
-* `kroxylicious_audit_ClientAuthenticate_failure[virtual_cluster=my-cluster]`
-* `kroxylicious_audit_Write_success[virtual_cluster=my-cluster, topic_name=my-topic]`
-* `kroxylicious_audit_Write_failure[virtual_cluster=my-cluster, topic_name=my-topic]`
+* `kroxylicious_audit[action=ClientAuthenticate, outcome=success, virtual_cluster=my-cluster]`
+* `kroxylicious_audit[action=ClientAuthenticate, outcome=failure, virtual_cluster=my-cluster]`
+* `kroxylicious_audit[action=Write, outcome=success, virtual_cluster=my-cluster, topic_name=my-topic]`
+* `kroxylicious_audit[action=Write, outcome=success, virtual_cluster=my-cluster, topic_name=my-topic]`
 
 ## Affected/not affected projects
 
