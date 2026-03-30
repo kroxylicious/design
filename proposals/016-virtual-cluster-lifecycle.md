@@ -196,4 +196,9 @@ Some configuration changes will likely always require draining — for example, 
 
 ### Proxy-level lifecycle
 
-This proposal covers the lifecycle of individual virtual clusters. The proxy process itself has lifecycle concerns that sit above the per-cluster model: management port binding, process startup/shutdown sequencing, and aggregate health reporting. A proxy-level lifecycle model would define states and transitions for the process as a whole, with per-cluster states feeding into it. Port binding, which is managed by the proxy infrastructure and injected into virtual clusters, would naturally belong to this layer.
+This proposal covers the lifecycle of individual virtual clusters. The proxy process itself has lifecycle concerns that sit above the per-cluster model, including port binding, process startup/shutdown sequencing, and aggregate health reporting. There are genuine open questions here without obvious answers:
+
+- Port binding failure is the closest thing to a proxy-level lifecycle event, but it is rare on Kubernetes (ports are pod-scoped) and the failure mode differs on bare metal. Whether a rare-but-catastrophic failure merits a formal lifecycle state is unclear.
+- Health aggregation requires deciding how per-cluster states roll up into a process-level readiness signal. "At least one cluster serving" is an obvious threshold, but per-cluster independence has value even when all clusters are failed — they can still be reloaded independently rather than requiring a full process restart. The right aggregation may depend on the deployment model (Kubernetes, bare metal, Ansible) in ways we cannot predict yet.
+
+This proposal provides a foundation by making per-cluster state observable. The aggregation layer can be designed once deployment patterns are better understood. Whether this needs its own proposal or falls out naturally from implementing per-cluster observability remains to be seen.
