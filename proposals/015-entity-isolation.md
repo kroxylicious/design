@@ -62,14 +62,28 @@ then the prefixing removed:
 alice_orders -> orders
 ```
 
+## Security
 
-## Restrictions scope for the first version
+The role of the filter is to prevent the entities of one client being visible to another.  In other words, prevent an information leak between clients.
+
+There's the possibility that a new version of the Kafka protocol could expose an entity in a new way.
+There could be a new API key or API version of an existing API key that exposes an entity that ought to be isolated.
+
+If an old version of this filter (one that doesn't know about the new API key/versions) is used with Kafka a client/broker that supports it, an information leak is a possibility.
+
+In order to prevent this, the filter will employ a `fail-closed` methodology.
+
+This means it will:
+- influence the `ApiVersions` negotiations so that client/broker selects only API key and API versions that are known to the filter.
+- if the filter encounters a API key or API version that is unknown to it, it will close the connection with an error.
+
+## Restrictions in scope for the first version
 
 In order to narrow the scope of the problem, the first version of the Entity Isolation Filter will be restricted
 to the groupId and transactionId entity types.
 
-Topic isolation has some additional challenges which we want to defer to a future release.
-https://github.com/kroxylicious/kroxylicious/issues/3504
+Topic isolation has some additional challenges which we want to defer to a future release.  These are described in the
+following issue https://github.com/kroxylicious/kroxylicious/issues/3504.
 
 ### APIs
 
