@@ -89,7 +89,7 @@ proxy:
   # partialInitialisationPolicy: serve-others  # serve clusters that initialised successfully
 ```
 
-In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes, liveness probes, or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
 
 ### Graceful Shutdown
 
@@ -98,7 +98,7 @@ When the proxy receives a shutdown signal:
 1. All `serving` clusters transition to `draining`.
 2. All `failed` clusters transition directly to `stopped`.
 3. New connections are rejected for draining clusters. New requests on existing connections are also rejected.
-4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout. The proxy takes the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
+4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout. The proxy takes, as best it can, the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
 5. Once drained (or timed out), connections are closed and clusters move to `stopped`.
 6. The proxy process exits.
 
