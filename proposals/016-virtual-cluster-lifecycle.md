@@ -85,11 +85,14 @@ The policy is configurable and applies whenever clusters initialise, whether on 
 
 ```yaml
 proxy:
-  partialInitialisationPolicy: serve-none  # default — any cluster failure prevents serving traffic
-  # partialInitialisationPolicy: serve-others  # serve clusters that initialised successfully
+  onVirtualClusterFailure:
+    serve: none        # default — any cluster failure prevents serving traffic
+    # serve: remaining # serve clusters that initialised successfully
 ```
 
-In `serve-others` mode, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes, liveness probes, or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+When `serve` is set to `remaining`, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes, liveness probes, or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+
+The `onVirtualClusterFailure` block is structured to accommodate future extensions as additional keys alongside `serve`. For example, automatic retry of failed clusters (with backoff and retry limits) or external escalation (notifying monitoring systems or chat channels) could be added without restructuring the configuration. This proposal defines only `serve`; additional behaviours can be proposed independently.
 
 ### Graceful Shutdown
 
@@ -139,9 +142,9 @@ Implementations may expose additional metrics. Metric names and endpoint paths a
 
 ## Compatibility
 
-The default `partialInitialisationPolicy` is `serve-none`, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
+The default `onVirtualClusterFailure.serve` is `none`, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
 
-The `serve-others` policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect proxies that are only partially serving traffic.
+The `remaining` policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect proxies that are only partially serving traffic.
 
 ## Rejected Alternatives
 
