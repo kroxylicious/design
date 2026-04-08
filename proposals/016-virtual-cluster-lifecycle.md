@@ -75,24 +75,26 @@ Because the cluster is an entity, these transitions happen on the same entity �
 **Recovery transitions:**
 - `failed` → `initializing`: a retry is requested (e.g. operator action, reload with corrected config). Since `failed` clusters have already released all resources, this is a clean start from scratch.
 
-### Proxy Startup Behaviour
+### Virtual Cluster Failure Policy
 
-On startup, the proxy attempts to initialise each virtual cluster in the configuration. Clusters that succeed move to `serving`. Clusters that fail move to `failed` with a captured reason.
+When a virtual cluster reaches the terminal `stopped` state, the proxy must decide what to do about the clusters that are still serving. Startup is the simplest case — a cluster fails to initialise, has no recovery path, and immediately reaches `stopped`. A future reload mechanism could introduce recovery (rollback, retry) before a cluster reaches `stopped`, but the terminal policy is the same in both cases.
 
-By default, the proxy serves no traffic if any cluster fails to initialise. This is the correct behaviour for most deployments — configuration errors should be surfaced immediately, especially in development and bare-metal environments.
+By default, the proxy serves no traffic if any cluster reaches `stopped`. This is the correct behaviour for most deployments — configuration errors should be surfaced immediately, especially in development and bare-metal environments.
 
-The policy is configurable and applies whenever clusters initialise, whether on first startup or during reload:
+The policy is configurable:
 
 ```yaml
 proxy:
-  onVirtualClusterFailure:
-    serve: none        # default — any cluster failure prevents serving traffic
-    # serve: remaining # serve clusters that initialised successfully
+  onVirtualClusterStopped:
+    serve: none        # default — any cluster reaching stopped prevents serving traffic
+    # serve: successful # serve clusters that initialised successfully
 ```
 
-When `serve` is set to `remaining`, the proxy serves traffic for clusters that initialised successfully, while reporting failed clusters via health endpoints and logs. Kubernetes readiness probes, liveness probes, or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be failed"). The Kubernetes operator would typically set this policy.
+Today, without reload, a startup failure transitions immediately from `failed` to `stopped` (no recovery mechanism exists), so the `serve` policy applies straight away. With a future reload mechanism, a failed cluster could stay in `failed` while recovery runs (rollback, retry). If recovery succeeds, the cluster returns to `initializing` and never reaches `stopped` — the `serve` policy never fires. If recovery is exhausted, the cluster transitions to `stopped` and the `serve` policy applies.
 
-The `onVirtualClusterFailure` block is structured to accommodate future extensions as additional keys alongside `serve`. For example, automatic retry of failed clusters (with backoff and retry limits) or external escalation (notifying monitoring systems or chat channels) could be added without restructuring the configuration. This proposal defines only `serve`; additional behaviours can be proposed independently.
+When `serve` is set to `successful`, the proxy serves traffic for clusters that initialised successfully, while reporting stopped clusters via health endpoints and logs. Kubernetes readiness probes, liveness probes, or monitoring systems can apply their own thresholds (e.g. "all clusters must be serving" vs "at least one cluster must not be stopped"). The Kubernetes operator would typically set this policy.
+
+By hanging `serve` on the terminal state rather than on `failed`, recovery policies (defined by a future reload proposal under `onVirtualClusterFailed`) compose cleanly with `serve` without tension — recovery determines when to give up, `serve` determines the blast radius once it has.
 
 ### Graceful Shutdown
 
@@ -142,9 +144,9 @@ Implementations may expose additional metrics. Metric names and endpoint paths a
 
 ## Compatibility
 
-The default `onVirtualClusterFailure.serve` is `none`, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
+The default `onVirtualClusterStopped.serve` is `none`, which matches current behaviour — the proxy process exits if any cluster fails to initialise. Existing deployments are unaffected.
 
-The `remaining` policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect proxies that are only partially serving traffic.
+The `successful` policy is opt-in. Deployments that enable it should ensure they have appropriate health/readiness checks in place to detect proxies that are only partially serving traffic.
 
 ## Rejected Alternatives
 
