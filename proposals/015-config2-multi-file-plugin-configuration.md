@@ -1,0 +1,296 @@
+# Config2: Multi-file plugin configuration
+
+We propose replacing the current monolithic proxy configuration with a multi-file, Kubernetes-inspired
+configuration system. Plugin instances are defined in individual YAML files with explicit versioning,
+cross-file dependency references, and optional JSON Schema validation.
+
+## Current situation
+
+Today, all configuration lives in a single YAML file. Filter definitions embed their nested plugin
+configurations inline using `@PluginImplName` / `@PluginImplConfig` annotation pairs on the config
+record's constructor parameters:
+
+```yaml
+filterDefinitions:
+  - name: encrypt
+    type: RecordEncryption
+    config:
+      kms: VaultKmsService
+      kmsConfig:
+        vaultTransitEngineUrl: http://vault:8200/v1/transit
+        vaultToken:
+          password: my-token
+      selector: TemplateKekSelector
+      selectorConfig:
+        template: "KEK_${topicName}"
+```
+
+The proxy resolves these at runtime by discovering `@PluginImplName`-annotated fields, looking up
+the named plugin implementation via `ServiceLoader`, and deserialising the corresponding
+`@PluginImplConfig` field into the plugin's config type. This has several consequences:
+
+- **No reuse**: two filters that need the same KMS must each embed a copy of the KMS configuration.
+- **No independent versioning**: a filter's config schema is monolithic. Changing the KMS config
+  format requires the filter to understand and migrate its nested portion.
+- **No schema validation**: there is no declarative way to validate plugin configurations before
+  the proxy starts.
+- **No dependency ordering**: the proxy discovers plugin dependencies implicitly at initialisation
+  time, with no upfront visibility into the dependency graph.
+- **Opaque to tooling**: since plugin configurations are embedded inside filter configs, external
+  tools (Kubernetes operators, CI validators, config linters) cannot inspect or validate them
+  independently.
+
+## Motivation
+
+The Kubernetes operator needs to map custom resources to proxy configuration. A multi-file layout
+where each plugin instance is a separate document is a natural fit: each custom resource maps to
+one file. This also enables:
+
+- **Shared plugin instances**: a single KMS plugin instance can be referenced by multiple filters,
+  reducing configuration duplication and ensuring consistent credentials.
+- **Declarative dependency validation**: the system can detect missing or circular dependencies
+  before any plugin is initialised.
+- **Schema validation**: each plugin version can ship a JSON Schema, enabling early validation by
+  the proxy, the operator, CI pipelines, and IDE tooling.
+- **Independent evolution**: plugin authors can evolve their config schemas independently, using
+  Kubernetes-style version progression (v1alpha1 -> v1beta1 -> v1).
+- **Migration tooling**: a deterministic mapping from legacy to multi-file format enables automated
+  migration.
+
+## Proposal
+
+### Configuration layout
+
+The new configuration comprises a `proxy.yaml` and a `plugins.d/` directory:
+
+```
+config-dir/
+  proxy.yaml
+  plugins.d/
+    io.kroxylicious.proxy.filter.FilterFactory/
+      encrypt.yaml
+    io.kroxylicious.kms.service.KmsService/
+      vault-kms.yaml
+    io.kroxylicious.filter.encryption.config.KekSelectorService/
+      my-selector.yaml
+```
+
+`proxy.yaml` contains the global proxy settings (virtual clusters, gateways, management endpoints,
+default filter chain, micrometer instance names) plus a `version` field:
+
+```yaml
+version: v1alpha1
+management:
+  endpoints:
+    prometheus: {}
+virtualClusters:
+  - name: demo
+    targetCluster:
+      bootstrapServers: kafka.example:9092
+    gateways:
+      - name: default
+        portIdentifiesNode:
+          bootstrapAddress: localhost:9192
+defaultFilters:
+  - encrypt
+micrometer:
+  - common-tags
+```
+
+Each plugin instance file specifies `type`, `version`, and optionally `config`:
+
+```yaml
+type: RecordEncryption
+version: v1
+config:
+  kms:
+    type: io.kroxylicious.kms.service.KmsService
+    name: vault-kms
+  selector:
+    type: io.kroxylicious.filter.encryption.config.KekSelectorService
+    name: my-selector
+```
+
+### Snapshot abstraction
+
+A `Snapshot` interface abstracts the configuration source. It provides access to `proxy.yaml`
+content and the set of plugin instances grouped by interface. This allows the same resolution
+logic to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap,
+or an in-memory representation in tests.
+
+### Plugin references and dependency graph
+
+Versioned config types implement `HasPluginReferences`, declaring their dependencies as
+`PluginReference<T>` values:
+
+```java
+public record RecordEncryptionConfigV1(
+        PluginReference<KmsService> kms,
+        PluginReference<KekSelectorService> selector,
+        Map<String, Object> experimental,
+        UnresolvedKeyPolicy unresolvedKeyPolicy)
+    implements HasPluginReferences {
+
+    @Override
+    public Stream<PluginReference<?>> pluginReferences() {
+        return Stream.of(kms, selector);
+    }
+}
+```
+
+`PluginReference<T>` is a record of `(String type, String name)` where `type` is the fully
+qualified plugin interface name and `name` is the instance name. This replaces the implicit
+`@PluginImplName` / `@PluginImplConfig` pairing with an explicit, typed reference.
+
+The dependency graph is built from these references using DFS-based topological sort. It detects:
+
+- **Dangling references**: a plugin references an instance that does not exist.
+- **Cycles**: A depends on B depends on A.
+
+The topological order determines initialisation sequence: dependencies are initialised before
+their dependents.
+
+### Resolved plugin registry
+
+A `ResolvedPluginRegistry` is built during config2 resolution. It pre-creates non-filter plugin
+instances (KMS services, authorisers, etc.) in dependency order. Filter instances are created
+later by the proxy runtime because they need per-connection context.
+
+Versioned filter configs obtain their dependencies from the registry:
+
+```java
+ResolvedPluginRegistry registry = context.resolvedPluginRegistry()
+        .orElseThrow(() -> new PluginConfigurationException(
+                "v1 config requires a ResolvedPluginRegistry"));
+KmsService kmsPlugin = registry.pluginInstance(KmsService.class, kmsRef.name());
+Object kmsConfig = registry.pluginConfig(kmsRef.type(), kmsRef.name());
+```
+
+### Dual `@Plugin` annotations and version dispatch
+
+Filter implementations carry two `@Plugin` annotations: one for the legacy (unversioned) config
+and one for the versioned config:
+
+```java
+@Plugin(configType = RecordEncryptionConfig.class)
+@Plugin(configVersion = "v1", configType = RecordEncryptionConfigV1.class)
+public class RecordEncryption<K, E>
+    implements FilterFactory<Object, SharedEncryptionContext<K, E>> {
+```
+
+The `FilterFactory` type parameter becomes `Object`, and `initialize()` dispatches via
+`instanceof`:
+
+```java
+public SharedEncryptionContext<K, E> initialize(
+        FilterFactoryContext context, Object config) {
+    var configuration = Plugins.requireConfig(this, config);
+    if (configuration instanceof RecordEncryptionConfigV1 v1) {
+        return initializeV1(context, v1);
+    }
+    else if (configuration instanceof RecordEncryptionConfig legacy) {
+        return initializeLegacy(context, legacy);
+    }
+    throw new PluginConfigurationException("Unsupported config type");
+}
+```
+
+This maintains full backwards compatibility: existing single-file configurations continue to work
+via the legacy path.
+
+### JSON Schema validation
+
+Plugin authors can ship a JSON Schema for each config version at:
+
+```
+META-INF/kroxylicious/schemas/{PluginSimpleName}/{version}.schema.yaml
+```
+
+When a schema is present, config2 validates the raw configuration against it before
+deserialisation. This is opt-in: if no schema exists, the config is accepted without validation.
+A test utility `SchemaValidationAssert` is provided so plugin authors can verify their schemas
+accept valid configs.
+
+### `@Stateless` annotation
+
+Plugins annotated `@Stateless` can be shared across multiple consumers. The plugin instance YAML
+can set `shared: true` to enable this. The framework rejects `shared: true` on plugins not
+annotated `@Stateless`.
+
+### Migration tool
+
+A `migrate-config` CLI subcommand converts legacy single-file configurations into the multi-file
+format:
+
+```
+kroxylicious migrate-config -i legacy-config.yaml -o output-dir/
+```
+
+The tool:
+
+1. Parses the legacy configuration via `ConfigParser`.
+2. Reflects on each filter's legacy config type to discover `@PluginImplName` / `@PluginImplConfig`
+   pairs on the canonical constructor parameters.
+3. Extracts each nested plugin into its own file under `plugins.d/{interface}/{name}.yaml`.
+4. Rewrites the filter config to use `PluginReference`-style maps, selecting the best available
+   config version.
+5. Writes `proxy.yaml` by passing through the raw YAML (stripping `filterDefinitions`, replacing
+   `micrometer` with instance name references).
+
+## Affected/not affected projects
+
+| Project | Affected | Nature of change |
+|---|---|---|
+| `kroxylicious-api` | Yes | New types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`. `@Plugin` made `@Repeatable` with `configVersion` attribute. |
+| `kroxylicious-runtime` | Yes | New `config2` package: `Snapshot`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. |
+| `kroxylicious-filter-test-support` | Yes | New `SchemaValidationAssert` utility. |
+| `kroxylicious-app` | Yes | New `ConfigMigrate` picocli subcommand. Dependency scope changes for Jackson. |
+| All filter modules | Yes | Dual `@Plugin` annotations, versioned config records, JSON schemas, updated tests. |
+| `kroxylicious-operator` | Not yet | Future work: operator generates `Snapshot` from CRDs. |
+| `kroxylicious-docs` | Not yet | Future work: document new configuration format. |
+
+## Compatibility
+
+### Backwards compatibility
+
+The legacy single-file configuration format continues to work unchanged. The dual `@Plugin`
+annotation approach means the existing `ConfigParser` deserialises legacy configs exactly as
+before. The config2 path is only activated when a multi-file configuration source is used.
+
+### Forward compatibility
+
+Config version strings follow Kubernetes conventions (v1alpha1, v1beta1, v1). The version
+field in plugin YAML files enables the framework to select the correct deserialisation target
+as schemas evolve. The `@Repeatable` `@Plugin` annotation allows plugins to support an arbitrary
+number of config versions simultaneously.
+
+### Migration path
+
+Users migrate at their own pace. The `migrate-config` tool provides a one-shot conversion.
+The legacy format is not deprecated by this proposal.
+
+## Rejected alternatives
+
+### Embedding version in the config parser rather than plugin annotations
+
+We considered adding version dispatch logic to the `ConfigParser` itself. This was rejected
+because plugin authors know their own config evolution best. The `@Plugin` annotation approach
+keeps version knowledge co-located with the plugin implementation.
+
+### Single versioned config type per plugin
+
+We considered requiring each plugin to have exactly one config type for the new format, removing
+the legacy type entirely. This was rejected because it would break existing configurations and
+force a flag-day migration.
+
+### Generating plugin files from annotations at build time
+
+We considered generating the `plugins.d/` layout from annotations during the Maven build. This
+was rejected because the multi-file layout is a deployment-time concern, not a build-time one.
+The configuration source is an operational choice (filesystem, ConfigMap, etc.).
+
+### Configuration without explicit dependency declarations
+
+We considered inferring dependencies from the config structure (e.g. scanning for nested objects
+that look like plugin references). This was rejected in favour of explicit `HasPluginReferences`
+because implicit inference is fragile, hard to validate, and invisible to tooling.
