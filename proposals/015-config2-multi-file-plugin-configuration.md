@@ -158,10 +158,10 @@ content and the set of plugin instances grouped by interface. This allows the sa
 logic to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap,
 or an in-memory representation in tests.
 
-### Plugin references and dependency graph
+### Plugin references
 
-Versioned config types implement `HasPluginReferences`, declaring their dependencies as
-`PluginReference<T>` values:
+When a plugin's configuration needs to refer to another plugin instance (e.g. a filter that
+uses a KMS service), the versioned config type uses `PluginReference<T>`:
 
 ```java
 public record RecordEncryptionConfigV1(
@@ -179,16 +179,48 @@ public record RecordEncryptionConfigV1(
 ```
 
 `PluginReference<T>` is a record of `(String type, String name)` where `type` is the fully
-qualified plugin interface name and `name` is the instance name. This replaces the implicit
-`@PluginImplName` / `@PluginImplConfig` pairing with an explicit, typed reference.
+qualified plugin interface name and `name` is the instance name. In the YAML, this serialises
+as a `{type, name}` map — a uniform, explicit pattern for all cross-file references.
 
-The dependency graph is built from these references using DFS-based topological sort. It detects:
+By introducing `PluginReference` we impose a consistent reference syntax on all plugin
+developers. This is a deliberate trade-off: it constrains the shape of versioned config types,
+but in return every dependency is visible to the framework without requiring type-specific
+introspection. The alternative — scanning config objects for fields that look like references,
+or using reflection to discover dependencies at runtime — would be fragile, plugin-specific,
+and invisible to tooling.
+
+This is not a breaking change. Plugin developers adopt `PluginReference` fields only when they
+introduce a new versioned config type (e.g. `RecordEncryptionConfigV1`). The legacy config type
+(`RecordEncryptionConfig`) continues to use `@PluginImplName` / `@PluginImplConfig` as before.
+Because the config versioning mechanism (`@Plugin(configVersion = "v1", configType = ...)`)
+allows both old and new config types to coexist, the `PluginReference` pattern is adopted
+incrementally, version by version.
+
+### Dependency graph and referential integrity
+
+The runtime builds a dependency graph from `HasPluginReferences` declarations. Versioned config
+types implement this interface to enumerate their `PluginReference` values. The runtime then
+validates the graph using DFS-based topological sort, detecting:
 
 - **Dangling references**: a plugin references an instance that does not exist.
 - **Cycles**: A depends on B depends on A.
 
 The topological order determines initialisation sequence: dependencies are initialised before
 their dependents.
+
+This is a deliberate deviation from Kubernetes. The Kubernetes API server does not enforce
+referential integrity between resources — a Pod can reference a ConfigMap that does not yet
+exist, and eventual consistency resolves the situation over time. We make a different choice
+because our needs are different: the proxy cannot start with a dangling KMS reference or a
+cyclic dependency. Fail-fast validation at configuration load time is preferable to discovering
+broken references at runtime when the first message arrives. The cost is that the runtime must
+understand the dependency structure, which is why `HasPluginReferences` exists as an explicit
+contract rather than relying on introspection or convention.
+
+The runtime does not (and should not) know about all plugin types. Plugins can depend on other
+plugins that the runtime has never heard of (e.g. `RecordEncryption` depends on `KmsService`
+and `KekSelectorService`). The `HasPluginReferences` interface lets each config type declare
+its own dependencies without requiring the runtime to enumerate every possible plugin interface.
 
 ### Resolved plugin registry
 
@@ -281,13 +313,18 @@ The tool:
 
 | Project | Affected | Nature of change |
 |---|---|---|
-| `kroxylicious-api` | Yes | New types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`. `@Plugin` made `@Repeatable` with `configVersion` attribute. |
-| `kroxylicious-runtime` | Yes | New `config2` package: `Snapshot`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. |
+| `kroxylicious-api` | Yes | New **public API** types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`. `@Plugin` made `@Repeatable` with `configVersion` attribute. These are the types that plugin developers depend on and that we commit to supporting long-term. |
+| `kroxylicious-runtime` | Yes | New **internal** `config2` package: `Snapshot`, `FilesystemSnapshot`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. These are implementation details not visible to plugin developers. |
 | `kroxylicious-filter-test-support` | Yes | New `SchemaValidationAssert` utility. |
 | `kroxylicious-app` | Yes | New `ConfigMigrate` picocli subcommand. Dependency scope changes for Jackson. |
 | All filter modules | Yes | Dual `@Plugin` annotations, versioned config records, JSON schemas, updated tests. |
 | `kroxylicious-operator` | Not yet | Future work: operator generates `Snapshot` from CRDs. |
 | `kroxylicious-docs` | Not yet | Future work: document new configuration format. |
+
+The distinction matters: types in `kroxylicious-api` form the contract with plugin developers.
+Changes to `PluginReference`, `HasPluginReferences`, or `ResolvedPluginRegistry` require the
+same care as any other public API change. Types in `kroxylicious-runtime` are internal and can
+be refactored freely.
 
 ## Compatibility
 
