@@ -16,12 +16,11 @@ This allows the operator to discover connection details (bootstrap addresses, TL
 Strimzi is evolving its Kubernetes API to `v1`. The timeline is as follows:
 
 - **Strimzi 0.49.0** (September 2025) – introduced the `v1` API alongside `v1beta2`
-- **Strimzi 0.52.0** – will remove support for `v1beta2` entirely
+- **Strimzi 1.0.0** (the release that is scheduled to follow 0.51.0) – will remove support for `v1beta2` entirely
 
-Currently, the Kroxylicious Operator will break when Strimzi 0.52.0 is released, as it will no longer be able to read `Kafka` resources at the `v1beta2` API version.
+Currently, the Kroxylicious Operator will break when Strimzi 1.0.0 is released, as it will no longer be able to read `Kafka` resources at the `v1beta2` API version.
 
-The Kroxylicious Operator must be updated to support Strimzi 0.52.0 and beyond. If this is not done, the Kroxylicious
-integration will cease to work.  TODO: will the operator actually break completely? 
+The Kroxylicious Operator must be updated to support Strimzi 1.0.0 and beyond. If this is not done, the Kroxylicious integration with Strimzi will cease to work.
 
 ## Proposal
 
@@ -52,8 +51,15 @@ The [Strimzi v1 API proposal](https://github.com/strimzi/proposals/blob/main/113
 
 **This proposal introduces a breaking change:** the updated operator will not support Strimzi versions prior to 0.49.0.
 
-Specifically:
-- **Strimzi 0.48.0 and earlier** (released September 2025 and before) will no longer be compatible
+#### Compatibility matrix
+
+| Kroxylicious Operator | Strimzi 0.48.0 and earlier | Strimzi 0.49.0+ | Strimzi 1.0.0+ |
+|-----------------------|----------------------------|-----------------|----------------|
+| **v0.20.0 and earlier** | ✅ Compatible | ✅ Compatible | ❌ Not compatible |
+| **v0.21.0 and later** | ❌ Not compatible | ✅ Compatible | ✅ Compatible |
+
+**Summary:**
+- **Strimzi 0.48.0 and earlier** (released September 2025 and before) will no longer be compatible with Kroxylicious Operator v0.21.0+
 - Users running these versions must upgrade Strimzi to 0.49.0 or later before upgrading the Kroxylicious Operator
 
 ### Justification for breaking compatibility
@@ -67,10 +73,11 @@ Specifically:
 ### Migration path for users
 
 Users running Strimzi 0.48.0 or earlier must:
-1. Upgrade Strimzi to 0.49.0 or later
-2. Upgrade the Kroxylicious Operator to the version containing this change
+1. Upgrade Strimzi to a version between 0.49.0 and 0.51.0 (which support both `v1beta2` and `v1`)
+2. Migrate their Kafka custom resources from `v1beta2` to `v1` using the [Strimzi API conversion tool](https://strimzi.io/docs/operators/0.49.0/deploying#assembly-api-conversion-str)
+3. Upgrade the Kroxylicious Operator to the version containing this change
 
-The upgrade must be performed in this order. No other changes are required.
+The upgrade must be performed in this order. While Strimzi 0.49.0+ serves both `v1beta2` and `v1` API versions, migrating the Kafka CRs to `v1` ensures full compatibility and avoids potential issues with the Kroxylicious Operator reading resources stored in the older format.
 
 ### Deprecation policy consideration
 
@@ -110,14 +117,14 @@ An alternative approach would be to update the operator to support **both** `v1`
 
 **3. Temporary solution**
 
-- Eventually, the `v1beta2` code path must be removed anyway (once Strimzi 0.52.0 is widely adopted)
+- Eventually, the `v1beta2` code path must be removed anyway (once Strimzi 1.0.0 is widely adopted)
 - Supporting both versions defers the migration but does not avoid it
 - Creates technical debt that must be paid later
 
 **4. Minimal user benefit**
 
 - Users on Strimzi < 0.49.0 (released September 2025) are already at least 6 months behind
-- The forcing function to upgrade Strimzi will come from Strimzi 0.52.0 anyway, when `v1beta2` is removed entirely
+- The forcing function to upgrade Strimzi will come from Strimzi 1.0.0 anyway, when `v1beta2` is removed entirely
 
 **5. Increased maintenance burden**
 
