@@ -42,20 +42,54 @@ the named plugin implementation via `ServiceLoader`, and deserialising the corre
 
 ## Motivation
 
-The Kubernetes operator needs to map custom resources to proxy configuration. A multi-file layout
-where each plugin instance is a separate document is a natural fit: each custom resource maps to
-one file. This also enables:
+There are five specific drawbacks of the current configuration system that motivate this change.
 
-- **Shared plugin instances**: a single KMS plugin instance can be referenced by multiple filters,
-  reducing configuration duplication and ensuring consistent credentials.
-- **Declarative dependency validation**: the system can detect missing or circular dependencies
-  before any plugin is initialised.
-- **Schema validation**: each plugin version can ship a JSON Schema, enabling early validation by
-  the proxy, the operator, CI pipelines, and IDE tooling.
-- **Independent evolution**: plugin authors can evolve their config schemas independently, using
-  Kubernetes-style version progression (v1alpha1 -> v1beta1 -> v1).
-- **Migration tooling**: a deterministic mapping from legacy to multi-file format enables automated
-  migration.
+### 1. Per-plugin JSON schemas are impossible today
+
+It is impossible to write a single JSON schema for the configuration file, because what is allowed
+depends on which plugins are present at runtime. But having schemas is desirable for documentation,
+editor assistance, and automated validation. By giving each plugin instance its own file, each
+plugin version can ship its own JSON schema. These per-plugin schemas can be published to schema
+catalogues (e.g. schemastore.org) and consumed by IDEs and CI tools independently of the proxy.
+
+### 2. Lack of uniformity in how plugins are configured
+
+Each plugin point embeds its plugins differently. Filter factories are explicitly named (via
+`NamedFilterDefinition`), but other plugins like `KmsService` are anonymous because they are
+referenced once by their parent. This inconsistency extends across the codebase: filters,
+authorisers, KMS services, subject builders, and key selectors all follow slightly different
+patterns. A uniform model where every plugin instance is a named, versioned resource eliminates
+this inconsistency.
+
+### 3. The runtime cannot understand inter-plugin dependencies
+
+The lack of uniformity means the runtime has no meaningful understanding of the dependency
+relationships between plugins. This matters for dynamic reloading: when a plugin configuration
+changes, the runtime needs to know which virtual clusters are affected. Today, dependencies are
+discovered implicitly at initialisation time, with no upfront visibility into the graph. Explicit
+dependency declarations enable the runtime to reason about the impact of configuration changes.
+
+Note that the runtime does not (and should not) know about all plugin types. Plugins are allowed
+to have plugins of their own (e.g. `RecordEncryption` depends on `KmsService` and
+`KekSelectorService`, which are not known to the runtime). This rules out approaches that add
+top-level definitions for each plugin type (e.g. `kmsDefinitions`), because the runtime cannot
+enumerate plugin types it does not know about.
+
+### 4. Plugin instances are not individually identifiable
+
+Eventually we may need to build a control plane for clusters of proxies. Plugin instances would be
+important entities in the API of that control plane. For this to work, each plugin instance must
+have a unique identity. The current system gives names to filter definitions but not to the plugins
+they embed. A model where every plugin instance has a name, a type, and a version makes each one
+individually addressable.
+
+### 5. No principled way to evolve plugin configuration
+
+None of the configurations (the proxy's or any of the plugins') are explicitly versioned. A plugin
+developer can deprecate properties, but cannot remove them in a controlled manner where the API
+evolution is obvious to the user. Explicit version strings (following Kubernetes conventions:
+v1alpha1, v1beta1, v1) give plugin developers a principled mechanism for config schema evolution,
+including support for multiple concurrent versions during migration periods.
 
 ## Proposal
 
