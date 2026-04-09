@@ -107,8 +107,6 @@ config:
 Synchronous API that lets the filter map from downstream names to upstream names and vice versa.
 It also has the responsibility to filter the upstream view, removing resources that don't belong in the view.
 
-Asynchronous interface that lets the filter map from downstream names to upstream names and vice-versa.  It also
-has the responsibility to filter the upstream view, removing resources that don't belong in the view.
 
 ```java
 interface EntityNameMapper {
