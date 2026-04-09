@@ -131,9 +131,10 @@ micrometer:
   - common-tags
 ```
 
-Each plugin instance file specifies `type`, `version`, and optionally `config`:
+Each plugin instance file specifies `name`, `type`, `version`, and optionally `config`:
 
 ```yaml
+name: encrypt
 type: RecordEncryption
 version: v1
 config:
@@ -144,6 +145,11 @@ config:
     type: io.kroxylicious.filter.encryption.config.KekSelectorService
     name: my-selector
 ```
+
+The `name` field must match the filename (without the `.yaml` extension). This is validated during
+loading. Including `name` in the file content ensures that plugin instance files are
+self-describing: a file can be understood without knowing its path, which matters for debugging,
+code review, and non-filesystem configuration sources like ConfigMaps.
 
 ### Snapshot abstraction
 
