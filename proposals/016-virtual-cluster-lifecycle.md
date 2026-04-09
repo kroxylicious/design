@@ -100,21 +100,31 @@ By hanging `serve` on the terminal state rather than on `failed`, recovery polic
 
 When the proxy receives a shutdown signal:
 
-1. All `serving` clusters transition to `draining`.
-2. All `failed` clusters transition directly to `stopped`.
-3. New connections are rejected for draining clusters. New requests on existing connections are also rejected.
-4. For each existing connection, the proxy waits for in-flight requests to complete, up to a configurable drain timeout. The proxy takes, as best it can, the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
-5. Once drained (or timed out), connections are closed and clusters move to `stopped`.
-6. The proxy process exits.
+1. The Netty graceful shutdown is initiated, establishing the hard time limit for the entire shutdown sequence.
+2. All `serving` clusters transition to `draining`. All clusters drain in parallel.
+3. All `failed` clusters transition directly to `stopped`.
+4. New connections are rejected for draining clusters. New requests on existing connections are also rejected.
+5. For each existing connection, the proxy waits for in-flight requests to complete, up to the cluster's drain timeout. The proxy takes, as best it can, the same view of in-flight as the Kafka client: a request is in-flight from the moment the client sends it until the client receives a response.
+6. Once drained (or timed out), connections are closed and clusters move to `stopped`.
+7. The proxy process exits.
 
-The drain timeout should be configurable. Kafka consumers with long poll timeouts (`max.poll.interval.ms` defaults to 5 minutes) or slow producers with `acks=all` can legitimately need more than the 30 seconds assumed in current code.
+Draining operates within the Netty shutdown window. If all clusters drain before the Netty timeout, Netty shutdown completes near-instantly — there is nothing left to clean up. If any drain exceeds the Netty timeout, Netty force-closes remaining connections as its hard backstop.
+
+The drain timeout is configurable per virtual cluster:
 
 ```yaml
-proxy:
+virtualClusters:
+- name: "my-cluster"
   drainTimeout: 60s  # default TBD
+  targetCluster:
+    bootstrapServers: "..."
 ```
 
-Graceful draining reduces unnecessary client errors during planned shutdowns, and aligns with how the broader Kafka ecosystem behaves — brokers drain before stopping and operators expect the same from any Kafka component. It is best-effort rather than a guarantee: the drain timeout is the hard backstop. Kafka clients are required to handle connection loss regardless, so forced closure after timeout remains protocol-compliant.
+Different clusters may have different workload profiles, and per-cluster configuration provides the right foundation for reload, where only the affected cluster drains and a proxy-wide timeout would be unnecessarily coarse.
+
+Draining has inherent limitations. Some Kafka operations — notably long-polling consumers where `fetch.max.wait.ms` can be minutes — will routinely exceed any reasonable drain timeout, especially in Kubernetes environments where the pod termination grace period is the hard ceiling. The proxy could synthesise valid early responses (e.g. empty fetch responses) to unblock long-polling consumers during drain, similar to how Kafka brokers handle controlled shutdown. This would require its own proposal, as the signal to a filter that it should generate an early response would be a new addition to the filter SPI.
+
+Graceful draining reduces unnecessary client errors during planned shutdowns, and aligns with how the broader Kafka ecosystem behaves — brokers drain before stopping and operators expect the same from any Kafka component. It is best-effort rather than a guarantee: draining operates within the Netty shutdown window, which is the single hard backstop for the entire shutdown sequence. Kafka clients are required to handle connection loss regardless, so forced closure after timeout remains protocol-compliant.
 
 The proxy cannot replicate the Kafka broker's clean shutdown mechanism — brokers coordinate partition leader migration before closing connections, meaning producers follow the new leader without disruption. The proxy has no equivalent mechanism to redirect clients before closing connections. However, idempotent producers retain their Producer ID and sequence numbers in client memory across reconnections — a connection drop does not start a new session. When the client reconnects after a drain, it retries unacknowledged requests with the same (PID, epoch, sequence) tuple, and the broker deduplicates them using its existing producer state. A proxy-initiated drain is therefore no different from any other connection loss event (network partition, broker crash) from the client's perspective, and Kafka clients are already required to handle these. A reload mechanism building on this lifecycle model further improves the situation by confining connection disruption to a single virtual cluster rather than requiring a full process restart.
 
