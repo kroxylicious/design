@@ -29,16 +29,16 @@ The proxy resolves these at runtime by discovering `@PluginImplName`-annotated f
 the named plugin implementation via `ServiceLoader`, and deserialising the corresponding
 `@PluginImplConfig` field into the plugin's config type. This has several consequences:
 
-- **No reuse**: two filters that need the same KMS must each embed a copy of the KMS configuration.
-- **No independent versioning**: a filter's config schema is monolithic. Changing the KMS config
-  format requires the filter to understand and migrate its nested portion.
-- **No schema validation**: there is no declarative way to validate plugin configurations before
-  the proxy starts.
+- **No reuse**: two filters that need the same KMS must each embed a copy of the same KMS configuration.
+- **No independent versioning**: a proxy config file is monolithic and lacks explicit version numbers,
+  so every plugin needs to honour backwards compatibility of its configuration essentially for ever.
 - **No dependency ordering**: the proxy discovers plugin dependencies implicitly at initialisation
   time, with no upfront visibility into the dependency graph.
+- **No schema validation**: there is no declarative way to validate plugin configurations 
+  except by trying to start the proxy.
 - **Opaque to tooling**: since plugin configurations are embedded inside filter configs, external
   tools (Kubernetes operators, CI validators, config linters) cannot inspect or validate them
-  independently.
+  independently (see [#2436](https://github.com/kroxylicious/kroxylicious/issues/2436).
 
 ## Motivation
 
@@ -135,7 +135,7 @@ Each plugin instance file specifies `name`, `type`, `version`, and optionally `c
 
 ```yaml
 name: encrypt
-type: RecordEncryption
+type: io.kroxylicious.filter.encryption.RecordEncryption
 version: v1
 config:
   kms:
@@ -149,14 +149,21 @@ config:
 The `name` field must match the filename (without the `.yaml` extension). This is validated during
 loading. Including `name` in the file content ensures that plugin instance files are
 self-describing: a file can be understood without knowing its path, which matters for debugging,
-code review, and non-filesystem configuration sources like ConfigMaps.
+code review, and non-filesystem configuration sources.
+
+In old-style proxy configuration files we allowed unqualified type names, 
+which were resolved based on the loadable plugins.
+If we kept with that choice in the new format then plugin configurations would not be fully self-describing. 
+So to facilitate the unambiguous sharing of configurations the `type` is fully qualified in the new format.
 
 ### Snapshot abstraction
 
 A `Snapshot` interface abstracts the configuration source. It provides access to `proxy.yaml`
 content and the set of plugin instances grouped by interface. This allows the same resolution
-logic to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap,
-or an in-memory representation in tests.
+logic to work whether configuration comes from a filesystem directory, 
+an in-memory representation in tests or some other source.
+
+The `Snapshot` interface will not be public API, but internal to the runtime.
 
 ### Plugin references
 
