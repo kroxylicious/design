@@ -135,7 +135,7 @@ Each plugin instance file specifies `name`, `type`, `version`, and optionally `c
 
 ```yaml
 name: encrypt
-type: RecordEncryption
+type: io.kroxylicious.filter.encryption.RecordEncryption
 version: v1
 config:
   kms:
@@ -150,6 +150,17 @@ The `name` field must match the filename (without the `.yaml` extension). This i
 loading. Including `name` in the file content ensures that plugin instance files are
 self-describing: a file can be understood without knowing its path, which matters for debugging,
 code review, and non-filesystem configuration sources like ConfigMaps.
+
+The `type` field must be a fully qualified class name. The legacy single-file format allows
+short names (e.g. `RecordEncryption`), but the config2 format requires the FQCN
+(e.g. `io.kroxylicious.filter.encryption.RecordEncryption`). This makes each plugin file
+completely self-describing: its interpretation does not depend on which plugins happen to be
+loadable by a particular proxy binary. Short names are ambiguous when two plugins share a
+simple class name; FQCNs eliminate that problem entirely.
+
+The loss of brevity is mitigated by JSON Schema: each plugin version's schema can constrain
+`type` using `const` or `enum`, giving editors code completion and validation without requiring
+the user to type the full name.
 
 ### Snapshot abstraction
 
