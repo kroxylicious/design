@@ -138,12 +138,8 @@ name: encrypt
 type: io.kroxylicious.filter.encryption.RecordEncryption
 version: v1
 config:
-  kms:
-    type: io.kroxylicious.kms.service.KmsService
-    name: vault-kms
-  selector:
-    type: io.kroxylicious.filter.encryption.config.KekSelectorService
-    name: my-selector
+  kms: vault-kms
+  selector: my-selector
 ```
 
 The `name` field must match the filename (without the `.yaml` extension). This is validated during
@@ -172,39 +168,51 @@ or an in-memory representation in tests.
 ### Plugin references
 
 When a plugin's configuration needs to refer to another plugin instance (e.g. a filter that
-uses a KMS service), the versioned config type uses `PluginReference<T>`:
+uses a KMS service), the versioned config type declares its dependencies by implementing
+`HasPluginReferences`. The YAML representation of the reference is entirely up to the plugin
+author — typically a bare instance name string, since the plugin interface type is statically
+known:
 
 ```java
 public record RecordEncryptionConfigV1(
-        PluginReference<KmsService> kms,
-        PluginReference<KekSelectorService> selector,
+        String kms,
+        String selector,
         Map<String, Object> experimental,
         UnresolvedKeyPolicy unresolvedKeyPolicy)
     implements HasPluginReferences {
 
     @Override
     public Stream<PluginReference<?>> pluginReferences() {
-        return Stream.of(kms, selector);
+        return Stream.of(
+                new PluginReference<>(KmsService.class.getName(), kms),
+                new PluginReference<>(KekSelectorService.class.getName(), selector));
     }
 }
 ```
 
-`PluginReference<T>` is a record of `(String type, String name)` where `type` is the fully
-qualified plugin interface name and `name` is the instance name. In the YAML, this serialises
-as a `{type, name}` map — a uniform, explicit pattern for all cross-file references.
+`PluginReference<T>` is a runtime type — a record of `(String type, String name)` where `type`
+is the fully qualified plugin interface name and `name` is the instance name. It is not a
+serialisation type: it does not appear in the YAML. Plugin authors construct `PluginReference`
+values in their `pluginReferences()` implementation, combining the statically-known interface
+type with the instance name read from YAML.
 
-By introducing `PluginReference` we impose a consistent reference syntax on all plugin
-developers. This is a deliberate trade-off: it constrains the shape of versioned config types,
-but in return every dependency is visible to the framework without requiring type-specific
-introspection. The alternative — scanning config objects for fields that look like references,
-or using reflection to discover dependencies at runtime — would be fragile, plugin-specific,
-and invisible to tooling.
+This separation is deliberate. A plugin like `RecordEncryption` knows statically that its `kms`
+field always refers to a `KmsService`. Forcing the user to write
+`kms: {type: io.kroxylicious.kms.service.KmsService, name: vault-kms}` in the YAML would be
+redundant — the `type` can only ever be one thing. By keeping `PluginReference` out of the
+YAML, each plugin is free to choose the most natural representation for its references.
 
-This is not a breaking change. Plugin developers adopt `PluginReference` fields only when they
+The `HasPluginReferences` interface is the contract that makes this work. The runtime calls
+`pluginReferences()` to discover cross-file dependencies, build the dependency graph, and
+validate that all referenced plugin instances exist. The alternative — scanning config objects
+for fields that look like references, or using reflection to discover dependencies — would be
+fragile, plugin-specific, and invisible to tooling.
+
+This is not a breaking change. Plugin developers implement `HasPluginReferences` only when they
 introduce a new versioned config type (e.g. `RecordEncryptionConfigV1`). The legacy config type
 (`RecordEncryptionConfig`) continues to use `@PluginImplName` / `@PluginImplConfig` as before.
 Because the config versioning mechanism (`@Plugin(configVersion = "v1", configType = ...)`)
-allows both old and new config types to coexist, the `PluginReference` pattern is adopted
+allows both old and new config types to coexist, the `HasPluginReferences` pattern is adopted
 incrementally, version by version.
 
 ### Dependency graph and referential integrity
@@ -245,8 +253,8 @@ Versioned filter configs obtain their dependencies from the registry:
 ResolvedPluginRegistry registry = context.resolvedPluginRegistry()
         .orElseThrow(() -> new PluginConfigurationException(
                 "v1 config requires a ResolvedPluginRegistry"));
-KmsService kmsPlugin = registry.pluginInstance(KmsService.class, kmsRef.name());
-Object kmsConfig = registry.pluginConfig(kmsRef.type(), kmsRef.name());
+KmsService kmsPlugin = registry.pluginInstance(KmsService.class, v1.kms());
+Object kmsConfig = registry.pluginConfig(KmsService.class.getName(), v1.kms());
 ```
 
 ### Dual `@Plugin` annotations and version dispatch
