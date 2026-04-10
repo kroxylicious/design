@@ -160,10 +160,54 @@ the user to type the full name.
 
 ### Snapshot abstraction
 
-A `Snapshot` interface abstracts the configuration source. It provides access to `proxy.yaml`
-content and the set of plugin instances grouped by interface. This allows the same resolution
-logic to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap,
-or an in-memory representation in tests.
+A `Snapshot` interface abstracts the configuration source, allowing the same resolution logic
+to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap, or
+an in-memory representation in tests.
+
+```java
+public interface Snapshot {
+    /** Returns the proxy configuration YAML content. */
+    String proxyConfig();
+
+    /** Returns the plugin interface names for which plugin instances are configured. */
+    List<String> pluginInterfaces();
+
+    /** Returns the names of all plugin instances configured for a given plugin interface. */
+    List<String> pluginInstances(String pluginInterfaceName);
+
+    /** Metadata for a plugin instance (name, type, version, shared, generation). */
+    PluginInstanceMetadata pluginInstanceMetadata(
+            String pluginInterfaceName, String pluginInstanceName);
+
+    /** Raw data bytes for a plugin instance (UTF-8 YAML or binary resource). */
+    byte[] pluginInstanceData(
+            String pluginInterfaceName, String pluginInstanceName);
+
+    /** Password for a named resource, or null if no password is configured. */
+    @Nullable char[] resourcePassword(String resourceName);
+}
+```
+
+Each plugin instance has **metadata** and **data**:
+
+- **Metadata** (`PluginInstanceMetadata`): name, type (FQCN), version, shared flag, and a
+  generation number. The generation is a monotonically increasing value that changes when the
+  resource content changes, enabling efficient change detection without comparing data bytes
+  (which is problematic for keystores due to non-deterministic salting and security concerns
+  around comparing key material). For the Kubernetes operator, generation maps to
+  `metadata.generation` / `resourceVersion`. For filesystem deployments, it is derived from
+  file modification time.
+
+- **Data** (`pluginInstanceData()`): raw bytes. For most plugins, these bytes are UTF-8 YAML —
+  the proxy parses them with Jackson into the `configType` from the `@Plugin` annotation. For
+  binary resource plugins (those annotated with `@ResourceType` — see **Non-YAML resources**
+  below), the bytes are the raw resource content (e.g. a PKCS12 keystore). The runtime checks
+  `@ResourceType` on the plugin class to determine which deserialisation path to use.
+
+**Passwords** are provided out-of-band from the resource data via `resourcePassword()`. This
+decouples passwords from the data they protect, allowing different access controls (e.g.
+Kubernetes Secret vs ConfigMap, or a separate `passwords.yaml` with restricted permissions
+for filesystem deployments).
 
 ### Plugin references
 
@@ -332,8 +376,8 @@ The tool:
 
 | Project | Affected | Nature of change |
 |---|---|---|
-| `kroxylicious-api` | Yes | New **public API** types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`. `@Plugin` made `@Repeatable` with `configVersion` attribute. These are the types that plugin developers depend on and that we commit to supporting long-term. |
-| `kroxylicious-runtime` | Yes | New **internal** `config2` package: `Snapshot`, `FilesystemSnapshot`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. These are implementation details not visible to plugin developers. |
+| `kroxylicious-api` | Yes | New **public API** types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`, `@ResourceType`, `ResourceSerializer`, `ResourceDeserializer`, `KeyMaterialProvider`, `TrustMaterialProvider`. `@Plugin` made `@Repeatable` with `configVersion` attribute. These are the types that plugin developers depend on and that we commit to supporting long-term. |
+| `kroxylicious-runtime` | Yes | New **internal** `config2` package: `Snapshot`, `FilesystemSnapshot`, `PluginInstanceMetadata`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. These are implementation details not visible to plugin developers. |
 | `kroxylicious-filter-test-support` | Yes | New `SchemaValidationAssert` utility. |
 | `kroxylicious-app` | Yes | New `ConfigMigrate` picocli subcommand. Dependency scope changes for Jackson. |
 | All filter modules | Yes | Dual `@Plugin` annotations, versioned config records, JSON schemas, updated tests. |
@@ -364,6 +408,128 @@ number of config versions simultaneously.
 
 Users migrate at their own pace. The `migrate-config` tool provides a one-shot conversion.
 The legacy format is not deprecated by this proposal.
+
+## Non-YAML resources
+
+Not all plugin instance data is YAML. Some plugins manage binary resources — most notably TLS
+key material stored as Java KeyStores (JKS, PKCS12) or PEM files. For the `Snapshot` to fully
+encapsulate a proxy's configuration state, it must include these resources alongside YAML-based
+plugin configs.
+
+### `@ResourceType` annotation
+
+As described in the Snapshot abstraction, plugin instance data is raw bytes — UTF-8 YAML by
+default. For binary resource types (e.g. keystores), the plugin implementation declares its
+binary format via a `@ResourceType` annotation:
+
+```java
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.TYPE)
+public @interface ResourceType {
+    Class<? extends ResourceSerializer<?>> serializer();
+    Class<? extends ResourceDeserializer<?>> deserializer();
+}
+```
+
+The runtime discovers the serde from the annotation via reflection — the same pattern used
+for `@Plugin(configType = ...)`. The `ResourceSerializer` converts a typed resource to bytes
+(for snapshot generation), and `ResourceDeserializer` converts bytes back to a typed resource
+(for loading).
+
+### Store type auto-detection
+
+Keystore format need not be user-specified. Common formats have distinctive magic bytes
+(JKS: `0xFEEDFEED`, PKCS12: ASN.1 `0x30`, PEM: `-----BEGIN`). The deserialiser probes the
+bytes and selects the appropriate format. PKCS12 is the default keystore type since Java 9;
+JKS is legacy.
+
+### Passwords
+
+Passwords are provided **out-of-band** from the resource data, not co-located with it. The
+`Snapshot` interface includes a `resourcePassword(String resourceName)` method that returns the
+password for a named resource. This decouples passwords from the data they protect, allowing
+different access controls (e.g. Kubernetes Secret vs ConfigMap for filesystem deployments, a
+separate `passwords.yaml` with restricted permissions).
+
+### Alias selection
+
+When a keystore contains multiple entries, the consuming plugin's config specifies the alias
+via a sibling property — this is a concern of the consumer, not the resource:
+
+```java
+public record VaultKmsConfigV1(
+        String vaultUrl,
+        @Nullable String keyMaterial,
+        @Nullable String keyAlias,
+        @Nullable String trustMaterial
+) implements HasPluginReferences { ... }
+```
+
+### Change detection: generation numbers
+
+Each resource in the `Snapshot` carries a **generation number** — a monotonically increasing
+value that changes when the resource content changes. Comparing generation numbers rather than
+data bytes avoids:
+
+- Non-determinism from keystore salting (two logically equivalent stores can have different bytes).
+- Security concerns around comparing key material.
+- Expensive byte-level comparison of large blobs.
+
+For the operator, generation maps to Kubernetes `metadata.generation` / `resourceVersion`.
+For filesystem deployments, it is derived from file modification time.
+
+### Plugin interfaces for TLS material
+
+Two marker interfaces in `kroxylicious-api` model TLS resources:
+
+```java
+/** Provides TLS key material (private key + certificate chain). */
+public interface KeyMaterialProvider {
+    java.security.KeyStore keyStore();
+}
+
+/** Provides TLS trust material (trusted CA certificates). */
+public interface TrustMaterialProvider {
+    java.security.KeyStore trustStore();
+}
+```
+
+Consumers reference these by name in their versioned config, constructing `PluginReference`
+values in `pluginReferences()` — the same pattern used for all other cross-file references.
+
+### Filesystem layout
+
+Binary resources use a sidecar `.data` file alongside the YAML metadata file:
+
+```
+config-dir/
+  proxy.yaml
+  passwords.yaml
+  plugins.d/
+    io.kroxylicious.proxy.tls.KeyMaterialProvider/
+      my-keystore.yaml      # metadata: name, type, version
+      my-keystore.data      # binary keystore bytes
+    io.kroxylicious.proxy.filter.FilterFactory/
+      encrypt.yaml           # metadata + YAML config
+```
+
+### Text-based resources: inline YAML
+
+For text-based resources like ACL rules, YAML multi-line syntax (`|`) is simpler than the
+resource abstraction. The versioned config type uses a `String` field instead of a file path:
+
+```yaml
+name: my-acl-authorizer
+type: io.kroxylicious.authorizer.provider.acl.AclAuthorizerService
+version: v1
+config:
+  rules: |
+    allow User with name = "alice" to READ Topic with name = "foo";
+    otherwise deny;
+```
+
+PEM certificates and private keys are also text and can use the same inline approach.
+Binary formats (JKS, PKCS12) require the `@ResourceType` mechanism.
 
 ## Rejected alternatives
 
