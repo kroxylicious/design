@@ -115,7 +115,7 @@ The drain timeout is configurable per virtual cluster:
 ```yaml
 virtualClusters:
 - name: "my-cluster"
-  drainTimeout: 60s  # default TBD
+  drainTimeout: 10s
   targetCluster:
     bootstrapServers: "..."
 ```
