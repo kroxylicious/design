@@ -6,9 +6,14 @@ cross-file dependency references, and optional JSON Schema validation.
 
 ## Current situation
 
-Today, all configuration lives in a single YAML file. Filter definitions embed their nested plugin
-configurations inline using `@PluginImplName` / `@PluginImplConfig` annotation pairs on the config
-record's constructor parameters:
+Today, all configuration lives in a single YAML file. 
+
+At places where plugins can be configured, `@PluginImplName` / `@PluginImplConfig` annotation pairs are used
+so that a plugin's configuration can be included in the YAML tree.
+Plugins are allowed to have plugins of their own.
+
+For example, the proxy runtime uses those annotations for the `type` and `config` properties, and 
+the `RecordEncryption` filter uses them for `kms` + `kmsConfig` and for `selector` and `selectorConfig`:
 
 ```yaml
 filterDefinitions:
@@ -25,31 +30,44 @@ filterDefinitions:
         template: "KEK_${topicName}"
 ```
 
-The proxy resolves these at runtime by discovering `@PluginImplName`-annotated fields, looking up
+The proxy runtime resolves these during startup by discovering `@PluginImplName`-annotated fields, looking up
 the named plugin implementation via `ServiceLoader`, and deserialising the corresponding
-`@PluginImplConfig` field into the plugin's config type. This has several consequences:
+`@PluginImplConfig` field into the plugin's config type. 
 
-- **No reuse**: two filters that need the same KMS must each embed a copy of the KMS configuration.
-- **No independent versioning**: a filter's config schema is monolithic. Changing the KMS config
-  format requires the filter to understand and migrate its nested portion.
-- **No schema validation**: there is no declarative way to validate plugin configurations before
-  the proxy starts.
-- **No dependency ordering**: the proxy discovers plugin dependencies implicitly at initialisation
-  time, with no upfront visibility into the dependency graph.
-- **Opaque to tooling**: since plugin configurations are embedded inside filter configs, external
-  tools (Kubernetes operators, CI validators, config linters) cannot inspect or validate them
-  independently.
+The existing APIs work, and plugins-to-plugins has proven to be useful.
 
 ## Motivation
+
+Although it works, the current configuration APIs have several consequences:
+
+1. **No reuse**: The model is tree-like. For example, if two filters need the same KMS 
+  then each must embed a copy of the KMS configuration.
+2. **Poor documentation**: a plugin developer ought to be able to document the YAML accepted by their plugin, 
+  but this is difficult because the source of truth is Java code: End users cannot be assumed to know Java.
+3. **Opaque to tooling**: similarly, external tools (editors, config linters, CI validators, Kubernetes operators) 
+  cannot inspect or  validate plugin configurations. (See [2436](https://github.com/kroxylicious/kroxylicious/issues/2436))
+4. **No schema validation**: there is no declarative way to validate plugin configurations before
+  the proxy starts. (Somewhat related: [3267](https://github.com/kroxylicious/kroxylicious/issues/3267#issuecomment-4042031788)
+5. **No independent versioning**: As a plugin evolves there are limited facilities for end users 
+  and plugin developers to agree common expectations about a plugin configuration. The plugin 
+  implementation either accepts the YAML or it does not. If newer version of a plugin removes
+  support for a configuration property the user will likely be confused, because the configuration 
+  used to work. But the plug in has no effective way to communicate that the user is speaking 
+  the old language.
+6. **No dependency ordering**: the proxy discovers plugin dependencies implicitly at initialisation
+  time, with no upfront visibility into the dependency graph.
 
 There are five specific drawbacks of the current configuration system that motivate this change.
 
 ### 1. Per-plugin JSON schemas are impossible today
 
-It is impossible to write a single JSON schema for the configuration file, because what is allowed
-depends on which plugins are present at runtime. But having schemas is desirable for documentation,
-editor assistance, and automated validation. By giving each plugin instance its own file, each
-plugin version can ship its own JSON schema. These per-plugin schemas can be published to schema
+Items 2, 3 and 4 are quite tightly related, and all relate to poorer user experience.
+
+However it is currently impossible to write a single JSON schema for the configuration file, because what is allowed
+depends on which plugins are present at runtime. 
+By giving each plugin instance its own file, each
+plugin version can ship its own JSON schema to be used to validate that file. 
+These per-plugin schemas can be published to schema
 catalogues (e.g. schemastore.org) and consumed by IDEs and CI tools independently of the proxy.
 
 ### 2. Lack of uniformity in how plugins are configured
@@ -93,7 +111,160 @@ including support for multiple concurrent versions during migration periods.
 
 ## Proposal
 
-### Configuration layout
+### Supporting multiple plugin configuration versions
+
+The existing `@Plugin` annotation type will be annotated `@Repeatable`, and given a new `configVersion` method.
+
+This will allow plugin implementations carry multiple `@Plugin` annotations: 
+* the legacy (unversioned) config will be the one with an empty string as its `configVersion`
+* hence forth, each version of a plugin's config will be identified by a non-empty `configVersion`
+
+The runtime will validate that `configVersion` is unique across all the `@Plugin` annotations on a plugin implementation class.
+
+```java
+@Plugin(configType = RecordEncryptionConfig.class) // The legacy config schema
+@Plugin(configVersion = "v1", configType = RecordEncryptionConfigV1.class) // The new config schema, called v1
+public class RecordEncryption<K, E>
+    implements FilterFactory<Object, SharedEncryptionContext<K, E>> {
+```
+
+When implementing a plugin like `FilterFactory` which accepts a type parameter representing the configuration type, `Object` will be used as the type argument.
+If desired, a plugin developer can declare some common interface type for all their config types to inherit, thus avoiding the Object type argument.
+
+In either case `initialize()`-like methods will dispatch via `instanceof`:
+
+```java
+public SharedEncryptionContext<K, E> initialize(
+        FilterFactoryContext context, Object config) {
+    var configuration = Plugins.requireConfig(this, config);
+    if (configuration instanceof RecordEncryptionConfigV1 v1) {
+        return initializeV1(context, v1);
+    }
+    else if (configuration instanceof RecordEncryptionConfig legacy) {
+        return initializeLegacy(context, legacy);
+    }
+    throw new PluginConfigurationException("Unsupported config type");
+}
+```
+
+This maintains full backwards compatibility: existing single-file configurations continue to work via the legacy path.
+
+### Plugin references
+
+`PluginReference<T>` is a new API class used by plugin developers to describe their plugin's configuration dependency on some other plugin instance.
+
+```java
+package io.kroxylicious.proxy.plugin;
+
+/**
+ * A typed reference to a named plugin instance. Used by the framework to
+ * build the dependency graph and determine initialisation order.
+ * <p>
+ * This is a runtime type, not a serialisation type. Plugin authors choose their
+ * own YAML representation for references (e.g. a bare instance name string when
+ * the plugin interface type is statically known) and construct {@code PluginReference}
+ * instances in their {@link HasPluginReferences#pluginReferences()} implementation.
+ *
+ * @param type the fully qualified name of the plugin interface (e.g. {@code io.kroxylicious.kms.service.KmsService})
+ * @param name the name of the plugin instance (e.g. {@code aws-kms})
+ * @param <T> the plugin interface type
+ */
+public record PluginReference<T>(
+                                 String type,
+                                 String name) {}
+```
+
+In general, a plugin's configuration might have many such individual dependencies.
+The runtime needs a way to know about all of a plugin's dependencies so we define `HasPluginReferences`:
+
+```java
+package io.kroxylicious.proxy.plugin;
+/**
+ * Implemented by new-style (versioned) plugin configuration types to declare their
+ * dependencies on other plugin instances. The framework calls {@link #pluginReferences()}
+ * to discover cross-file dependencies, build a dependency graph, and validate that
+ * all referenced plugin instances exist.
+ */
+public interface HasPluginReferences {
+
+    /**
+     * Returns all plugin references in this configuration, including references
+     * from nested structures. Implementations must include all references to
+     * ensure correct dependency tracking and initialisation ordering.
+     *
+     * @return a stream of all plugin references declared by this configuration
+     */
+    Stream<PluginReference<?>> pluginReferences();
+}
+```
+
+When a plugin's configuration can refer to another plugin instance (e.g. a filter that
+uses a KMS service), the plugin's configuration type declares its dependencies by implementing
+`HasPluginReferences`. 
+
+
+```java
+public record RecordEncryptionConfigV1(
+        String kms,
+        String selector,
+        Map<String, Object> experimental,
+        UnresolvedKeyPolicy unresolvedKeyPolicy)
+    implements HasPluginReferences {
+
+    @Override
+    public Stream<PluginReference<?>> pluginReferences() {
+        return Stream.of(
+                new PluginReference<>(KmsService.class.getName(), kms),
+                new PluginReference<>(KekSelectorService.class.getName(), selector));
+    }
+}
+```
+
+The YAML representation of the reference is entirely up to the plugin author.
+When the plugin interface type is statically known the reference can simply be the name of the depended-upon plugin instance (i.e. a JSON string). 
+For example, a plugin like `RecordEncryption` knows statically that its `kms`
+field always refers to a `KmsService`. Forcing the user to write
+`kms: {type: io.kroxylicious.kms.service.KmsService, name: vault-kms}` in the YAML would be
+redundant — the `type` can only ever be one thing. 
+By keeping `PluginReference` out of the
+YAML, each plugin is free to choose the most natural representation for its references.
+
+The `HasPluginReferences` interface is the contract that allows the runtime to resolve the plugin instance graph. 
+The runtime calls
+`pluginReferences()` to discover cross-file dependencies, build the dependency graph, and
+validate that all referenced plugin instances exist. 
+
+This is not a breaking change. Plugin developers implement `HasPluginReferences` only when they
+introduce a new versioned config type (e.g. `RecordEncryptionConfigV1`). The legacy config type
+(`RecordEncryptionConfig`) continues to use `@PluginImplName` / `@PluginImplConfig` as before.
+Because the config versioning mechanism (`@Plugin(configVersion = "v1", configType = ...)`)
+allows both old and new config types to coexist, the `HasPluginReferences` pattern is adopted
+incrementally, version by version.
+
+### JSON Schema validation
+
+Plugin developers can ship a JSON Schema for each config version at:
+
+```
+META-INF/kroxylicious/schemas/{PluginSimpleName}/{version}.schema.yaml
+```
+
+When a schema is present, the runtime will validate the raw configuration against it before deserialisation. 
+This is opt-in: if no schema exists, the config is accepted without validation.
+
+A test utility `SchemaValidationAssert` is provided in `kroxylicious-filter-test-support` so plugin authors can verify their schemas accept valid configs.
+
+### `@Stateless` annotation
+
+Plugin developers can appled a new `@Stateless` annotation to their implementation
+This signals to the runtime that an instance can be shared across multiple consumers. 
+
+The decision about whether to actually do that belongs to the end user who controls the configuration used to refer to a plugin instance.
+The plugin instance YAML can set `shared: true` to enable this. 
+
+The framework will reject `shared: true` on plugins not annotated `@Stateless`.
+
+### One file per plugin instance
 
 The new configuration comprises a `proxy.yaml` and a `plugins.d/` directory:
 
@@ -113,6 +284,7 @@ config-dir/
 default filter chain, micrometer instance names) plus a `version` field:
 
 ```yaml
+# proxy.yaml
 version: v1alpha1
 management:
   endpoints:
@@ -127,13 +299,12 @@ virtualClusters:
           bootstrapAddress: localhost:9192
 defaultFilters:
   - encrypt
-micrometer:
-  - common-tags
 ```
 
 Each plugin instance file specifies `name`, `type`, `version`, and optionally `config`:
 
 ```yaml
+# plugins.d/io.kroxylicious.proxy.filter.FilterFactory/encrypt.yaml
 name: encrypt
 type: io.kroxylicious.filter.encryption.RecordEncryption
 version: v1
@@ -145,7 +316,7 @@ config:
 The `name` field must match the filename (without the `.yaml` extension). This is validated during
 loading. Including `name` in the file content ensures that plugin instance files are
 self-describing: a file can be understood without knowing its path, which matters for debugging,
-code review, and non-filesystem configuration sources like ConfigMaps.
+code review, and (in the future) non-filesystem configuration sources.
 
 The `type` field must be a fully qualified class name. The legacy single-file format allows
 short names (e.g. `RecordEncryption`), but the config2 format requires the FQCN
@@ -158,106 +329,6 @@ The loss of brevity is mitigated by JSON Schema: each plugin version's schema ca
 `type` using `const` or `enum`, giving editors code completion and validation without requiring
 the user to type the full name.
 
-### Snapshot abstraction
-
-A `Snapshot` interface abstracts the configuration source, allowing the same resolution logic
-to work whether configuration comes from a filesystem directory, a Kubernetes ConfigMap, or
-an in-memory representation in tests.
-
-```java
-public interface Snapshot {
-    /** Returns the proxy configuration YAML content. */
-    String proxyConfig();
-
-    /** Returns the plugin interface names for which plugin instances are configured. */
-    List<String> pluginInterfaces();
-
-    /** Returns the names of all plugin instances configured for a given plugin interface. */
-    List<String> pluginInstances(String pluginInterfaceName);
-
-    /** Metadata for a plugin instance (name, type, version, shared, generation). */
-    PluginInstanceMetadata pluginInstanceMetadata(
-            String pluginInterfaceName, String pluginInstanceName);
-
-    /** Raw data bytes for a plugin instance (UTF-8 YAML or binary resource). */
-    byte[] pluginInstanceData(
-            String pluginInterfaceName, String pluginInstanceName);
-
-    /** Password for a named resource, or null if no password is configured. */
-    @Nullable char[] resourcePassword(String resourceName);
-}
-```
-
-Each plugin instance has **metadata** and **data**:
-
-- **Metadata** (`PluginInstanceMetadata`): name, type (FQCN), version, shared flag, and a
-  generation number. The generation is a monotonically increasing value that changes when the
-  resource content changes, enabling efficient change detection without comparing data bytes
-  (which is problematic for keystores due to non-deterministic salting and security concerns
-  around comparing key material). For the Kubernetes operator, generation maps to
-  `metadata.generation` / `resourceVersion`. For filesystem deployments, it is derived from
-  file modification time.
-
-- **Data** (`pluginInstanceData()`): raw bytes. For most plugins, these bytes are UTF-8 YAML —
-  the proxy parses them with Jackson into the `configType` from the `@Plugin` annotation. For
-  binary resource plugins (those annotated with `@ResourceType` — see **Non-YAML resources**
-  below), the bytes are the raw resource content (e.g. a PKCS12 keystore). The runtime checks
-  `@ResourceType` on the plugin class to determine which deserialisation path to use.
-
-**Passwords** are provided out-of-band from the resource data via `resourcePassword()`. This
-decouples passwords from the data they protect, allowing different access controls (e.g.
-Kubernetes Secret vs ConfigMap, or a separate `passwords.yaml` with restricted permissions
-for filesystem deployments).
-
-### Plugin references
-
-When a plugin's configuration needs to refer to another plugin instance (e.g. a filter that
-uses a KMS service), the versioned config type declares its dependencies by implementing
-`HasPluginReferences`. The YAML representation of the reference is entirely up to the plugin
-author — typically a bare instance name string, since the plugin interface type is statically
-known:
-
-```java
-public record RecordEncryptionConfigV1(
-        String kms,
-        String selector,
-        Map<String, Object> experimental,
-        UnresolvedKeyPolicy unresolvedKeyPolicy)
-    implements HasPluginReferences {
-
-    @Override
-    public Stream<PluginReference<?>> pluginReferences() {
-        return Stream.of(
-                new PluginReference<>(KmsService.class.getName(), kms),
-                new PluginReference<>(KekSelectorService.class.getName(), selector));
-    }
-}
-```
-
-`PluginReference<T>` is a runtime type — a record of `(String type, String name)` where `type`
-is the fully qualified plugin interface name and `name` is the instance name. It is not a
-serialisation type: it does not appear in the YAML. Plugin authors construct `PluginReference`
-values in their `pluginReferences()` implementation, combining the statically-known interface
-type with the instance name read from YAML.
-
-This separation is deliberate. A plugin like `RecordEncryption` knows statically that its `kms`
-field always refers to a `KmsService`. Forcing the user to write
-`kms: {type: io.kroxylicious.kms.service.KmsService, name: vault-kms}` in the YAML would be
-redundant — the `type` can only ever be one thing. By keeping `PluginReference` out of the
-YAML, each plugin is free to choose the most natural representation for its references.
-
-The `HasPluginReferences` interface is the contract that makes this work. The runtime calls
-`pluginReferences()` to discover cross-file dependencies, build the dependency graph, and
-validate that all referenced plugin instances exist. The alternative — scanning config objects
-for fields that look like references, or using reflection to discover dependencies — would be
-fragile, plugin-specific, and invisible to tooling.
-
-This is not a breaking change. Plugin developers implement `HasPluginReferences` only when they
-introduce a new versioned config type (e.g. `RecordEncryptionConfigV1`). The legacy config type
-(`RecordEncryptionConfig`) continues to use `@PluginImplName` / `@PluginImplConfig` as before.
-Because the config versioning mechanism (`@Plugin(configVersion = "v1", configType = ...)`)
-allows both old and new config types to coexist, the `HasPluginReferences` pattern is adopted
-incrementally, version by version.
 
 ### Dependency graph and referential integrity
 
@@ -287,9 +358,9 @@ its own dependencies without requiring the runtime to enumerate every possible p
 
 ### Resolved plugin registry
 
-A `ResolvedPluginRegistry` is built during config2 resolution. It pre-creates non-filter plugin
-instances (KMS services, authorisers, etc.) in dependency order. Filter instances are created
-later by the proxy runtime because they need per-connection context.
+A `ResolvedPluginRegistry` is built during plugin resolution. 
+It pre-creates non-filter plugin instances (KMS services, authorisers, etc.) in dependency order. 
+Filter instances are created later by the proxy runtime because they need per-connection context.
 
 Versioned filter configs obtain their dependencies from the registry:
 
@@ -301,56 +372,6 @@ KmsService kmsPlugin = registry.pluginInstance(KmsService.class, v1.kms());
 Object kmsConfig = registry.pluginConfig(KmsService.class.getName(), v1.kms());
 ```
 
-### Dual `@Plugin` annotations and version dispatch
-
-Filter implementations carry two `@Plugin` annotations: one for the legacy (unversioned) config
-and one for the versioned config:
-
-```java
-@Plugin(configType = RecordEncryptionConfig.class)
-@Plugin(configVersion = "v1", configType = RecordEncryptionConfigV1.class)
-public class RecordEncryption<K, E>
-    implements FilterFactory<Object, SharedEncryptionContext<K, E>> {
-```
-
-The `FilterFactory` type parameter becomes `Object`, and `initialize()` dispatches via
-`instanceof`:
-
-```java
-public SharedEncryptionContext<K, E> initialize(
-        FilterFactoryContext context, Object config) {
-    var configuration = Plugins.requireConfig(this, config);
-    if (configuration instanceof RecordEncryptionConfigV1 v1) {
-        return initializeV1(context, v1);
-    }
-    else if (configuration instanceof RecordEncryptionConfig legacy) {
-        return initializeLegacy(context, legacy);
-    }
-    throw new PluginConfigurationException("Unsupported config type");
-}
-```
-
-This maintains full backwards compatibility: existing single-file configurations continue to work
-via the legacy path.
-
-### JSON Schema validation
-
-Plugin authors can ship a JSON Schema for each config version at:
-
-```
-META-INF/kroxylicious/schemas/{PluginSimpleName}/{version}.schema.yaml
-```
-
-When a schema is present, config2 validates the raw configuration against it before
-deserialisation. This is opt-in: if no schema exists, the config is accepted without validation.
-A test utility `SchemaValidationAssert` is provided so plugin authors can verify their schemas
-accept valid configs.
-
-### `@Stateless` annotation
-
-Plugins annotated `@Stateless` can be shared across multiple consumers. The plugin instance YAML
-can set `shared: true` to enable this. The framework rejects `shared: true` on plugins not
-annotated `@Stateless`.
 
 ### Migration tool
 
@@ -372,55 +393,170 @@ The tool:
 5. Writes `proxy.yaml` by passing through the raw YAML (stripping `filterDefinitions`, replacing
    `micrometer` with instance name references).
 
-## Affected/not affected projects
 
-| Project | Affected | Nature of change |
-|---|---|---|
-| `kroxylicious-api` | Yes | New **public API** types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`, `@ResourceType`, `ResourceSerializer`, `ResourceDeserializer`, `KeyMaterialProvider`, `TrustMaterialProvider`. `@Plugin` made `@Repeatable` with `configVersion` attribute. These are the types that plugin developers depend on and that we commit to supporting long-term. |
-| `kroxylicious-runtime` | Yes | New **internal** `config2` package: `Snapshot`, `FilesystemSnapshot`, `PluginInstanceMetadata`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. These are implementation details not visible to plugin developers. |
-| `kroxylicious-filter-test-support` | Yes | New `SchemaValidationAssert` utility. |
-| `kroxylicious-app` | Yes | New `ConfigMigrate` picocli subcommand. Dependency scope changes for Jackson. |
-| All filter modules | Yes | Dual `@Plugin` annotations, versioned config records, JSON schemas, updated tests. |
-| `kroxylicious-operator` | Not yet | Future work: operator generates `Snapshot` from CRDs. |
-| `kroxylicious-docs` | Not yet | Future work: document new configuration format. |
+### Snapshot abstraction
 
-The distinction matters: types in `kroxylicious-api` form the contract with plugin developers.
-Changes to `PluginReference`, `HasPluginReferences`, or `ResolvedPluginRegistry` require the
-same care as any other public API change. Types in `kroxylicious-runtime` are internal and can
-be refactored freely.
+**This subsection concerns non-public APIs. It is included in this proposal to help explain the concepts.**
 
-## Compatibility
+A `Snapshot` interface in `kroxylicious-runtime` abstracts the configuration source, allowing the same resolution logic
+to work whether configuration comes from a filesystem directory, an in-memory representation in tests, or (in the future) some other source.
 
-### Backwards compatibility
+```java
+    /**
+     * Returns the proxy configuration YAML content.
+     *
+     * @return the proxy configuration as a YAML string
+     */
+    String proxyConfig();
 
-The legacy single-file configuration format continues to work unchanged. The dual `@Plugin`
-annotation approach means the existing `ConfigParser` deserialises legacy configs exactly as
-before. The config2 path is only activated when a multi-file configuration source is used.
+    /**
+     * Returns the plugin interface names for which plugin instances are configured.
+     *
+     * @return list of plugin interface names (fully qualified class names)
+     */
+    // For the filesystem implementation this is the child directories of plugins.d/
+    List<String> pluginInterfaces();
 
-### Forward compatibility
+    /**
+     * Returns the names of all plugin instances configured for a given plugin interface.
+     *
+     * @param pluginInterfaceName the fully qualified name of the plugin interface
+     * @return list of plugin instance names
+     */
+    // For the filesystem implementation this is the .yaml files in the given subdirectory of plugins.d/
+    List<String> pluginInstances(String pluginInterfaceName);
+    
+    /**
+     * Returns the password for a named resource, if one is configured. Passwords are
+     * provided out-of-band from the resource data for security.
+     *
+     * @param resourceName the name of the resource
+     * @return the password as a char array, or {@code null} if no password is configured
+     */
+    @Nullable
+    char[] resourcePassword(String resourceName);
 
-Config version strings follow Kubernetes conventions (v1alpha1, v1beta1, v1). The version
-field in plugin YAML files enables the framework to select the correct deserialisation target
-as schemas evolve. The `@Repeatable` `@Plugin` annotation allows plugins to support an arbitrary
-number of config versions simultaneously.
+    /**
+     * Returns the metadata and data bytes for a specific plugin instance as an atomic unit.
+     * For YAML-based plugins, the data is the UTF-8 encoded YAML content (including the
+     * metadata envelope). For binary resource plugins (annotated with {@code @ResourceType}),
+     * the data is the raw resource bytes.
+     *
+     * <p>Callers must not modify the returned data array.</p>
+     *
+     * @param pluginInterfaceName the fully qualified name of the plugin interface
+     * @param pluginInstanceName the name of the plugin instance
+     * @return the plugin instance content (metadata and data)
+     * @throws IllegalArgumentException if the plugin instance is not found
+     */
+    PluginInstanceContent pluginInstance(
+                                         String pluginInterfaceName,
+                                         String pluginInstanceName);
+```
 
-### Migration path
+### Passwords
 
-Users migrate at their own pace. The `migrate-config` tool provides a one-shot conversion.
-The legacy format is not deprecated by this proposal.
+Passwords are provided **out-of-band** from the resource data, not co-located with it. 
+The `Snapshot` interface includes a `resourcePassword(String resourceName)` method that returns the password for a named resource. 
+This decouples passwords from the data they protect.
+For example, the passwords could be passed in a separate file, via environment variables, or read from a stream at startup.
+
+### `PluginInstanceContent`
+
+A `PluginInstanceContent` has **metadata** and **data**:
+
+```java
+public record PluginInstanceContent(
+                                    PluginInstanceMetadata metadata,
+                                    byte[] data) {}
+```
+
+- **Metadata** (`PluginInstanceMetadata`): name, type (FQCN), version, shared flag, and a
+  generation number. 
+
+- **Data**: raw bytes. For most plugins, these bytes are UTF-8 YAML —
+  the proxy parses them with Jackson into the `configType` from the `@Plugin` annotation. For
+  binary resource plugins (those annotated with `@ResourceType` — see **Non-YAML resources**
+  below), the bytes are the raw resource content (e.g. a PKCS12 keystore). The runtime checks
+  `@ResourceType` on the plugin class to determine which deserialisation path to use.
+
+### `PluginInstanceMetadata`
+
+```java
+public record PluginInstanceMetadata(
+                             String name,
+                             String type,
+                             String version,
+                             boolean shared,
+                             long generation) {}
+```
+  The `generation` is a monotonically increasing value that changes when the
+  resource content changes, enabling efficient change detection without comparing data bytes
+  (which is problematic for keystores due to non-deterministic salting and security concerns
+  around comparing key material). For the filesystem-based snapshot, it can be derived from
+  file modification time.
+
+### Change detection: generation numbers
+
+Each resource in the `Snapshot` carries a **generation number** — a monotonically increasing
+value that changes when the resource content changes. Comparing generation numbers rather than
+data bytes avoids:
+
+- Non-determinism from keystore salting (two logically equivalent stores can have different bytes).
+- Security concerns around comparing key material.
+- Expensive byte-level comparison of large blobs.
+
+For the operator, generation maps to Kubernetes `metadata.generation` / `resourceVersion`.
+For filesystem deployments, it is derived from file modification time.
 
 ## Non-YAML resources
 
-Not all plugin instance data is YAML. Some plugins manage binary resources — most notably TLS
-key material stored as Java KeyStores (JKS, PKCS12) or PEM files. For the `Snapshot` to fully
-encapsulate a proxy's configuration state, it must include these resources alongside YAML-based
-plugin configs.
+Some plugins manage binary resources — most notably TLS
+key material stored as Java KeyStores (JKS, PKCS12) or PEM files. 
+For the `Snapshot` to fully encapsulate a proxy's configuration state, it must include these resources alongside YAML-based plugin configs.
+
+Not all plugin instance data is YAML. 
+* The existing AclAuthorizer uses a non-YAML text format for its ACL rules.
+* Plugins commonly accept `Tls` objects for specifying secret data via Java KeyStores. 
+  To support these it is possible to provide plugin data in any format.
+  For the filesystem Snapshort this is provided in a separate file in the same directory as the YAML metadata file.
+ 
+### Text-based resources: inline YAML
+
+For text-based resources like ACL rules, YAML multi-line syntax (`|`) is simplest. 
+The versioned config type can use a `String` field instead of a file path:
+
+```yaml
+name: my-acl-authorizer
+type: io.kroxylicious.authorizer.provider.acl.AclAuthorizerService
+version: v1
+config:
+  rules: |
+    allow User with name = "alice" to READ Topic with name = "foo";
+    otherwise deny;
+```
+ 
+### Filesystem layout
+
+Binary resources use a sidecar `.data` file alongside the YAML metadata file:
+
+```
+config-dir/
+  proxy.yaml
+  passwords.yaml
+  plugins.d/
+    io.kroxylicious.proxy.tls.KeyMaterialProvider/
+      my-keystore.yaml      # metadata: name, type, version
+      my-keystore.data      # binary keystore bytes
+    io.kroxylicious.proxy.filter.FilterFactory/
+      encrypt.yaml           # metadata + YAML config
+```
+
+Binary formats (including JKS, PKCS12) require the `@ResourceType` mechanism.
 
 ### `@ResourceType` annotation
 
-As described in the Snapshot abstraction, plugin instance data is raw bytes — UTF-8 YAML by
-default. For binary resource types (e.g. keystores), the plugin implementation declares its
-binary format via a `@ResourceType` annotation:
+For binary resource types (e.g. keystores), the plugin implementation declares its binary format via a `@ResourceType` annotation:
 
 ```java
 @Retention(RetentionPolicy.RUNTIME)
@@ -431,25 +567,15 @@ public @interface ResourceType {
 }
 ```
 
-The runtime discovers the serde from the annotation via reflection — the same pattern used
-for `@Plugin(configType = ...)`. The `ResourceSerializer` converts a typed resource to bytes
-(for snapshot generation), and `ResourceDeserializer` converts bytes back to a typed resource
-(for loading).
+The runtime discovers the serde from the annotation via reflection — the same pattern used for `@Plugin(configType = ...)`. 
+The `ResourceSerializer` converts a typed resource to bytes (for snapshot generation), and `ResourceDeserializer` converts bytes back to a typed resource (for loading).
 
 ### Store type auto-detection
 
-Keystore format need not be user-specified. Common formats have distinctive magic bytes
-(JKS: `0xFEEDFEED`, PKCS12: ASN.1 `0x30`, PEM: `-----BEGIN`). The deserialiser probes the
-bytes and selects the appropriate format. PKCS12 is the default keystore type since Java 9;
-JKS is legacy.
-
-### Passwords
-
-Passwords are provided **out-of-band** from the resource data, not co-located with it. The
-`Snapshot` interface includes a `resourcePassword(String resourceName)` method that returns the
-password for a named resource. This decouples passwords from the data they protect, allowing
-different access controls (e.g. Kubernetes Secret vs ConfigMap for filesystem deployments, a
-separate `passwords.yaml` with restricted permissions).
+Keystore format need not be user-specified. 
+Common formats have distinctive magic bytes (JKS: `0xFEEDFEED`, PKCS12: ASN.1 `0x30`, PEM: `-----BEGIN`). 
+The deserialiser probes the bytes and selects the appropriate format. 
+PKCS12 is the default keystore type since Java 9; JKS is legacy.
 
 ### Alias selection
 
@@ -464,19 +590,6 @@ public record VaultKmsConfigV1(
         @Nullable String trustMaterial
 ) implements HasPluginReferences { ... }
 ```
-
-### Change detection: generation numbers
-
-Each resource in the `Snapshot` carries a **generation number** — a monotonically increasing
-value that changes when the resource content changes. Comparing generation numbers rather than
-data bytes avoids:
-
-- Non-determinism from keystore salting (two logically equivalent stores can have different bytes).
-- Security concerns around comparing key material.
-- Expensive byte-level comparison of large blobs.
-
-For the operator, generation maps to Kubernetes `metadata.generation` / `resourceVersion`.
-For filesystem deployments, it is derived from file modification time.
 
 ### Plugin interfaces for TLS material
 
@@ -497,39 +610,46 @@ public interface TrustMaterialProvider {
 Consumers reference these by name in their versioned config, constructing `PluginReference`
 values in `pluginReferences()` — the same pattern used for all other cross-file references.
 
-### Filesystem layout
 
-Binary resources use a sidecar `.data` file alongside the YAML metadata file:
+## Affected/not affected projects
 
-```
-config-dir/
-  proxy.yaml
-  passwords.yaml
-  plugins.d/
-    io.kroxylicious.proxy.tls.KeyMaterialProvider/
-      my-keystore.yaml      # metadata: name, type, version
-      my-keystore.data      # binary keystore bytes
-    io.kroxylicious.proxy.filter.FilterFactory/
-      encrypt.yaml           # metadata + YAML config
-```
+The changes described in this proposal concern the kroxylicious project only.
+In particular is only covers the kroxylicious proxy.
+Follow-on changes to `kroxylicious-kubernetes-api` are `kroxylicious-operator` will be developed in a future proposal.
 
-### Text-based resources: inline YAML
+| Project | Affected | Nature of change |
+|---|---|---|
+| `kroxylicious-api` | Yes | New **public API** types: `PluginReference`, `HasPluginReferences`, `ResolvedPluginRegistry`, `@Stateless`, `@ResourceType`, `ResourceSerializer`, `ResourceDeserializer`, `KeyMaterialProvider`, `TrustMaterialProvider`. `@Plugin` made `@Repeatable` with `configVersion` attribute. These are the types that plugin developers depend on and that we commit to supporting long-term. |
+| `kroxylicious-runtime` | Yes | New **internal** `config2` package: `Snapshot`, `FilesystemSnapshot`, `PluginInstanceMetadata`, `ProxyConfig`, `PluginConfig`, `DependencyGraph`, `ConfigSchemaValidator`, `ProxyConfigParser`, `ResolvedPluginRegistryImpl`. These are implementation details not visible to plugin developers. |
+| `kroxylicious-filter-test-support` | Yes | New `SchemaValidationAssert` utility. |
+| `kroxylicious-app` | Yes | New `ConfigMigrate` picocli subcommand. Dependency scope changes for Jackson. |
+| All filter modules | Yes | Dual `@Plugin` annotations, versioned config records, JSON schemas, updated tests. |
+| `kroxylicious-operator` | Not yet | Future work: operator generates `Snapshot` from CRDs. |
+| `kroxylicious-docs` | Not yet | Future work: document new configuration format. |
 
-For text-based resources like ACL rules, YAML multi-line syntax (`|`) is simpler than the
-resource abstraction. The versioned config type uses a `String` field instead of a file path:
 
-```yaml
-name: my-acl-authorizer
-type: io.kroxylicious.authorizer.provider.acl.AclAuthorizerService
-version: v1
-config:
-  rules: |
-    allow User with name = "alice" to READ Topic with name = "foo";
-    otherwise deny;
-```
+## Compatibility
 
-PEM certificates and private keys are also text and can use the same inline approach.
-Binary formats (JKS, PKCS12) require the `@ResourceType` mechanism.
+
+### Backwards compatibility
+
+The legacy single-file configuration format continues to work unchanged. 
+The dual `@Plugin` annotation approach means the existing `ConfigParser` deserialises legacy configs exactly as before. 
+The new configuration handling is only activated when proxy configuration file has a `version` property.
+Because current configurations never have this property they will continue to be handled by the current mechanisms.
+
+### Forward compatibility
+
+Config version strings follow Kubernetes conventions (v1alpha1, v1beta1, v1). 
+The `version` field in plugin YAML files enables the framework to select the correct deserialisation target as schemas evolve. 
+The `@Repeatable` `@Plugin` annotation allows plugins to support an arbitrary number of config versions simultaneously.
+
+### Migration path
+
+Users migrate at their own pace. The `migrate-config` tool provides a one-shot conversion.
+The legacy format is not deprecated by this proposal.
+
+
 
 ## Rejected alternatives
 
