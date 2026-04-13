@@ -109,7 +109,7 @@ Explicit version strings (following Kubernetes conventions: v1alpha1, v1beta1, v
 
 The existing `@Plugin` annotation type will be annotated `@Repeatable`, and given a new `configVersion` method.
 
-This will allow plugin implementations carry multiple `@Plugin` annotations: 
+This will allow plugin implementations to carry multiple `@Plugin` annotations: 
 * The default value for `Plugin.configVersion` will be the empty string.
 * the legacy (unversioned) config will be the one with an empty string as its `configVersion`
 * hence forth, each version of a plugin's config will be identified by a non-empty `configVersion`
@@ -236,8 +236,8 @@ A test utility `SchemaValidationAssert` is provided in `kroxylicious-filter-test
 
 Discovery of schemas by external tooling depends on plugin developers publishing the schema so that it can be discovered by tools.
 One way to do that is to publish the schema on a public webserver, allowing end users to make use of JSON Schema's `$schema` keyword.
-Editors will often allow to download such schemas. 
-Alternatively schemastore.org provides on mechanism with good editor support. 
+Editors often support downloading such schemas. 
+Alternatively schemastore.org provides one mechanism with good editor support. 
 
 ### Plugin references
 
@@ -344,12 +344,12 @@ validates the graph using DFS-based topological sort, detecting:
 The topological order determines initialisation sequence: dependencies are initialised before
 their dependents.
 
-Although much of the design described in this proposal is inspired the the Kubernetes model this is a deliberate deviation. 
+Although much of the design described in this proposal is inspired by the Kubernetes model, this is a deliberate deviation. 
 The Kubernetes API server does not enforce referential integrity between resources — a Pod can reference a ConfigMap that does not yet
 exist, and eventual consistency resolves the situation over time. 
 We make a different choice because our needs are different: the proxy cannot start with a dangling KMS reference or a cyclic dependency. 
 Fail-fast validation at configuration load time is preferable to discovering broken references at runtime when the first message arrives. 
-The cost is that the runtime must understand ­— and validate ­— the dependency structure, which is why `HasPluginReferences` exists as an explicit contract rather than relying on introspection or convention.
+The cost is that the runtime must understand — and validate — the dependency structure, which is why `HasPluginReferences` exists as an explicit contract rather than relying on introspection or convention.
 
 The runtime does not (and should not) statically know about all plugin types. 
 Plugins can depend on other plugins that the runtime has never heard of (e.g. `RecordEncryption` depends on `KmsService` and `KekSelectorService`). The `HasPluginReferences` interface lets each config type declare its own dependencies without requiring the runtime to enumerate every possible plugin interface.
@@ -494,7 +494,7 @@ Not all plugin instance data is YAML.
 * Plugins commonly accept `Tls` objects for specifying secret data via Java KeyStores. 
 
 It is possible to provide plugin data in any format.
-However, this is mainly provides to allow KeyStores to have first class support within the configuration system.
+However, this mainly exists to allow KeyStores to have first class support within the configuration system.
 For the filesystem Snapshot non-YAML data is provided in a separate file in the same directory as the YAML metadata file.
  
 #### Text-based resources: inline YAML
