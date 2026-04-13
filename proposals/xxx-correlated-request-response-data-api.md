@@ -45,7 +45,7 @@ Optional<MyStateObject> data = context.correlatedData();
 ### Implementation Considerations
 * **Scoping:** The data is strictly scoped to the filter instance that created it. It is not shared with other filters in the chain to avoid implicit coupling.
 * **Lifecycle Management:** The framework becomes responsible for "popping" the data. If a request is a zero-ack Produce request, the framework will proactively discard the stashed data to prevent leaks. If the Response Filter does not access the data, the framework will handle discarding the stashed data.
-* **Data Structure:** Initially, the API will support a single state object. Since filter authors can define a custom `Record` or `POJO` to hold multiple values, a complex Key-Value map is deemed unnecessary at this stage.
+* **Data Structure:** The API will support a single state object. Filter authors can define a custom `Record` or `POJO` to hold multiple values, a complex Key-Value map is deemed unnecessary.
 
 ## Affected/not affected projects
 
