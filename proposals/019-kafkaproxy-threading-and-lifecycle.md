@@ -1,4 +1,4 @@
-# Proposal 017: KafkaProxy Threading and Lifecycle Contract
+# Proposal 019: KafkaProxy Threading and Lifecycle Contract
 
 ## Summary
 
