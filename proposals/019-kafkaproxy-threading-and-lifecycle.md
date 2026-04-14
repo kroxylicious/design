@@ -6,7 +6,7 @@ Define the threading and lifecycle contract for `KafkaProxy`: it is a single-use
 
 ## Current Situation
 
-`KafkaProxy` has an `AtomicBoolean running` field that guards `startup()` and `shutdown()` against concurrent or repeated invocation. The field enforces a basic invariant — you cannot start twice or stop twice — but the contract is implicit:
+`KafkaProxy` is an internal class — it is not part of the public API. It has an `AtomicBoolean running` field that guards `startup()` and `shutdown()` against concurrent or repeated invocation. The field enforces a basic invariant — you cannot start twice or stop twice — but the contract is implicit:
 
 - There is no documentation of which threads may call which methods.
 - The two-state boolean cannot distinguish "not yet started" from "stopped," so `startup()` after `shutdown()` silently succeeds in setting `running` back to `true` rather than being rejected.
@@ -45,7 +45,7 @@ NEW  ──>  STARTING  ──>  STARTED  ──>  STOPPING  ──>  STOPPED
 
 If `startup()` fails partway through, the proxy transitions directly to `STOPPED` — partially-acquired resources are released before the exception propagates. There is no `FAILED` state at the proxy level; a failed startup is simply a proxy that went straight to `STOPPED`. This is intentional for two reasons: the proxy is not reconfigurable, so there is no recovery transition from a hypothetical `FAILED` state (unlike virtual clusters, which support `failed` -> `initializing` for retry with corrected configuration); and the failure is communicated directly to the caller via the exception from `startup()`, so there is no need to hold the error in state for later inspection.
 
-The lifecycle is **not restartable**. Once a proxy reaches `STOPPED`, it cannot return to any earlier state. To restart, create a new `KafkaProxy` instance. This holds across all deployment models: standalone, Kubernetes, sidecar, and embedded library.
+The lifecycle is **not restartable**. Once a proxy reaches `STOPPED`, it cannot return to any earlier state. To restart, create a new `KafkaProxy` instance. This holds across all deployment models: standalone and Kubernetes today, and sidecar or embedded library if those models are supported in the future.
 
 Dynamic configuration reload handles changes within a running proxy; there is no use case for tearing down and re-creating Netty event loops in-process.
 
@@ -63,7 +63,7 @@ var stopped = proxy.startup();
 stopped.join();
 ```
 
-The proxy also holds the future internally. The existing `block()` method is deprecated and delegates to `join()` on the same future.
+If `startup()` fails, the returned future completes exceptionally — the caller receives the failure whether they call `join()` immediately or later. The proxy also holds the future internally. The existing `block()` method is deprecated and delegates to `join()` on the same future.
 
 ### Threading Contract
 
@@ -91,6 +91,26 @@ The only invalid sequence is attempting to start a proxy that is shutting down o
 
 All other repeated or concurrent calls are idempotent no-ops (or return the existing future).
 
+### Process Exit Codes
+
+There are two edges into `STOPPED`, and they carry different meaning at the process level:
+
+1. **`STARTING → STOPPED`** (startup failure): `startup()` completes the future exceptionally. The caller (typically `main()`) receives the exception and should exit with a non-zero status code.
+2. **`STOPPING → STOPPED`** (clean shutdown): the future completes normally. The caller exits with zero.
+
+`KafkaProxy` itself does not call `System.exit()` — translating the outcome into a process exit code is the responsibility of the application entry point. This keeps `KafkaProxy` usable in embedded and test contexts where process termination is not appropriate.
+
+### Metrics
+
+While the lifecycle state enum remains internal (see [Rejected Alternatives](#public-lifecycle-state-enum)), the proxy should expose metrics that reflect its lifecycle state. Standard Kubernetes metrics (`kube_pod_status_phase`, restart counts, container termination reasons) treat the process as a black box — they can tell an operator *that* a pod restarted but not *why*, and they cannot distinguish a startup failure from a crash during normal operation without heuristics.
+
+The proxy should expose:
+
+- **State gauge**: a metric indicating the current lifecycle state (`starting`, `started`, `stopping`, `stopped`). This gives dashboards and alerts a definitive signal rather than requiring inference from Kubernetes-level indicators.
+- **Startup duration**: time elapsed from `STARTING` to `STARTED` (or failure). This helps operators identify configuration or environment issues that slow startup across restarts.
+
+These metrics are public API surface — once exposed, their names and semantics become a compatibility commitment. The specific metric names and labelling conventions should be consistent with any metrics framework adopted for virtual cluster lifecycle ([016](./016-virtual-cluster-lifecycle.md)).
+
 ## Affected/Not Affected Projects
 
 **Affected:**
@@ -112,7 +132,7 @@ The one behavioural change is stricter error detection: calling `startup()` on a
 
 ### Public lifecycle state enum
 
-We considered making the lifecycle state enum part of the public API so that external code (operators, management endpoints) could query proxy state. However, the proxy is not an entity that external systems monitor at the object level — they monitor the process (health endpoints, readiness probes). The lifecycle state is an internal correctness mechanism, not an observability surface. If proxy-level observability is needed in the future, it should be designed as part of a proxy-level lifecycle proposal (identified as future work in [016](./016-virtual-cluster-lifecycle.md)) rather than prematurely exposing an implementation detail.
+We considered making the lifecycle state enum part of the public API so that external code (operators, management endpoints) could query proxy state programmatically. The enum remains internal — external observability is better served by metrics (see [Metrics](#metrics)), which provide the same information through a standard interface without coupling consumers to an internal type.
 
 ### Restartable proxy
 
