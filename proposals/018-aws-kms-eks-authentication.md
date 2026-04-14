@@ -74,6 +74,18 @@ credentials:
     credentialLifetimeFactor: 0.8          # optional
 ```
 
+| Field | Description | Required? | Default | Env var fallback |
+|-------|-------------|-----------|---------|-----------------|
+| `roleArn` | ARN of the IAM role to assume via STS. | No | — | `AWS_ROLE_ARN` |
+| `webIdentityTokenFile` | Path to the projected service-account OIDC token file. Read fresh on every credential refresh (kubelet rotates it roughly hourly). | No | — | `AWS_WEB_IDENTITY_TOKEN_FILE` |
+| `roleSessionName` | Identifier for the assumed-role session, visible in AWS CloudTrail. Must match `[\w+=,.@-]{2,64}`. | No | `kroxylicious-<uuid>` (generated at construction time) | `AWS_ROLE_SESSION_NAME` |
+| `stsEndpointUrl` | STS endpoint URL for the `AssumeRoleWithWebIdentity` call. Override for non-standard partitions (GovCloud, China). | No | `https://sts.<stsRegion>.amazonaws.com` | — |
+| `stsRegion` | AWS region used to derive the STS endpoint URL. | No | Value of `Config.region` | `AWS_REGION` |
+| `durationSeconds` | Requested duration of the assumed-role session, in seconds. Valid range: [900, 43200](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html). When absent the field is omitted from the STS request and STS applies the role's configured maximum session duration. | No | Omitted (STS default) | — |
+| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
+
+The provider **fails fast** at construction time with a `KmsException` if `roleArn` and `webIdentityTokenFile` cannot be resolved from either YAML configuration or their respective environment variables.
+
 On a properly-annotated EKS pod the webhook injects `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, so the minimal configuration is:
 
 ```yaml
@@ -102,6 +114,14 @@ credentials:
     credentialLifetimeFactor: 0.8          # optional
 ```
 
+| Field | Description | Required? | Default | Env var fallback |
+|-------|-------------|-----------|---------|-----------------|
+| `credentialsFullUri` | URL of the Pod Identity Agent credentials endpoint. Must use `http` or `https` scheme (validated at construction time). | No | — | `AWS_CONTAINER_CREDENTIALS_FULL_URI` |
+| `authorizationTokenFile` | Path to the projected service-account token file used as the `Authorization` header when calling the agent. Read fresh on every credential refresh. | No | — | `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` |
+| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
+
+The provider **fails fast** at construction time with a `KmsException` if `credentialsFullUri` and `authorizationTokenFile` cannot be resolved from either YAML configuration or their respective environment variables.
+
 On a properly-associated EKS pod the agent injects `AWS_CONTAINER_CREDENTIALS_FULL_URI` and `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, so the minimal configuration is:
 
 ```yaml
@@ -129,16 +149,13 @@ Subclasses implement:
 
 ### Environment variable defaults
 
-| Provider | Config field | Env var fallback |
-|----------|-------------|-----------------|
-| IRSA | `roleArn` | `AWS_ROLE_ARN` |
-| IRSA | `webIdentityTokenFile` | `AWS_WEB_IDENTITY_TOKEN_FILE` |
-| IRSA | `roleSessionName` | `AWS_ROLE_SESSION_NAME` |
-| IRSA | `stsRegion` | `AWS_REGION` |
-| Pod Identity | `credentialsFullUri` | `AWS_CONTAINER_CREDENTIALS_FULL_URI` |
-| Pod Identity | `authorizationTokenFile` | `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` |
+Several configuration fields fall back to standard AWS environment variables when not set in YAML.  The Kroxylicious proxy generally prefers explicit YAML configuration where all settings are visible in a single file.  However, environment variable defaults are justified here for the following reasons:
 
-The env-var lookup uses a `Function<String, String>` seam in the provider constructor so tests can inject a fake environment.
+1. **Platform-injected values** — the EKS IRSA webhook and the Pod Identity agent webhook automatically inject these environment variables into every pod that uses an annotated service account.  The file paths and URIs they inject are not published at well-known stable addresses (unlike the EC2 metadata endpoint at `169.254.169.254`), so the environment is the canonical way the platform communicates them.
+2. **Separation of concerns** — requiring these values to be duplicated in the Kroxylicious YAML leaks AWS infrastructure configuration (IAM role ARNs, projected token paths) into Kubernetes manifests.  This breaks the clean separation between infrastructure-level setup (IAM roles, EKS webhook annotations, pod-identity associations — managed by platform admins) and application-level configuration (the Kroxylicious YAML — managed by application teams).
+3. **AWS SDK convention** — the [AWS SDK](https://docs.aws.amazon.com/sdkref/latest/guide/feature-container-credentials.html) itself discovers these values from the environment rather than expecting application-level configuration, so using env-var defaults follows the established AWS convention that EKS users are already familiar with.
+
+All env-var-backed fields can still be overridden explicitly in YAML when the operator wants full control.
 
 ## Affected/not affected projects
 
