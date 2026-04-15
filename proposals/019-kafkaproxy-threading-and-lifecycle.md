@@ -22,7 +22,7 @@ The proxy's lifecycle is simple by design: start once, run, stop once. The threa
 Formalising the contract provides:
 
 - **Correctness**: the only genuinely invalid sequence (start-after-stop) is detected and rejected. All other repeated or concurrent calls are idempotent.
-- **Guidance for implementors**: components within the proxy can choose appropriate synchronisation strategies based on documented guarantees rather than assumptions.
+- **Guidance for Kroxylicious developers**: components within the proxy can choose appropriate synchronisation strategies based on documented guarantees rather than assumptions.
 - **A foundation for [016](./016-virtual-cluster-lifecycle.md)**: the virtual cluster lifecycle sits inside the proxy lifecycle. Defining the outer contract first avoids circular reasoning.
 
 ## Proposal
@@ -43,7 +43,7 @@ NEW  ──>  STARTING  ──>  STARTED  ──>  STOPPING  ──>  STOPPED
 - **STOPPING**: `shutdown()` is in progress. The caller may join the future returned by `startup()` to wait for completion.
 - **STOPPED**: terminal. All resources released.
 
-If `startup()` fails partway through, the proxy transitions directly to `STOPPED` — partially-acquired resources are released before the exception propagates. There is no `FAILED` state at the proxy level; a failed startup is simply a proxy that went straight to `STOPPED`. This is intentional for two reasons: the proxy is not reconfigurable, so there is no recovery transition from a hypothetical `FAILED` state (unlike virtual clusters, which support `failed` -> `initializing` for retry with corrected configuration); and the failure is communicated directly to the caller via the exception from `startup()`, so there is no need to hold the error in state for later inspection.
+If `startup()` fails partway through, the proxy transitions directly to `STOPPED` — partially-acquired resources are released before returning a failed future. There is no `FAILED` state at the proxy level; a failed startup is simply a proxy that went straight to `STOPPED`. This is intentional for two reasons: the proxy is not reconfigurable, so there is no recovery transition from a hypothetical `FAILED` state (unlike virtual clusters, which support `failed` -> `initializing` for retry with corrected configuration); and the failure is communicated directly to the caller via the exception from `startup()`, so there is no need to hold the error in state for later inspection.
 
 The lifecycle is **not restartable**. Once a proxy reaches `STOPPED`, it cannot return to any earlier state. To restart, create a new `KafkaProxy` instance. This holds across all deployment models: standalone and Kubernetes today, and sidecar or embedded library if those models are supported in the future.
 
