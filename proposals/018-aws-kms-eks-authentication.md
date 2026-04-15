@@ -68,8 +68,7 @@ credentials:
     roleArn: arn:aws:iam::123456789012:role/KroxyliciousIRSA
     webIdentityTokenFile: /var/run/secrets/eks.amazonaws.com/serviceaccount/token
     roleSessionName: my-session            # optional
-    stsEndpointUrl: https://sts.us-east-1.amazonaws.com  # optional, derived from region
-    stsRegion: us-east-1                   # optional, falls back to Config.region
+    stsEndpointUrl: https://sts.us-east-1.amazonaws.com  # optional, derived from Config.region
     durationSeconds: 3600                  # optional
     credentialLifetimeFactor: 0.8          # optional
 ```
@@ -79,8 +78,7 @@ credentials:
 | `roleArn` | ARN of the IAM role to assume via STS. | No | — | `AWS_ROLE_ARN` |
 | `webIdentityTokenFile` | Path to the projected service-account OIDC token file. Read fresh on every credential refresh (kubelet rotates it roughly hourly). | No | — | `AWS_WEB_IDENTITY_TOKEN_FILE` |
 | `roleSessionName` | Identifier for the assumed-role session, visible in AWS CloudTrail. Must match `[\w+=,.@-]{2,64}`. | No | `kroxylicious-<uuid>` (generated at construction time) | `AWS_ROLE_SESSION_NAME` |
-| `stsEndpointUrl` | STS endpoint URL for the `AssumeRoleWithWebIdentity` call. Override for non-standard partitions (GovCloud, China). | No | `https://sts.<stsRegion>.amazonaws.com` | — |
-| `stsRegion` | AWS region used to derive the STS endpoint URL. | No | Value of `Config.region` | `AWS_REGION` |
+| `stsEndpointUrl` | STS endpoint URL for the `AssumeRoleWithWebIdentity` call. Override for non-standard partitions where the endpoint pattern differs (e.g. China: `sts.<region>.amazonaws.com.cn`, ISO: `sts.<region>.c2s.ic.gov`). | No | `https://sts.<Config.region>.amazonaws.com` | — |
 | `durationSeconds` | Requested duration of the assumed-role session, in seconds. Valid range: [900, 43200](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html). When absent the field is omitted from the STS request and STS applies the role's configured maximum session duration. | No | Omitted (STS default) | — |
 | `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
 
