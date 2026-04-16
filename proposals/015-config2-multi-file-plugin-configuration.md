@@ -145,6 +145,8 @@ public SharedEncryptionContext<K, E> initialize(
 
 This maintains full backwards compatibility: existing single-file configurations continue to work via the legacy path.
 
+Note: we deliberately do not change the plugin interface APIs (e.g. `FilterFactory`) to pass the `version` string as an argument to `initialize()`. We could do that, and then the implementation could switch on the version string instead of the config type. However, dispatching via `instanceof` on the config type is more natural in Java and gives the compiler visibility into the dispatch — the version string would be an opaque `String` offering no compile-time checking.
+
 ### One file per plugin instance
 
 The new configuration comprises a `proxy.yaml` and a `plugins.d/` directory:
@@ -229,8 +231,20 @@ Plugin developers can ship a JSON Schema for each config version at:
 META-INF/kroxylicious/schemas/{PluginSimpleName}/{version}.schema.yaml
 ```
 
-When a schema is present, the runtime will validate the raw configuration against it before deserialisation. 
-This is opt-in: if no schema exists, the config is accepted without validation.
+#### Schema dialect
+
+Plugin schemas must conform to the JSON Schema subset supported by Kubernetes Custom Resource Definitions (OpenAPI v3.0 structural schemas, derived from JSON Schema draft-04). This choice simplifies the ecosystem:
+
+1. Contributors and users learn one schema dialect rather than two.
+2. Plugin schemas can be directly embedded in Kubernetes CRDs with minimal transformation, allowing validation as early as possible.
+3. It opens the door to using Kubernetes itself as a control plane for proxy configuration.
+4. The expressiveness trade-off is minor for configuration validation.
+
+The runtime will validate (or reserve the right to validate) that plugin-provided schemas conform to this subset. If a schema uses unsupported features the runtime will reject it at load time.
+
+#### Schema requirement for versioned plugins
+
+For versioned plugin configurations (`configVersion` is non-empty), a JSON schema is **required**. The plugin may provide a trivial schema that accepts any JSON object if it does not wish to constrain the configuration further. For legacy (unversioned) configurations, schema validation remains opt-in.
 
 A test utility `SchemaValidationAssert` is provided in `kroxylicious-filter-test-support` so plugin authors can verify their schemas accept valid configs.
 
@@ -332,6 +346,8 @@ Because the config versioning mechanism (`@Plugin(configVersion = "v1", configTy
 allows both old and new config types to coexist, the `HasPluginReferences` pattern is adopted
 incrementally, version by version.
 
+The runtime validates that versioned config types (`configVersion` is non-empty) implement `HasPluginReferences`. This ensures plugin developers adopting the new API declare their dependencies, and enables a future tightening of the `@Plugin` annotation to `Class<? extends HasPluginReferences> configType()` when legacy support is eventually removed.
+
 ### Dependency graph and referential integrity
 
 The runtime builds a dependency graph from `HasPluginReferences` declarations. Versioned config
@@ -340,6 +356,8 @@ validates the graph using DFS-based topological sort, detecting:
 
 - **Dangling references**: a plugin references an instance that does not exist.
 - **Cycles**: A depends on B depends on A.
+
+It is not an error for a plugin instance to be declared but not reachable from the proxy configuration. Such instances are simply unused and will not be initialised. This mirrors Kubernetes, where a ConfigMap can exist without being mounted by any Pod.
 
 The topological order determines initialisation sequence: dependencies are initialised before
 their dependents.
@@ -359,28 +377,51 @@ Plugins can depend on other plugins that the runtime has never heard of (e.g. `R
 Plugin developers can apply a new `@Stateless` annotation to their plugin implementation.
 This signals to the runtime that an instance may be shared across multiple consumers. 
 
-The decision about whether to actually do that belongs to the end user who controls the configuration used to refer to a plugin instance.
-The plugin instance YAML can set `shared: true` to enable this. 
+The decision about whether to actually share an instance belongs to the end user who controls the configuration.
+The plugin instance YAML can set `shared: true` to enable sharing:
+
+```yaml
+# plugins.d/io.kroxylicious.kms.service.KmsService/vault-kms.yaml
+name: vault-kms
+type: io.kroxylicious.kms.service.vault.VaultKmsService
+version: v1
+shared: true
+config:
+  vaultTransitEngineUrl: https://vault:8200/v1/transit
+```
+
+When `shared: true`, the runtime creates a single instance of the plugin during startup (in dependency order, alongside other non-filter plugins). All consumers that reference this plugin instance by name receive the same object. The instance's lifecycle is tied to the proxy process — it is created once and destroyed at shutdown.
+
+When `shared: false` (the default), each consumer receives its own instance, created when that consumer is initialised.
 
 The framework will reject `shared: true` on plugins not annotated `@Stateless`.
 
 ### Resolved plugin registry
 
-A `ResolvedPluginRegistry` is built during plugin resolution.
-It instantiates non-filter plugin instances (KMS services, authorisers, etc.) eagerly, in
+`ResolvedPluginRegistry` is a new **public API** type in `kroxylicious-api`. It is built during plugin resolution and made available to plugins via their context objects.
+
+The registry instantiates non-filter plugin instances (KMS services, authorisers, etc.) eagerly, in
 dependency order, at startup. These are shared services whose lifecycle is tied to the proxy
 process.
 
 Filter instances are different: the proxy creates a new filter chain for each client connection,
 so filter instances cannot be pre-created at startup. Instead, filter factories obtain their
-dependencies from the registry when the runtime invokes them:
+dependencies from the registry during `FilterFactory.initialize()`:
 
 ```java
-ResolvedPluginRegistry registry = context.resolvedPluginRegistry()
-        .orElseThrow(() -> new PluginConfigurationException(
-                "v1 config requires a ResolvedPluginRegistry"));
-KmsService kmsPlugin = registry.pluginInstance(KmsService.class, v1.kms());
-Object kmsConfig = registry.pluginConfig(KmsService.class.getName(), v1.kms());
+public SharedEncryptionContext<K, E> initialize(
+        FilterFactoryContext context, Object config) {
+    var v1 = Plugins.requireConfig(this, config);
+    if (v1 instanceof RecordEncryptionConfigV1 cfg) {
+        ResolvedPluginRegistry registry = context.resolvedPluginRegistry()
+                .orElseThrow(() -> new PluginConfigurationException(
+                        "v1 config requires a ResolvedPluginRegistry"));
+        KmsService kmsPlugin = registry.pluginInstance(KmsService.class, cfg.kms());
+        Object kmsConfig = registry.pluginConfig(KmsService.class.getName(), cfg.kms());
+        return initializeV1(context, cfg, kmsPlugin, kmsConfig);
+    }
+    // ... legacy path
+}
 ```
 
 ### Snapshot abstraction
@@ -473,8 +514,8 @@ public record PluginInstanceMetadata(
 
 #### Change detection: generation numbers
 
-Each resource in the `Snapshot` carries a **generation number** — a monotonically increasing
-value that changes when the resource content changes. Comparing generation numbers rather than
+Each plugin instance in the `Snapshot` carries a **generation number** — a monotonically increasing
+value that changes when the plugin instance's content changes. Comparing generation numbers rather than
 data bytes avoids:
 
 - Non-determinism from keystore salting (two logically equivalent stores can have different bytes).
@@ -484,19 +525,46 @@ data bytes avoids:
 For the operator, generation maps to Kubernetes `metadata.generation` / `resourceVersion`.
 For filesystem deployments, it is derived from file modification time.
 
+#### Integration with dynamic reloading
+
+Generation numbers are designed to support the dynamic reloading mechanism described in [Proposal 012](https://github.com/kroxylicious/design/pull/83). That proposal defines an `applyConfiguration()` pipeline with `ChangeDetector` implementations that determine which virtual clusters need restarting. With config2, change detection works as follows:
+
+1. **Identify changed plugin instances.** When a new `Snapshot` arrives, compare each plugin instance's generation number against the currently active `Snapshot`. Changed generations identify which plugin instances have been modified, added, or removed.
+
+2. **Propagate changes through the dependency graph.** Walk the dependency graph (built from `HasPluginReferences`) to find all transitively affected plugin instances. For example, if a `KmsService` instance's generation changed, all `FilterFactory` instances that depend on it (directly or transitively) are also affected and must be re-initialised.
+
+3. **Map affected filters to virtual clusters.** The affected filter instances are mapped to the virtual clusters whose filter chains reference them. Only those virtual clusters need to be restarted — unaffected clusters continue serving traffic.
+
+4. **Detect proxy-level changes.** Changes to `proxy.yaml` itself (virtual cluster definitions, gateways, default filter lists) feed into the `VirtualClusterChangeDetector` from Proposal 012.
+
+This approach also addresses part of the "plugin resource tracking" gap identified in Proposal 012. That proposal notes that the runtime cannot detect changes to external resources (keystores, ACL rule files) that plugins read during initialisation. The `Snapshot` abstraction makes the runtime aware of all plugin data — including binary sidecar files — so generation changes on those files are visible to the change detection pipeline without requiring plugins to opt in to resource tracking.
+
 
 ### Non-YAML resources
 
-For the `Snapshot` to fully encapsulate a proxy's configuration state, it must include these resources alongside YAML-based plugin configs.
+Not all plugin instance data is YAML. For the `Snapshot` to fully encapsulate a proxy's configuration state, it must support non-YAML data alongside YAML-based plugin configs. For example:
 
-Not all plugin instance data is YAML. 
 * The existing AclAuthorizer uses a non-YAML text format for its ACL rules.
 * Plugins commonly accept `Tls` objects for specifying secret data via Java KeyStores. 
 
 It is possible to provide plugin data in any format.
 However, this mainly exists to allow KeyStores to have first class support within the configuration system.
-For the filesystem Snapshot non-YAML data is provided in a separate file in the same directory as the YAML metadata file.
- 
+For the filesystem `Snapshot`, non-YAML data is provided in a separate sidecar file in the same directory as the YAML metadata file:
+
+```
+config-dir/
+  proxy.yaml
+  passwords.yaml
+  plugins.d/
+    io.kroxylicious.proxy.tls.KeyMaterialProvider/
+      my-keystore.yaml      # metadata: name, type, version
+      my-keystore.p12        # binary keystore bytes (any extension except .yaml)
+    io.kroxylicious.proxy.filter.FilterFactory/
+      encrypt.yaml           # metadata + YAML config (no sidecar needed)
+```
+
+For a plugin instance named `foo`, the metadata is always in `foo.yaml`. If a sidecar data file exists, it must be the only other file in the directory whose name without extension is `foo` (e.g. `foo.p12`, `foo.jks`, `foo.pem`). Any extension is permitted (except `.yaml` which is taken), which allows filesystem tools that depend on extensions to work naturally. The runtime validates that at most one sidecar file exists per plugin instance.
+
 #### Text-based resources: inline YAML
 
 For text-based resources like ACL rules, YAML multi-line syntax (`|`) is simplest. 
@@ -511,33 +579,34 @@ config:
     allow User with name = "alice" to READ Topic with name = "foo";
     otherwise deny;
 ```
- 
-#### Filesystem layout
 
-Binary resources use a sidecar `.data` file alongside the YAML metadata file:
-
-```
-config-dir/
-  proxy.yaml
-  passwords.yaml
-  plugins.d/
-    io.kroxylicious.proxy.tls.KeyMaterialProvider/
-      my-keystore.yaml      # metadata: name, type, version
-      my-keystore.data      # binary keystore bytes
-    io.kroxylicious.proxy.filter.FilterFactory/
-      encrypt.yaml           # metadata + YAML config
-```
+A limitation of inline text is that parsers (e.g. ANTLR) will report error line numbers relative to the start of the multi-line string, not the enclosing YAML file. This may complicate debugging for large rule sets.
 
 #### `@ResourceType` annotation
 
-For binary resource types, the plugin implementation declares its binary format via a `@ResourceType` annotation:
+For binary resource types, the plugin implementation declares its binary format via a `@ResourceType` annotation.
+`@ResourceType` is applied to the plugin implementation class, alongside `@Plugin`:
 
 ```java
+package io.kroxylicious.proxy.plugin;
+
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.TYPE)
 public @interface ResourceType {
     Class<? extends ResourceSerializer<?>> serializer();
     Class<? extends ResourceDeserializer<?>> deserializer();
+}
+```
+
+The serializer and deserializer interfaces are also in `io.kroxylicious.proxy.plugin`:
+
+```java
+public interface ResourceSerializer<T> {
+    byte[] serialize(T resource);
+}
+
+public interface ResourceDeserializer<T> {
+    T deserialize(byte[] data, @Nullable char[] password);
 }
 ```
 
@@ -579,8 +648,12 @@ configuration directory. This file maps resource names to their passwords:
 my-keystore: changeit
 ```
 
-Other `Snapshot` implementations may source passwords differently — for example, the operator
-could read them from Kubernetes Secrets, or from Vault. 
+The filesystem-based `passwords.yaml` approach is the simple case. It precludes different secret content coming from different trust zones, because someone must assemble a single file where all passwords are in the clear. The `Snapshot` abstraction is designed to support richer implementations:
+
+* A Kubernetes-based `Snapshot` implementation could read each resource's password from a distinct `Secret` resource, allowing different passwords to originate from different trust zones (e.g. one managed by the platform team, another by the application team).
+* A Vault-backed implementation could retrieve passwords from a secrets engine at read time, with per-resource Vault policies controlling access.
+
+The `resourcePassword()` method is agnostic to the password source. The filesystem implementation is a starting point; production deployments on Kubernetes are expected to use the operator's `Snapshot` implementation which integrates with the platform's secrets management.
 
 
 #### Store type auto-detection
@@ -589,6 +662,7 @@ The keystore format need not be user-specified.
 Common formats have distinctive magic bytes (JKS: `0xFEEDFEED`, PKCS12: ASN.1 `0x30`, PEM: `-----BEGIN`). 
 The deserialiser probes the bytes and selects the appropriate format. 
 PKCS12 is the default keystore type since Java 9; JKS is legacy.
+The `ResourceDeserializer` receives only the raw bytes and (optionally) a password. It does not receive the file extension; format detection is content-based.
 
 #### Alias selection
 
@@ -623,6 +697,40 @@ public interface TrustMaterialProvider {
 Consumers reference these by name in their versioned config, constructing `PluginReference`
 values in `pluginReferences()` — the same pattern used for all other cross-file references.
 
+For example, a Vault KMS plugin that needs TLS material for connecting to the Vault server:
+
+```yaml
+# plugins.d/io.kroxylicious.kms.service.KmsService/vault-prod.yaml
+configVersion: v1
+config:
+  vaultTransitEngineUrl: https://vault.example.com:8200/v1/transit
+  keyMaterial: vault-client-cert
+  trustMaterial: vault-ca
+```
+
+```java
+@Plugin(configType = VaultKmsConfigV1.class, configVersion = "v1")
+public class VaultKmsService implements KmsService<...> { ... }
+
+public record VaultKmsConfigV1(
+        URI vaultTransitEngineUrl,
+        @Nullable String keyMaterial,
+        @Nullable String trustMaterial
+) implements HasPluginReferences {
+    @Override
+    public Stream<PluginReference<?>> pluginReferences() {
+        return Stream.of(
+                PluginReference.optional(KeyMaterialProvider.class, keyMaterial),
+                PluginReference.optional(TrustMaterialProvider.class, trustMaterial)
+        );
+    }
+}
+```
+
+The `DependencyGraph` ensures that `vault-client-cert` and `vault-ca` plugin instances
+are initialised before `vault-prod`, so the `ResolvedPluginRegistry` can supply fully
+constructed `KeyMaterialProvider` and `TrustMaterialProvider` instances at `initialize()` time.
+
 ### Migration tool
 
 A `migrate-config` CLI subcommand converts legacy single-file configurations into the multi-file
@@ -642,6 +750,12 @@ The tool:
    config version.
 5. Writes `proxy.yaml` by passing through the raw YAML (stripping `filterDefinitions`, replacing
    `micrometer` with instance name references).
+
+**Open question:** whether the migration tool should be a subcommand of the proxy entrypoint or
+a separate binary. A subcommand is simpler to ship and discover. A separate binary keeps the
+proxy image lean and avoids a slippery slope of utility functionality accumulating in the proxy
+entrypoint. A Maven plugin or standalone JAR are also options. We welcome input on which approach
+the community prefers.
 
 
 ## Affected/not affected projects
