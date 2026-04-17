@@ -157,6 +157,6 @@ The `CredentialsProviderFactory` is simplified to dispatch solely from `config.c
 
 1. **Jackson polymorphic deserialization (`@JsonTypeInfo`)** — using a type discriminator inside `credentials` (e.g. `type: webIdentity`) would enforce single-provider semantics at the deserialization layer.  Rejected because it requires a discriminator property that differs from the key-per-provider style used elsewhere in Kroxylicious (Azure KMS `entraIdentity`, Fortanix `apiKeySession`) and makes the YAML less intuitive.
 
-2. **Break existing config without backward compat** — since the project is pre-1.0, breaking changes are nominally acceptable.  Rejected because existing users have working configurations and migration should be painless.  The cost of the backward-compat shim (a few lines in the compact constructor) is negligible compared to the user friction of a forced migration.
+2. **Break existing config without backward compat** — rejected because the project has a [deprecation policy](https://github.com/kroxylicious/kroxylicious/blob/main/DEV_GUIDE.md#deprecation-policy) that requires maintaining backward compatibility even pre-1.0.  The cost of the backward-compat shim (a few lines in the compact constructor) is negligible compared to the user friction of a forced migration.
 
 3. **Keep flat fields, just add more** — rejected because it scales poorly.  With four providers, the `Config` record would have four nullable credential fields interspersed with `endpointUrl`, `region`, and `tls`, making the YAML hard to read and the factory logic fragile.
