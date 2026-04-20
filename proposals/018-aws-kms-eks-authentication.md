@@ -32,7 +32,7 @@ Neither existing mechanism works for pods on **Amazon EKS**: long-term keys are 
 
 Amazon EKS is the primary deployment target for Kroxylicious on AWS.  AWS supports two pod-level authentication mechanisms:
 
-1. **IAM Roles for Service Accounts (IRSA)** — a projected OIDC token is exchanged for temporary credentials via STS `AssumeRoleWithWebIdentity`.  This requires an OIDC trust-policy on the IAM role and an annotated Kubernetes service account.
+1. **IAM Roles for Service Accounts (IRSA)** — a projected OIDC token is exchanged for temporary credentials via STS `AssumeRoleWithWebIdentity`.  This requires an OIDC trust-policy on the IAM role and an annotated Kubernetes service account.  The assumed role must have permissions to perform KMS operations on the KEKs (at minimum `kms:Encrypt`, `kms:Decrypt`, `kms:GenerateDataKey*`, `kms:DescribeKey`) as described in the alias-based policy setup.
 
 2. **EKS Pod Identity** — the AWS-recommended successor to IRSA.  An in-cluster Pod Identity Agent (link-local HTTP endpoint) exchanges a projected service-account token for temporary credentials.  No OIDC trust-policy boilerplate is required — the binding is established via an EKS pod-identity association.
 
@@ -54,7 +54,7 @@ This proposal also extracts the async credential refresh machinery from `Ec2Meta
    &WebIdentityToken=<url-encoded JWT>
    ```
    `AssumeRoleWithWebIdentity` is unsigned by design — the JWT is the credential.
-3. Request `Accept: application/json` so STS replies with JSON (no XML parser needed).
+3. Request `Accept: application/json` so STS replies with JSON (no XML parser needed).  This header is not documented in the STS API reference but is used by the AWS SDK v2 and works in practice.
 4. Parse `AssumeRoleWithWebIdentityResponse.AssumeRoleWithWebIdentityResult.Credentials` into a record implementing `Credentials`.
 5. On HTTP 4xx, surface the STS error code (`InvalidIdentityToken`, `AccessDenied`, `ExpiredTokenException`) in the exception message.
 
@@ -79,10 +79,10 @@ credentials:
 | `webIdentityTokenFile` | Path to the projected service-account OIDC token file. Read fresh on every credential refresh (kubelet rotates it roughly hourly). | No | — | `AWS_WEB_IDENTITY_TOKEN_FILE` |
 | `roleSessionName` | Identifier for the assumed-role session, visible in AWS CloudTrail. Must match `[\w+=,.@-]{2,64}`. | No | `kroxylicious-<uuid>` (generated at construction time) | `AWS_ROLE_SESSION_NAME` |
 | `stsEndpointUrl` | STS endpoint URL for the `AssumeRoleWithWebIdentity` call. Override for non-standard partitions where the endpoint pattern differs (e.g. China: `sts.<region>.amazonaws.com.cn`, ISO: `sts.<region>.c2s.ic.gov`). | No | `https://sts.<Config.region>.amazonaws.com` | — |
-| `durationSeconds` | Requested duration of the assumed-role session, in seconds. Valid range: [900, 43200](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html). When absent the field is omitted from the STS request and STS applies the role's configured maximum session duration. | No | Omitted (STS default) | — |
-| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
+| `durationSeconds` | Requested duration of the assumed-role session, in seconds. Valid range: [900, 43200](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html). The effective maximum is further capped by the IAM role's `MaxSessionDuration` setting (default 3600). Validated at construction time. When absent the field is omitted from the STS request and STS applies the role's configured maximum session duration. | No | Omitted (STS default) | — |
+| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. Must be in the range (0, 1). For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
 
-The provider **fails fast** at construction time with a `KmsException` if `roleArn` and `webIdentityTokenFile` cannot be resolved from either YAML configuration or their respective environment variables.
+The provider **fails fast** at construction time with a `KmsException` if `roleArn` and `webIdentityTokenFile` cannot be resolved from either YAML configuration or their respective environment variables.  `roleSessionName` is validated against the `[\w+=,.@-]{2,64}` regex and `durationSeconds` against [900, 43200] at construction time for immediate feedback.
 
 On a properly-annotated EKS pod the webhook injects `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, so the minimal configuration is:
 
@@ -116,7 +116,9 @@ credentials:
 |-------|-------------|-----------|---------|-----------------|
 | `credentialsFullUri` | URL of the Pod Identity Agent credentials endpoint. Must use `http` or `https` scheme (validated at construction time). | No | — | `AWS_CONTAINER_CREDENTIALS_FULL_URI` |
 | `authorizationTokenFile` | Path to the projected service-account token file used as the `Authorization` header when calling the agent. Read fresh on every credential refresh. | No | — | `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` |
-| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
+| `credentialLifetimeFactor` | Controls preemptive refresh: the credential is refreshed in the background once it reaches this fraction of its total lifetime. Must be in the range (0, 1). For example, 0.8 means the credential is refreshed at 80% of its lifetime. This behaviour is shared with the existing EC2 metadata provider via the `AbstractRefreshingCredentialsProvider` base class. | No | `0.8` | — |
+
+The Pod Identity Agent listens on a link-local address (`169.254.170.23`) assigned by AWS, reachable only from the same node.  Communication uses plain HTTP by design (same trust boundary as EC2 IMDS at `169.254.169.254`).  The projected service-account token authenticates each pod to the agent.
 
 The provider **fails fast** at construction time with a `KmsException` if `credentialsFullUri` and `authorizationTokenFile` cannot be resolved from either YAML configuration or their respective environment variables.
 
