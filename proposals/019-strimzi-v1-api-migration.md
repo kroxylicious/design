@@ -1,4 +1,4 @@
-# Proposal xxx -Migrate Kroxylicious Operator to Strimzi v1 API
+# Proposal 019 -Migrate Kroxylicious Operator to Strimzi v1 API
 
 Migrate the Kroxylicious Operator to use the Strimzi Kafka CR `v1` API, dropping support for `v1beta2`.
 
