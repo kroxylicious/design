@@ -93,7 +93,7 @@ When `applyConfiguration()` is called, the proxy compares the new configuration 
 - **`VirtualClusterChangeDetector`** — identifies clusters that were added, removed, or modified by comparing `VirtualClusterModel` instances via `equals()`. A cluster requires a restart if any property that contributes to `VirtualClusterModel.equals()` changed (bootstrap address, TLS settings, gateway configuration, etc.).
 - **`FilterChangeDetector`** — identifies clusters affected by filter configuration changes. A cluster requires a restart if a `NamedFilterDefinition` it references changed (type or configuration, compared via `equals()`), or if the `defaultFilters` list changed (order matters, since filter chain execution is sequential) and the cluster relies on default filters.
 
-Detectors return a `ChangeResult(clustersToRemove, clustersToAdd, clustersToModify)`. Results from all detectors are aggregated via `LinkedHashSet` to maintain order while deduplicating cluster names that appear in multiple detector results.
+Detectors return a `ChangeResult(clustersToRemove, clustersToAdd, clustersToModify)`. Results from all detectors are aggregated and then passed onto `VirtualClusterManager` to perform relevant operations.
 
 Clusters where none of these changed are left untouched — they continue serving traffic throughout the apply operation.
 
@@ -101,9 +101,9 @@ Clusters where none of these changed are left untouched — they continue servin
 
 A modified virtual cluster is restarted by driving it through the lifecycle states defined in Proposal 016. Proposal 016 defines the per-VC state machine (`VirtualClusterLifecycleState`) and the `VirtualClusterLifecycleManager` that enforces valid transitions. This proposal adds the reload operations that drive those transitions.
 
-The three reload operations map to lifecycle transitions as follows:
+The three change operations map to lifecycle transitions as follows:
 
-**Restart (modify):** `SERVING → DRAINING → [drain connections] → [deregister gateways] → INITIALIZING → [register gateways] → SERVING`
+**Modify (Restart VC):** `SERVING → DRAINING → [drain connections] → [deregister gateways] → INITIALIZING → [register gateways] → SERVING`
 
 A modified cluster is torn down and rebuilt with the new configuration. During restart, the lifecycle state cycles through Draining and back to Initializing without ever reaching the terminal Stopped state. This means the `onVirtualClusterTerminalFailure` callback does not fire during restart — reload is an internal VCM operation that stays within the lifecycle state machine.
 
