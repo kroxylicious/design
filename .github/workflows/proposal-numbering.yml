@@ -1,0 +1,171 @@
+#
+# Copyright Kroxylicious Authors.
+#
+# Licensed under the Apache Software License version 2.0, available at http://www.apache.org/licenses/LICENSE-2.0
+#
+
+# Automatically checks that proposal files follow the PR-number naming convention (e.g., proposals/092-my-proposal.md for PR #92).
+# When a proposal file doesn't match its PR number, this workflow updates the PR description with instructions to rename it.
+# Once the author fixes the naming, the warning is automatically removed from the PR description.
+
+name: Check Proposal Numbering
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'proposals/*.md'
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-numbering:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check proposal file numbering
+        id: check
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Find all .md files directly in proposals directory (not subdirectories)
+          ALL_PROPOSAL_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '^proposals/[^/]*\.md$' || true)
+
+          # Filter out non-proposal files (README.md and template)
+          PROPOSAL_FILES=""
+          for file in $ALL_PROPOSAL_FILES; do
+            # Skip README.md and the template
+            if [[ "$file" == "proposals/README.md" ]] || [[ "$file" == "proposals/000-template.md" ]]; then
+              continue
+            fi
+            PROPOSAL_FILES="$PROPOSAL_FILES $file"
+          done
+
+          if [ -z "$PROPOSAL_FILES" ]; then
+            echo "No proposal files found in this PR"
+            echo "has_proposal=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "has_proposal=true" >> $GITHUB_OUTPUT
+
+          # Expected filename pattern: proposals/0{PR_NUMBER}-*.md
+          EXPECTED_PREFIX=$(printf "proposals/%03d-" $PR_NUMBER)
+
+          INCORRECT_FILES=""
+          for file in $PROPOSAL_FILES; do
+            if [[ ! "$file" =~ ^${EXPECTED_PREFIX} ]]; then
+              if [ -z "$INCORRECT_FILES" ]; then
+                INCORRECT_FILES="$file"
+              else
+                INCORRECT_FILES="$INCORRECT_FILES,$file"
+              fi
+            fi
+          done
+
+          if [ -n "$INCORRECT_FILES" ]; then
+            echo "incorrect=true" >> $GITHUB_OUTPUT
+            echo "files=$INCORRECT_FILES" >> $GITHUB_OUTPUT
+            echo "expected_prefix=$EXPECTED_PREFIX" >> $GITHUB_OUTPUT
+          else
+            echo "incorrect=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update PR description if numbering is incorrect
+        if: steps.check.outputs.incorrect == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const expectedPrefix = '${{ steps.check.outputs.expected_prefix }}';
+            const incorrectFilesRaw = '${{ steps.check.outputs.files }}';
+
+            // Format files as markdown list
+            const filesList = incorrectFilesRaw.split(',').map(f => `- <code>${f}</code>`).join('\n');
+
+            const warningSection = [
+              '---',
+              '',
+              '## ⚠️ Proposal File Numbering',
+              '',
+              'This PR contains proposal files that don\'t follow the expected numbering scheme:',
+              '',
+              filesList,
+              '',
+              `**Expected naming:** <code>${expectedPrefix}&lt;descriptive-name&gt;.md</code>`,
+              '',
+              `Please rename your proposal file to use PR #${prNumber}:`,
+              '',
+              '```bash',
+              `git mv proposals/000-<name>.md ${expectedPrefix}<name>.md`,
+              '# or rename from current name to correct name',
+              `git commit -m "Rename proposal to use PR number ${prNumber}"`,
+              'git push',
+              '```',
+              '',
+              'See [proposals/README.md](https://github.com/kroxylicious/design/blob/main/proposals/README.md) for the complete workflow.',
+              '',
+              '<!-- proposal-numbering-check -->'
+            ].join('\n');
+
+            // Get current PR
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            let currentBody = pr.body || '';
+
+            // Remove existing warning section if present
+            const markerRegex = /---\s*\n\s*##\s*⚠️\s*Proposal File Numbering[\s\S]*?<!-- proposal-numbering-check -->/;
+            currentBody = currentBody.replace(markerRegex, '').trim();
+
+            // Append new warning section
+            const newBody = currentBody + '\n' + warningSection;
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              body: newBody
+            });
+
+      - name: Remove warning from PR description if numbering is correct
+        if: steps.check.outputs.has_proposal == 'true' && steps.check.outputs.incorrect == 'false'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const prNumber = context.payload.pull_request.number;
+
+            // Get current PR
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            let currentBody = pr.body || '';
+
+            // Check if warning section exists
+            const markerRegex = /---\s*\n\s*##\s*⚠️\s*Proposal File Numbering[\s\S]*?<!-- proposal-numbering-check -->/;
+
+            if (markerRegex.test(currentBody)) {
+              // Remove warning section
+              const newBody = currentBody.replace(markerRegex, '').trim();
+
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                body: newBody
+              });
+
+              console.log('Removed numbering warning from PR description - file is now correctly named');
+            }
