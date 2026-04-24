@@ -41,6 +41,10 @@ PROXY protocol v2 solves this. Load balancers that terminate TLS can forward the
 
 A PPv2 authority-based routing strategy would give Kroxylicious the same single-port, hostname-based routing capability as `sniIdentifiesNode`, but without requiring Kroxylicious to terminate TLS.
 
+### Trust boundary
+
+When TLS is terminated at the load balancer and plaintext is used between the load balancer and Kroxylicious, the network segment carrying that plaintext traffic — and the PPv2 header on which routing decisions depend — is assumed to be trusted. An attacker with access to that segment can observe Kafka traffic in the clear and can forge or alter PPv2 headers (including `PP2_TYPE_AUTHORITY`) to influence routing. Operators choosing this deployment model are responsible for ensuring the load-balancer-to-proxy path runs within a trusted network (e.g. a private VPC subnet, a service mesh with its own mTLS, or equivalent controls). This assumption should also be called out clearly in the user-facing documentation for the new strategy.
+
 ## Proposal
 
 ### New routing strategy: `proxyProtocolAuthorityIdentifiesNode`
@@ -55,11 +59,24 @@ virtualClusters:
     gateways:
       - name: via-nlb
         proxyProtocolAuthorityIdentifiesNode:
-          bootstrapAddress: 0.0.0.0:9192
-          advertisedBrokerAddressPattern: broker-$(nodeId).kafka.example.com
+          bindAddress: 0.0.0.0:9192
+          bootstrapHostname: bootstrap.kafka.example.com
+          advertisedBrokerAddressPattern: broker-$(nodeId).kafka.example.com:443
+    proxyProtocol:
+      mode: required
 ```
 
+Configuration fields:
+
+- **`bindAddress`**: the socket address Kroxylicious listens on (the one the load balancer forwards plaintext traffic to). This is the equivalent of the existing `bootstrapAddress` field on other strategies but is renamed here to avoid conflating the listening socket with the Kafka bootstrap hostname the client connects to — for this strategy the two are distinct (the client connects to the load balancer, not directly to the proxy socket).
+- **`bootstrapHostname`**: the authority value the load balancer will forward when the client connects to the bootstrap address (e.g. `bootstrap.kafka.example.com`). Kroxylicious uses this to identify which gateway an incoming connection belongs to when the authority is not a broker-specific hostname. An optional `:port` suffix may be included when the advertised client-facing port differs from the load balancer's listening port.
+- **`advertisedBrokerAddressPattern`**: the hostname pattern advertised to clients in rewritten Metadata responses. Like `sniIdentifiesNode`, the pattern accepts an optional `:port` suffix (e.g. `broker-$(nodeId).kafka.example.com:443`) so the proxy can advertise the load-balancer-facing port even when its own `bindAddress` uses a different port.
+
 Like `sniIdentifiesNode`, this strategy does not require `nodeIdRanges` — the node identity is derived dynamically from the authority hostname by matching it against the `advertisedBrokerAddressPattern`. The proxy discovers the set of upstream brokers from the target cluster's metadata, not from a pre-declared range.
+
+### Sharing a bind address across gateways
+
+As with `sniIdentifiesNode`, multiple `proxyProtocolAuthorityIdentifiesNode` gateways may share the same `bindAddress`. When a connection arrives, the correct gateway is selected by matching the `PP2_TYPE_AUTHORITY` value against each gateway's `bootstrapHostname` and `advertisedBrokerAddressPattern`. This allows a single load-balancer-facing port to front multiple virtual clusters.
 
 ### Architecture
 
@@ -94,10 +111,11 @@ The routing logic mirrors `sniIdentifiesNode` but reads the hostname from the PP
 
 1. A new connection arrives with a PROXY protocol v2 header.
 2. Kroxylicious extracts the `PP2_TYPE_AUTHORITY` TLV value (a UTF-8 hostname string).
-3. The authority hostname is matched against the `advertisedBrokerAddressPattern` to determine the target node ID.
-4. The connection is routed to the corresponding upstream broker.
+3. If the authority matches the gateway's `bootstrapHostname`, the connection is handled as a bootstrap connection (Metadata responses are rewritten as described below).
+4. Otherwise, the authority hostname is matched against the `advertisedBrokerAddressPattern` to determine the target node ID.
+5. The connection is routed to the corresponding upstream broker.
 
-If the PPv2 header is missing or does not contain a `PP2_TYPE_AUTHORITY` TLV, the connection is rejected. This strategy implicitly requires `proxyProtocol.mode: required`.
+If the PPv2 header is missing or does not contain a `PP2_TYPE_AUTHORITY` TLV, the connection is rejected. This strategy requires `proxyProtocol.mode: required` — see Validation.
 
 ### Metadata response rewriting
 
@@ -107,16 +125,17 @@ Like `sniIdentifiesNode`, the proxy rewrites Metadata responses so that each bro
 
 This strategy builds on the existing PROXY protocol support. When `proxyProtocolAuthorityIdentifiesNode` is configured:
 
-- `proxyProtocol.mode` is implicitly `required` for gateways using this strategy.
+- `proxyProtocol.mode` must be explicitly set to `required` on the virtual cluster. The dependency on PPv2 is fundamental to this strategy, and forcing the user to state it in the configuration makes that dependency obvious to anyone reading the YAML. A missing or non-`required` value is a configuration error rather than something the proxy silently coerces.
 - The existing `HaProxyContext` TLV capture is extended to make the authority value available to the routing layer.
 
 ### Validation
 
 The following conditions should be validated at configuration time:
 
-- `proxyProtocol.mode` must not be `disabled` (or it is set to `required` implicitly).
-- `advertisedBrokerAddressPattern` must be defined.
-- The pattern must be derivable to a hostname that allows extracting a node ID (similar to `sniIdentifiesNode`).
+- `proxyProtocol.mode` must be present and set to `required`. Any other value (including `allowed`, `disabled`, or an omitted field) is rejected with a clear error. The proxy does not implicitly enable or coerce the mode.
+- `bindAddress` must be defined.
+- `bootstrapHostname` must be defined and must not collide with hostnames produced by `advertisedBrokerAddressPattern`.
+- `advertisedBrokerAddressPattern` must be defined and must contain the `$(nodeId)` placeholder so the pattern can be inverted to extract a node ID (same requirement as `sniIdentifiesNode`).
 
 ### Proof of concept
 
@@ -140,7 +159,7 @@ The test setup (HAProxy + docker-compose + cert generation) is available in `dev
 | Project | Affected | Notes |
 |---------|----------|-------|
 | kroxylicious-proxy | Yes | New routing strategy implementation, extends `HaProxyContext` to expose authority TLV to routing layer |
-| kroxylicious-operator | Yes | CRD update to support the new gateway type |
+| kroxylicious-operator | No | Intentionally out of scope for this proposal. Operator/CRD support for the new gateway type will be covered by a follow-up proposal so this design can focus on the proxy-level strategy without pulling in CRD design concerns. |
 | kroxylicious-junit5-extension | Possibly | Test infrastructure for integration testing with PPv2 authority |
 | kroxylicious-filter-api | No | No filter API changes needed |
 
