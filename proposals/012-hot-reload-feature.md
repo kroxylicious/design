@@ -18,7 +18,6 @@ Administrators need to be able to modify proxy configuration in place. Common sc
 
 - **Adding or removing virtual clusters** as tenants are onboarded or offboarded.
 - **Updating filter configuration** (e.g. updating a KMS endpoint, changing a key selection pattern, modifying ACL rules).
-- **Rotating TLS certificates or credentials** that filters reference.
 
 The proxy should apply these changes with minimal disruption: only the virtual clusters affected by the change should experience downtime. Unaffected clusters should continue serving traffic without interruption.
 
