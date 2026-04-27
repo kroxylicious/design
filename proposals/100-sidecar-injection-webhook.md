@@ -24,12 +24,19 @@ Manual sidecar construction is error-prone and creates a maintenance burden. A w
 
 ### Trust model
 
-The webhook operates under a strict two-party trust model:
+The webhook is design to eventually operate under a strict two-party trust model:
 
 - **Webhook administrator**: controls what gets injected — the proxy image, upstream Kafka address, filter definitions, security context. These are never overridable by the app owner.
 - **Application pod owner**: can opt out of injection, and may override specific settings (bootstrap port, node ID range, resource requests) if the admin explicitly delegates those annotations.
 
-The webhook always overwrites the `kroxylicious.io/proxy-config` annotation on the pod, regardless of any value the app owner may have set. Non-delegated annotations in the `kroxylicious.io/` namespace are silently ignored with a logged warning.
+Making the boundary between the webhook administrator and the application pod owner a _reliable_ trust boundary will require further development than is specified in this proposal.
+However pod annotations in the `kroxylicious.io/` namespace form the basic building blocks for a flexible but reliable trust boundary.
+* Some annotations are always set by the webhook.
+For example, the proxy obtains its configuration via a `kroxylicious.io/proxy-config` pod annotation which is projected into the sidecar container via a `downwardAPI` volume.
+The webhook always overwrites that annotation (`kroxylicious.io/proxy-config`) on the pod, regardless of any value the app owner may have set.
+* The administrator can delegate some annotations to be specifed by/overridden the application owner. When specified by the application owner they will not be overwritten by the webhook. Examples defined in this proposal are `kroxylicious.io/sidecar-resources-cpu` and `kroxylicious.io/sidecar-resources-memory` (see below).
+* Annotations which the administrator has **not** delegated will have their effect overridden by the webhook based on the Administrator-controlled  `KroxyliciousSidecarConfig` resource. A warning will be logged when such overriding is necessary.
+
 
 ### Injection decision
 
@@ -42,7 +49,17 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped.
 
-The webhook always returns `allowed: true`, even on internal errors. Errors are logged; the pod is admitted unmodified. This fail-open policy (`failurePolicy: Ignore`) ensures a broken webhook never blocks workloads.
+The failure policy of the webhook will be configurable.
+It will default to fail closed (`failurePolicy: Fail`), which is safe, but sacrifices availability of the Kubernetes control plane to admit workloads in cases where the webhook experiences internal errors.
+When configured to fail open and the webhook experiences an internal errors, it will log the error and return `allowed: true`; the pod will be admitted unmodified. 
+
+#### Bypass prevention
+
+The webhook sets `KAFKA_BOOTSTRAP_SERVERS` to point at the sidecar, but nothing prevents an application from connecting directly to the upstream Kafka cluster. Kubernetes `NetworkPolicy` cannot help here: it operates at the pod level, so a policy blocking egress to Kafka would also block the sidecar's upstream connection.
+
+The Istio model — an init container with `NET_ADMIN` that sets up iptables rules to redirect Kafka-port traffic to the sidecar, excluding the proxy process by UID — would enforce this, but requires granting `NET_ADMIN` to the init container, conflicting with the security posture of dropping all capabilities.
+
+In practice, bypassing the sidecar requires the application to deliberately hardcode the real Kafka address. An app owner determined to bypass can also opt out of injection entirely via pod labels. The enforcement boundary is RBAC on who can create pods in the namespace, not network controls within the pod. If the threat model requires enforcement against a hostile app owner, iptables redirection could be added as an opt-in capability in a future iteration.
 
 ### CRD: `KroxyliciousSidecarConfig`
 
@@ -60,11 +77,11 @@ metadata:
   name: my-config
 spec:
   upstreamBootstrapServers: kafka-prod.internal:9092
-  bootstrapPort: 19092             # default, configurable
+  bootstrapPort: 9092              # default, configurable
   nodeIdRange:
     startInclusive: 0
     endInclusive: 2
-  managementPort: 9190
+  managementPort: 9082             # default, configurable
   proxyImage: quay.io/kroxylicious/proxy:0.21.0   # optional override
   setBootstrapEnvVar: true         # sets KAFKA_BOOTSTRAP_SERVERS on app containers
   filterDefinitions:
@@ -81,8 +98,8 @@ spec:
         reference: registry.example.com/my-filter:v1.0@sha256:abc123
         pullPolicy: IfNotPresent
   delegatedAnnotations:
-    - kroxylicious.io/sidecar-bootstrap-port
-    - kroxylicious.io/sidecar-node-id-range
+    - kroxylicious.io/sidecar-resources-cpu
+    - kroxylicious.io/sidecar-resources-memory
 ```
 
 **Why a CRD, not a ConfigMap?** Schema validation by the API server, RBAC separation (admin creates, app owners can't modify), status conditions for observability, consistency with the existing Kroxylicious Kubernetes API.
@@ -101,11 +118,11 @@ A typical sidecar config is a few hundred bytes, well within the ~256KB practica
 
 | Port | Purpose | Bind address |
 |------|---------|-------------|
-| 19092 | Kafka bootstrap | `localhost` |
-| 19093+ | Per-broker ports (one per node ID) | `localhost` |
-| 9190 | Management (`/livez`, `/metrics`) | `0.0.0.0` |
+| 9092 | Kafka bootstrap | `localhost` |
+| 9093+ | Per-broker ports (one per node ID) | `localhost` |
+| 9082 | Management (`/livez`, `/metrics`) | `0.0.0.0` |
 
-Bootstrap defaults to 19092 rather than 9092 to avoid clashing with Kafka client libraries' default port. The webhook sets `KAFKA_BOOTSTRAP_SERVERS=localhost:19092` on application containers (configurable, can be disabled).
+The webhook sets `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` on application containers (configurable, can be disabled).
 
 The management endpoint binds to `0.0.0.0` because kubelet HTTP probes target the pod IP, not loopback. This means the application container can also reach `/livez` and `/metrics`, but neither endpoint exposes sensitive data.
 
@@ -131,17 +148,15 @@ When `spec.upstreamTls.trustAnchorSecretRef` is set, the webhook adds a volume m
 
 ### Delegated annotations
 
-The `delegatedAnnotations` field in `KroxyliciousSidecarConfig` lists which annotations the app owner may set to override sidecar parameters:
+The `delegatedAnnotations` field in `KroxyliciousSidecarConfig` lists which annotations the app owner may set to override sidecar parameters.
+Initially it will support:
 
 | Annotation | Effect |
 |-----------|--------|
-| `kroxylicious.io/sidecar-bootstrap-port` | Override bootstrap port |
-| `kroxylicious.io/sidecar-node-id-range` | Override node ID range (e.g. `"0-5"`) |
-| `kroxylicious.io/sidecar-resources-cpu` | Override CPU request/limit |
-| `kroxylicious.io/sidecar-resources-memory` | Override memory request/limit |
-| `kroxylicious.io/sidecar-plugin-images` | Additional plugin images (JSON array) |
+| `kroxylicious.io/sidecar-resources-cpu` | Override CPU request/limit of the sidecar container |
+| `kroxylicious.io/sidecar-resources-memory` | Override memory request/limit of the sidecar container |
 
-Delegation is opt-in per annotation. By default nothing is delegated. Upstream Kafka address, filter definitions, proxy image, and security context are never delegatable.
+Delegation is opt-in per annotation. By default nothing is delegated. 
 
 ### Configuration drift detection
 
@@ -197,6 +212,8 @@ volumeMounts:
 ```
 
 ServiceLoader discovers the plugin implementations from the combined classpath. Multiple plugin images can be mounted simultaneously, each at its own subdirectory.
+
+A known and accepted risk of supporting OCI image mounting while the proxy only uses a flat classpath for plugin loading is that the ordering of Jars on that classpath is poorly defined. The longer term solution for that is plugin classloader isolation, which is out of scope for this proposal.
 
 #### Plugin image convention
 
@@ -256,45 +273,6 @@ When the admin specifies plugin images in `KroxyliciousSidecarConfig.spec.plugin
 - **Supply chain**: a compromised plugin image contains malicious code with access to Kafka traffic and mounted credentials. Mitigate with image signing and digest-pinned references.
 - **Dependency conflicts**: as described above under flat classpath limitations.
 
-#### Security analysis: delegated plugin image selection
-
-If the admin delegates plugin image selection to app owners (via the `kroxylicious.io/sidecar-plugin-images` annotation), the risks escalate:
-
-| Risk | Severity | Description |
-|------|----------|-------------|
-| Arbitrary code on proxy classpath | Critical | App owner specifies an image containing malicious JARs. The proxy has access to upstream Kafka credentials, TLS certs, and all Kafka traffic. |
-| Registry credential leakage | High | OCI image volumes reuse the pod's `imagePullSecrets` and node-level credentials. An attacker-controlled registry receives pull requests carrying bearer tokens. |
-| Image tag mutation | High | A tag (not a digest) can be replaced with malicious content between pulls. |
-| Resource exhaustion | Medium | Large OCI images consume node disk. No per-volume size limits exist. |
-
-**Mitigations:**
-
-1. **Registry allow-list**: `allowedPluginRegistries` in `KroxyliciousSidecarConfig`. The webhook rejects delegated image references not matching an allowed prefix.
-2. **Require digest pinning**: delegated image references without `@sha256:` are rejected.
-3. **Audit logging**: all plugin image references are logged at INFO, with warnings for delegated images.
-
-Even with these mitigations, the fundamental trust grant is unchanged: a digest-pinned image from an allowed registry still runs arbitrary code in the proxy JVM. The mitigations reduce supply-chain risk but do not constrain what the code does once loaded. Delegating plugin image selection is equivalent to allowing the app owner to run arbitrary code with the proxy's identity.
-
-**Delegation is disabled by default.** When enabled, both `allowedPluginRegistries` and digest pinning are enforced.
-
-#### Future direction: PluginRegistry CRD
-
-A cleaner model for pre-approved plugins would be a cluster-scoped `PluginRegistry` CRD where the admin defines approved plugin images with namespace-level scoping:
-
-```yaml
-apiVersion: kroxylicious.io/v1alpha1
-kind: PluginRegistry
-metadata:
-  name: approved-filters
-spec:
-  plugins:
-    - name: record-encryption
-      image: quay.io/kroxylicious/record-encryption@sha256:abc123
-      allowedNamespaces: ["prod-*", "staging"]
-```
-
-This separates the "which plugins are trusted" question from the per-namespace sidecar config, avoids JSON-in-annotation, and makes the approval surface auditable via standard Kubernetes RBAC. It is a better long-term model than annotation-based delegation, but is out of scope for the initial implementation.
-
 ### Upstream cluster selection
 
 In many deployments the admin manages multiple Kafka clusters (e.g. production, staging) and the app owner needs to choose which one their pod connects to. Rather than creating a separate `KroxyliciousSidecarConfig` per cluster, the admin defines an allow-list of named upstream clusters:
@@ -329,53 +307,6 @@ The delegated annotations mechanism (bootstrap port, node ID range, resource req
 3. **Plugin image selection** — app owner chooses what code runs in the proxy JVM. High risk: arbitrary code execution (see security analysis above).
 
 All delegation beyond upstream cluster selection requires the admin to explicitly list the delegated annotations. Nothing is delegated by default.
-
-### Bypass prevention
-
-When the proxy is used as a policy enforcement point (e.g. record-level encryption, audit logging), applications that bypass the sidecar bypass the policy. This will be flagged in any compliance audit. The webhook needs to support configurations that make bypass difficult.
-
-#### Baseline: `KAFKA_BOOTSTRAP_SERVERS`
-
-The webhook sets `KAFKA_BOOTSTRAP_SERVERS=localhost:19092` on application containers. This is sufficient to prevent *accidental* bypass — the application connects to the sidecar by default. Bypassing requires deliberately hardcoding the upstream Kafka address.
-
-#### Defence-in-depth: NetworkPolicy + upstream authentication
-
-A stronger enforcement model combines two mechanisms:
-
-1. **NetworkPolicy restricting pod egress** — the admin creates a `NetworkPolicy` in the application namespace that limits egress to only the upstream Kafka cluster IPs/ports defined in `allowedUpstreamClusters`. This prevents the application from connecting to arbitrary external services. Because NetworkPolicy operates at the pod level, both the sidecar and the application container are subject to the same egress rules — but this is acceptable, because the sidecar only needs to reach the allowed clusters.
-
-2. **Upstream Kafka authentication** — the upstream Kafka cluster requires authentication (mTLS client certificates or SASL credentials). The sidecar holds the credentials; the application does not. Even if the application connects directly to the Kafka broker's address, the broker rejects the unauthenticated connection.
-
-Together these mean the application can only reach the allowed Kafka clusters (NetworkPolicy) and cannot authenticate to them without going through the sidecar.
-
-This model requires:
-
-- The upstream Kafka cluster enforces authentication (not optional/unauthenticated).
-- The CRD supports upstream client authentication configuration. The current `upstreamTls` field handles server certificate validation; client certificate or SASL credential references would need to be added.
-
-#### Credential isolation limits
-
-Mounting the credential Secret only into the sidecar container is not a hard security boundary. An app owner with standard namespace-level RBAC can extract the credentials through several paths:
-
-- **Secret read access**: app owners typically have `get` on Secrets in their namespace (needed for their own application secrets). They can `kubectl get secret <proxy-creds> -o yaml`.
-- **Container exec**: `kubectl exec -c kroxylicious-proxy` gives access to the mounted credential files.
-- **Predictable volume names**: if the app owner knows the volume name the webhook will create, they can add a `volumeMount` in their own container spec referencing it. The webhook adds the volume before API server validation, so this passes.
-
-Container filesystem isolation raises the bar but does not create a trust boundary against a determined app owner. The real enforcement boundary is RBAC.
-
-**Mitigations:**
-
-- **Restrict Secret access by name**: the webhook uses a consistent naming convention for credential Secrets (e.g. `kroxylicious-upstream-*`). The admin can write RBAC rules that grant the app owner `get` on Secrets *except* those matching this pattern. Kubernetes RBAC supports `resourceNames` on deny, though operationally this means enumerating allowed Secrets rather than denying specific ones.
-- **Restrict exec into the sidecar**: a `ValidatingAdmissionPolicy` can deny `pods/exec` subresource requests targeting the `kroxylicious-proxy` container.
-- **Short-lived credentials**: if the upstream Kafka cluster supports OAuth/OIDC token-based authentication, the sidecar can use a projected ServiceAccount token with a short lifetime. Extracting a token is still possible but the window of use is limited.
-
-None of these fully close the gap. Within a single pod, Kubernetes does not offer strong credential isolation between containers. This is a fundamental platform limitation, not specific to this design.
-
-For deployments where policy bypass is an audit-critical concern, the strongest posture is: NetworkPolicy restricting egress + upstream Kafka requiring authentication + RBAC preventing app owners from reading proxy credential Secrets or exec-ing into the sidecar container. This is operationally achievable but requires deliberate RBAC design by the cluster admin.
-
-#### Alternative: iptables redirection
-
-The Istio model — an init container with `NET_ADMIN` that sets up iptables rules to redirect Kafka-port traffic to the sidecar, excluding the proxy process by UID — would enforce bypass prevention at the network level without requiring credential isolation at all. However, it requires granting `NET_ADMIN` to the init container, conflicting with the security posture of dropping all capabilities.
 
 ### Webhook deployment
 
