@@ -2,7 +2,7 @@
 
 **Builds on:** [Proposal 016 — Virtual Cluster Lifecycle](https://github.com/kroxylicious/design/blob/main/proposals/016-virtual-cluster-lifecycle.md)
 
-This proposal introduces a mechanism for applying configuration changes to a running Kroxylicious proxy without a full restart. It defines a core `applyConfiguration(Configuration)` operation that accepts a complete configuration, detects what changed, and converges the running state to match — restarting only the affected virtual clusters while leaving unaffected clusters available.
+This proposal introduces a mechanism for applying configuration changes to a running Kroxylicious proxy without a full restart. It defines a core `KafkaProxy.applyConfiguration(Configuration)` operation that accepts a complete configuration, detects what changed, and converges the running state to match — restarting only the affected virtual clusters while leaving unaffected clusters available.
 
 This proposal extends the virtual cluster lifecycle model (Proposal 016) with reload operations, an edge-based failure policy, and a configuration change orchestration layer. Where Proposal 016 defines the per-VC state machine and the `VirtualClusterManager` that owns it, this proposal defines the change detection pipeline, the reload orchestration, and the two policy layers (terminal failure and configuration failure) that govern how the proxy responds to problems during reload.
 
@@ -25,19 +25,68 @@ This proposal also delivers the startup behaviour change that Proposal 016 made 
 
 ## Proposal
 
-### Core API: `applyConfiguration()`
+### Core API: `KafkaProxy.applyConfiguration()`
 
 The central operation is:
 
 ```java
-public CompletableFuture<ReloadResult> applyConfiguration(Configuration newConfig)
+class KafkaProxy {
+    // ... add the following method
+
+    /**
+     * Apply the given configuration to this running proxy, restarting only the
+     * virtual clusters whose effective configuration differs from the current
+     * running state. Unaffected clusters continue serving traffic throughout
+     * the apply.
+     *
+     * <h2>Validation contract</h2>
+     * <p>Static validation (schema conformance, required fields, field-value
+     * ranges, internal consistency) is the embedder's responsibility and is
+     * expected to have been performed on {@code newConfig} before this method
+     * is called.
+     *
+     * <p>Validation which depends on runtime state (like port conflicts) 
+     * will be done during applyConfiguration() and reported through the ReloadResult
+     *
+     * <h2>Error reporting</h2>
+     * <p>This method throws synchronously <em>only</em> for programmer errors:
+     * <ul>
+     *   <li>{@link NullPointerException} if {@code newConfig} is {@code null};</li>
+     *   <li>{@link IllegalStateException} if the proxy has not been started or
+     *       has been shut down.</li>
+     * </ul>
+     * <p>All other failures &mdash; validation failures (runtime exceptions), lifecycle transition
+     * failures during drain or re-init, partial reloads &mdash; surface via
+     * exceptional completion of the returned future.
+     *
+     * @param newConfig the desired end-state configuration; must be non-null
+     *                  and statically valid
+     * @return a future that completes with a {@link ReloadResult} listing which
+     *         clusters ended up unchanged, added, restarted, removed, or failed
+     * @throws NullPointerException  if {@code newConfig} is {@code null}
+     * @throws IllegalStateException if the proxy is not in the running state
+     */
+    public CompletableFuture<ReloadResult> applyConfiguration(Configuration newConfig);
+}
 ```
 
 The caller provides a complete `Configuration` object. The proxy compares it against the currently running configuration, determines what changed, and applies the changes. The method returns a `CompletableFuture<ReloadResult>` that completes with a structured result on success or exceptionally on failure.
 
-In this approach: the caller provides the desired end state, and the proxy is responsible for computing and executing the diff. This is the right starting point — it is simple to reason about and avoids the complexity of delta-based or partial-update APIs. More granular approaches (deltas, targeted snapshots) are worth exploring later, but the initial API should leave room for them without committing to them now.
+`ReloadResult` reports which clusters ended up in each terminal outcome of the apply:
 
-**Trigger mechanisms are explicitly out of scope for this proposal.** The `applyConfiguration()` operation is the internal interface that any trigger plugs into. How the new configuration arrives — whether via an HTTP endpoint, a file watcher detecting a changed ConfigMap, or a Kubernetes operator callback — is a separate concern. Deferring this keeps the proposal focused and avoids blocking on unresolved questions about trigger design (see [Trigger mechanisms](#trigger-mechanisms-future-work) below).
+```java
+public record ReloadResult(
+    Set<String> clustersUnchanged,
+    Set<String> clustersAdded,
+    Set<String> clustersRestarted,
+    Set<String> clustersRemoved,
+    Set<String> failedClusters
+) {}
+```
+
+In this approach: the caller provides the desired end state, and the proxy is responsible for computing and executing the diff. This is the right starting point — it is simple to reason about and avoids the complexity of delta-based or partial-update APIs. More granular approaches (deltas, targeted snapshots) may be worth exploring later, but the initial API should leave room for them without committing to them now.
+
+**Trigger mechanisms are explicitly out of scope for this proposal.** The `KafkaProxy.applyConfiguration()` operation is the internal interface that any trigger plugs into. How the new configuration arrives — whether via an HTTP endpoint, a file watcher detecting a changed ConfigMap, or a Kubernetes operator callback — is a separate concern. Deferring this keeps the proposal focused and avoids blocking on unresolved questions about trigger design (see [Trigger mechanisms](#trigger-mechanisms-future-work) below).
 
 ### Two lifecycle policy layers
 
@@ -51,7 +100,8 @@ When a VC traverses the `failed → stopped` edge — meaning it is truly unreco
 
 ### Configuration model
 
-Failure behaviour is deployment-level static configuration, split into two independent policy dimensions. A configuration apply triggered by an HTTP endpoint should behave identically to one triggered by a file watcher or an operator callback. These decisions belong in the proxy's static configuration, keeping the `applyConfiguration()` signature simple.
+Failure behaviour is deployment-level static configuration, split into two independent policy dimensions. A configuration apply triggered by an HTTP endpoint should behave identically to one triggered by a file watcher or an operator callback. These decisions belong in the proxy's static configuration, keeping the `
+KafkaProxy.applyConfiguration()` signature simple.
 
 ```yaml
 proxy:
@@ -87,7 +137,7 @@ These two dimensions are independently meaningful, producing four distinct behav
 
 ### Configuration change detection
 
-When `applyConfiguration()` is called, the proxy compares the new configuration against the running state to determine which virtual clusters need to be restarted. Change detection is implemented as a pipeline of `ChangeDetector` implementations, each responsible for one category of change:
+When `KafkaProxy.applyConfiguration()` is called, the proxy compares the new configuration against the running state to determine which virtual clusters need to be restarted. Change detection is implemented as a pipeline of `ChangeDetector` implementations, each responsible for one category of change:
 
 - **`VirtualClusterChangeDetector`** — identifies clusters that were added, removed, or modified by comparing `VirtualClusterModel` instances via `equals()`. A cluster requires a restart if any property that contributes to `VirtualClusterModel.equals()` changed (bootstrap address, TLS settings, gateway configuration, etc.).
 - **`FilterChangeDetector`** — identifies clusters affected by filter configuration changes. A cluster requires a restart if a `NamedFilterDefinition` it references changed (type or configuration, compared via `equals()`), or if the `defaultFilters` list changed (order matters, since filter chain execution is sequential) and the cluster relies on default filters.
@@ -154,7 +204,7 @@ On success: the orchestrator atomically swaps to the new factory and closes the 
 
 ### Failure behaviour and rollback
 
-When a VC operation fails during `applyConfiguration()`, two independent policies govern the response:
+When a VC operation fails during `KafkaProxy.applyConfiguration()`, two independent policies govern the response:
 
 **Orchestration policy (`configurationReload.onFailure.rollback`):**
 
@@ -178,7 +228,7 @@ These policies compose independently. `rollback` determines whether the orchestr
 
 ### Orchestration pipeline
 
-The complete `applyConfiguration()` pipeline flows through these layers:
+The complete `KafkaProxy.applyConfiguration()` pipeline flows through these layers:
 
 ```
 KafkaProxy.applyConfiguration(newConfig)
@@ -218,7 +268,7 @@ On failure: apply rollback policy, then terminal failure policy if VC is unrecov
 
 ### Concurrency control
 
-Only one reload operation can execute at a time. The `ConfigurationReloadOrchestrator` uses a `ReentrantLock` to prevent concurrent `applyConfiguration()` calls. A second call while a reload is in progress fails immediately with a `ConcurrentReloadException` rather than queuing.
+Only one reload operation can execute at a time. The `ConfigurationReloadOrchestrator` uses a `ReentrantLock` to prevent concurrent `KafkaProxy.applyConfiguration()` calls. A second call while a reload is in progress fails immediately with a `ConcurrentReloadException` rather than queuing.
 
 ### Worked examples
 
@@ -295,7 +345,7 @@ Terminal failure (serve policy):
 
 The following metrics are part of the reload implementation:
 
-- **`kroxylicious_reload_total`** — counter of `applyConfiguration()` invocations, labelled by outcome (`success`, `rollback`, `failure`). Enables alerting on reload failures and tracking reload frequency.
+- **`kroxylicious_reload_total`** — counter of `KafkaProxy.applyConfiguration()` invocations, labelled by outcome (`success`, `rollback`, `failure`). Enables alerting on reload failures and tracking reload frequency.
 - **`kroxylicious_reload_duration_seconds`** — histogram of end-to-end reload duration. Helps operators understand whether reload is meeting SLA expectations and identify slow operations.
 - **`kroxylicious_reload_clusters_affected_total`** — counter of per-VC operations during reload, labelled by operation (`add`, `remove`, `modify`) and outcome (`success`, `failure`, `rolledback`). Provides granularity beyond the aggregate reload result.
 - **`kroxylicious_drain_duration_seconds`** — histogram of per-VC connection drain duration. Helps tune the `drainTimeout` configuration and detect VCs with long-lived connections.
@@ -318,19 +368,19 @@ An approach is being explored where plugins read external resources through the 
 
 ## Trigger mechanisms (future work)
 
-The `applyConfiguration()` operation is trigger-agnostic. The following trigger mechanisms have been discussed but are explicitly deferred:
+The `KafkaProxy.applyConfiguration()` operation is trigger-agnostic. The following trigger mechanisms have been discussed but are explicitly deferred:
 
-- **HTTP endpoint**: An HTTP POST endpoint (e.g. `/admin/config/reload`) that accepts a new configuration and calls `applyConfiguration()`. Provides synchronous feedback. Questions remain around security (authentication, binding to localhost vs. network interfaces), whether the endpoint receives the configuration inline or reads it from a file path, and content-type handling.
-- **File watcher**: A filesystem watcher that detects changes to the configuration file and triggers `applyConfiguration()`. Interacts with Kubernetes ConfigMap mount semantics. Questions remain around debouncing, atomic file replacement, and read-only filesystem constraints.
-- **Operator integration**: A Kubernetes operator that reconciles a CRD and calls `applyConfiguration()` via the proxy's API. The operator owns the desired state; the proxy does not persist configuration to disk.
+- **HTTP endpoint**: An HTTP POST endpoint (e.g. `/admin/config/reload`) that accepts a new configuration and calls `KafkaProxy.applyConfiguration()`. Provides synchronous feedback. Questions remain around security (authentication, binding to localhost vs. network interfaces), whether the endpoint receives the configuration inline or reads it from a file path, and content-type handling.
+- **File watcher**: A filesystem watcher that detects changes to the configuration file and triggers `KafkaProxy.applyConfiguration()`. Interacts with Kubernetes ConfigMap mount semantics. Questions remain around debouncing, atomic file replacement, and read-only filesystem constraints.
+- **Operator integration**: A Kubernetes operator that reconciles a CRD and calls `KafkaProxy.applyConfiguration()` via the proxy's API. The operator owns the desired state; the proxy does not persist configuration to disk.
 
-Each of these can be designed and implemented independently once the core `applyConfiguration()` mechanism is in place.
+Each of these can be designed and implemented independently once the core `KafkaProxy.applyConfiguration()` mechanism is in place.
 
 ## Affected/not affected projects
 
 **Affected:**
 
-- **kroxylicious-runtime** (core proxy) — The `applyConfiguration()` operation, change detection pipeline (`ChangeDetector`, `VirtualClusterChangeDetector`, `FilterChangeDetector`), reload orchestration (`ConfigurationReloadOrchestrator`, `ConfigurationChangeHandler`, `ConfigurationChangeRollbackTracker`), connection draining infrastructure, and lifecycle-integrated reload operations on `VirtualClusterManager` all live here. This builds on the lifecycle state model (`VirtualClusterLifecycleState`, `VirtualClusterLifecycleManager`, `VirtualClusterManager`) introduced by Proposal 016.
+- **kroxylicious-runtime** (core proxy) — The `KafkaProxy.applyConfiguration()` operation, change detection pipeline (`ChangeDetector`, `VirtualClusterChangeDetector`, `FilterChangeDetector`), reload orchestration (`ConfigurationReloadOrchestrator`, `ConfigurationChangeHandler`, `ConfigurationChangeRollbackTracker`), connection draining infrastructure, and lifecycle-integrated reload operations on `VirtualClusterManager` all live here. This builds on the lifecycle state model (`VirtualClusterLifecycleState`, `VirtualClusterLifecycleManager`, `VirtualClusterManager`) introduced by Proposal 016.
 - **kroxylicious-junit5-extension** — Test infrastructure may need to support applying configuration changes to a running proxy in integration tests.
 
 **Not affected:**
@@ -340,7 +390,7 @@ Each of these can be designed and implemented independently once the core `apply
 
 ## Compatibility
 
-- The `applyConfiguration()` operation is additive — it does not change existing startup behaviour.
+- The `KafkaProxy.applyConfiguration()` operation is additive — it does not change existing startup behaviour.
 - The default configuration (`onVirtualClusterTerminalFailure.serve: none`, `configurationReload.onFailure.rollback: true`) matches current behaviour — the proxy shuts down if any VC fails at startup.
 - Virtual cluster configuration semantics are unchanged; the proposal only adds the ability to apply changes at runtime.
 - Filter definitions and their configuration are unchanged.
@@ -352,9 +402,9 @@ Each of these can be designed and implemented independently once the core `apply
 - **File watcher as the primary trigger**: Earlier iterations of this proposal used filesystem watching to detect configuration changes. This was set aside in favour of decoupling the trigger from the apply operation, since the trigger mechanism has unresolved design questions (security, delivery method, Kubernetes integration) that should not block the core capability.
 - **Node-based failure policy (`onVirtualClusterStopped`)**: The original Proposal 016 design fired the serve policy when a VC *arrived at* the `Stopped` state. This conflates intentional removal (a success) with terminal failure (a problem). Replaced with edge-based policy that fires only on the `failed → stopped` transition.
 - **Single `onFailure: ROLLBACK | TERMINATE` knob**: The original reload design conflated two independent dimensions — orchestration rollback and terminal failure policy — into a single configuration option. Decomposed into `configurationReload.onFailure.rollback` (orchestration) and `onVirtualClusterTerminalFailure.serve` (lifecycle), which compose independently and reveal two additional meaningful behaviour combinations.
-- **`ReloadOptions` as a per-call parameter**: An approach where each call to `applyConfiguration()` could specify failure behaviour. Rejected because these decisions vary by deployment, not by invocation — they belong in static configuration.
+- **`ReloadOptions` as a per-call parameter**: An approach where each call to `KafkaProxy.applyConfiguration()` could specify failure behaviour. Rejected because these decisions vary by deployment, not by invocation — they belong in static configuration.
 - **`ConfigurationReconciler` naming**: Considered to describe the "compare desired vs current and converge" pattern, but rejected because Kubernetes reconcilers already exist in the Kroxylicious codebase and overloading the term would cause confusion.
-- **Plan/apply split on the public interface**: Considered exposing separate `plan()` and `apply()` methods to enable dry-run validation. Decided this is an internal concern — the trigger just needs `applyConfiguration()`. A validate/dry-run capability can be added later without changing the interface.
+- **Plan/apply split on the public interface**: Considered exposing separate `plan()` and `apply()` methods to enable dry-run validation. Decided this is an internal concern — the trigger just needs `KafkaProxy.applyConfiguration()`. A validate/dry-run capability can be added later without changing the interface.
 - **Inline configuration via HTTP POST body**: Discussed having the HTTP endpoint accept the full YAML configuration in the request body. An alternative view is that configuration should always live in files (for source control, auditability, consistent state) and the HTTP endpoint should just trigger reading from a specified file path. This question is deferred along with the HTTP trigger design.
 - **Separate VirtualClusterManager for reload**: The original hot-reload design had a `VirtualClusterManager` that was purely an operation orchestrator (with `EndpointRegistry` and `ConnectionDrainManager` dependencies). Rather than maintaining two classes with the same name, the reload operations merge into the [Proposal 016](https://github.com/kroxylicious/design/blob/main/proposals/016-virtual-cluster-lifecycle.md) `VirtualClusterManager`, which already owns the VC model list and lifecycle managers. The merged class gains `EndpointRegistry` and `ConnectionDrainManager` dependencies and the `removeVirtualCluster`/`restartVirtualCluster`/`addVirtualCluster` methods.
 - **Two terminal states (`Stopped` and `TerminallyFailed`)**: Considered adding a separate terminal state for unrecoverable failures. Rejected because the distinction is about the transition edge, not the terminal state — a stopped cluster is permanently done regardless of why. The edge-based policy hook achieves the same goal without adding state machine complexity.
