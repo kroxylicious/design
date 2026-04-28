@@ -1,4 +1,4 @@
-# Changing Active Proxy Configuration
+# 83 - Changing Active Proxy Configuration
 
 **Builds on:** [Proposal 016 — Virtual Cluster Lifecycle](https://github.com/kroxylicious/design/blob/main/proposals/016-virtual-cluster-lifecycle.md)
 
