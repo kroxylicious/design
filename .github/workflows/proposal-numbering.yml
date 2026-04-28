@@ -99,42 +99,69 @@ jobs:
             const incorrectFilesRaw = '${{ steps.check.outputs.files }}';
             const incorrectTitlesRaw = '${{ steps.check.outputs.titles }}';
 
-            const warnings = [];
-
-            // Check filename issues
+            // Get all files that need fixing (union of incorrect filenames and incorrect titles)
+            const filesNeedingFix = new Set();
             if (incorrectFilesRaw) {
-              const filesList = incorrectFilesRaw.split(',').map(f => `- <code>${f}</code>`).join('\n');
-              warnings.push(
-                '**Incorrect filename:**',
-                '',
-                filesList,
-                '',
-                `**Expected naming:** <code>${expectedPrefix}&lt;descriptive-name&gt;.md</code>`,
-                '',
-                `Rename your proposal file to use PR #${prNumber}:`,
-                '',
-                '```bash',
-                `git mv proposals/000-<name>.md ${expectedPrefix}<name>.md`,
-                '```'
-              );
+              incorrectFilesRaw.split(',').forEach(f => filesNeedingFix.add(f.trim()));
+            }
+            if (incorrectTitlesRaw) {
+              incorrectTitlesRaw.split(',').forEach(f => filesNeedingFix.add(f.trim()));
             }
 
-            // Check title issues
-            if (incorrectTitlesRaw) {
-              const titlesList = incorrectTitlesRaw.split(',').map(f => `- <code>${f}</code>`).join('\n');
-              if (warnings.length > 0) warnings.push('', '---', '');
+            const warnings = [];
+
+            if (filesNeedingFix.size > 0) {
+              const files = Array.from(filesNeedingFix);
+              const filesList = files.map(f => `- <code>${f}</code>`).join('\n');
+
               warnings.push(
-                '**Incorrect title format:**',
+                '**Issues found:**',
                 '',
-                titlesList,
-                '',
-                `**Expected title format:** <code># ${prNumber} - &lt;Your Title&gt;</code>`,
-                '',
-                `Update the H1 heading in your proposal to include the PR number:`,
-                '',
-                '```markdown',
-                `# ${prNumber} - My Feature Title`,
-                '```'
+                filesList,
+                ''
+              );
+
+              // For each file, generate specific fix commands
+              files.forEach(file => {
+                const basename = file.replace('proposals/', '');
+                // Strip leading numbers or placeholder prefixes to get the descriptive part
+                const descriptive = basename.replace(/^[0-9]{3}-/, '').replace(/^(xxx|nnn|000)-/, '');
+                const expectedFilename = `proposals/${String(prNumber).padStart(3, '0')}-${descriptive}`;
+
+                const needsRename = file !== expectedFilename;
+                const needsTitleUpdate = incorrectTitlesRaw && incorrectTitlesRaw.includes(file);
+
+                if (needsRename || needsTitleUpdate) {
+                  warnings.push(
+                    `**Fix for <code>${file}</code>:**`,
+                    '',
+                    '```bash'
+                  );
+
+                  if (needsRename) {
+                    warnings.push(`git mv ${file} ${expectedFilename}`);
+                  }
+
+                  if (needsTitleUpdate) {
+                    const targetFile = needsRename ? expectedFilename : file;
+                    warnings.push(
+                      `# Update title: remove any old number prefix and add PR number`,
+                      `sed -i.bak '0,/^# /{s/^# \\([0-9]\\{3\\}\\|xxx\\|nnn\\|000\\) - /# ${prNumber} - /; t; s/^# /# ${prNumber} - /}' ${targetFile} && rm ${targetFile}.bak`
+                    );
+                  }
+
+                  warnings.push(
+                    `git commit -m "Rename proposal to use PR number ${prNumber}"`,
+                    'git push',
+                    '```',
+                    ''
+                  );
+                }
+              });
+
+              warnings.push(
+                '**Note:** The commands above can be copied and pasted directly into your terminal. The sed command will automatically preserve your title text.',
+                ''
               );
             }
 
