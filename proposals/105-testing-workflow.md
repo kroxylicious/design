@@ -15,7 +15,7 @@ This template is provided as an example with sections you may wish to comment on
 
 # 105 - Testing workflow
 
-Provide a brief summary of the feature you are proposing to add to Kroxylicious.
+Provides a brief summary of the feature you are proposing to add to Kroxylicious.
 
 ## Current situation
 
