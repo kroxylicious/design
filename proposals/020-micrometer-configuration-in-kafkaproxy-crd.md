@@ -77,37 +77,48 @@ spec:
       - JvmMemoryMetrics
       - JvmGcMetrics
     commonTags:
-      zone: "euc-1a"
-      environment: "production"
+      static:
+        environment: "production"
+        team: "platform"
+      fromLabels:
+        zone: "topology.kubernetes.io/zone"
 ```
 
 The `micrometer` field is an optional object. When omitted, no hooks are configured (current
 behaviour is preserved).
 
-| Field              | Type              | Required | Description                                                        |
-|--------------------|-------------------|----------|--------------------------------------------------------------------|
-| `standardBinders`  | array of strings  | No       | List of Micrometer binder names to register (see table below)      |
-| `commonTags`       | map<string,string> | No      | Key-value pairs added as tags to all metrics emitted by the proxy  |
+`commonTags` is an optional object grouping all common tag sources:
 
-#### `commonTags` limitation: static values only
+| Field                    | Type               | Required | Description                                                              |
+|--------------------------|--------------------|----------|--------------------------------------------------------------------------|
+| `commonTags.static`      | map<string,string> | No       | Static key-value pairs, uniform across all replicas                      |
+| `commonTags.fromLabels`  | map<string,string> | No       | Tag name → label key; per-pod values resolved via the downward API       |
 
-`CommonTagsHook` currently accepts only static string values. This means `commonTags` is
-useful for deployment-wide tags (e.g. `environment: "production"`, `team: "platform"`) but
-cannot express per-pod values such as availability zone — all replicas would receive the
-same tag value.
+#### `commonTags.static`: deployment-wide values
 
-A future enhancement to the runtime could support environment variable interpolation in tag
-values (e.g. `zone: "${AZ}"` or `zone: "env.AZ"`), allowing the operator to inject per-pod
-values via the Kubernetes downward API. This is out of scope for this proposal.
+Suited for values that are uniform across all replicas and known at deploy time
+(e.g. `environment: "production"`, `team: "platform"`).
 
-A structured schema is preferred over the runtime's freeform `type` + `config` pattern
-because:
+#### `commonTags.fromLabels`: per-pod values via label promotion
+
+Some tag values — such as availability zone — differ per pod and cannot be resolved at reconcile time because the proxy config file is shared across all replicas.
+`commonTags.fromLabels` maps tag names (valid Prometheus label names) to Kubernetes label keys on the `KafkaProxy` CR, which the operator promotes into per-pod metric tags.
+
+Kubernetes label names frequently contain characters (`.`, `/`, `-`) that are illegal in Prometheus tag names, so the tag name must be specified explicitly rather than derived from the label key.
+
+The mechanism is a two-step process:
+
+1. **Operator (reconcile time):** for each entry in `fromLabels`, the operator adds an environment variable to the proxy pod spec using the Kubernetes downward API, exposing the label value to the pod.
+2. **Runtime:** `CommonTagsHook` gains support for environment variable interpolation in tag values. The operator writes the generated config referencing the injected env var, which the runtime resolves per-pod at startup.
+
+This allows tags like availability zone to vary correctly across replicas without baking a single value into the shared config file.
+
+A structured schema is preferred over the runtime's freeform `type` + `config` pattern because:
 
 - The set of hook types is small and stable (two implementations exist today).
 - CRD-level schema validation catches typos and invalid configuration at admission time.
 - Infrastructure admins get IDE autocompletion and clearer documentation.
-- Micrometer hooks are not a primary extensibility point the way filters are — they don't
-  warrant the same open-ended plugin model in the CRD.
+- Micrometer hooks are not a primary extensibility point the way filters are — they don't warrant the same open-ended plugin model in the CRD.
 
 ### Persona ownership
 
@@ -122,18 +133,29 @@ The `KafkaProxyReconciler` maps the structured CRD fields to `MicrometerDefiniti
 for the `Configuration` constructor, replacing the current `List.of()`:
 
 - `standardBinders` → `MicrometerDefinition` with type `StandardBindersHook`
-- `commonTags` → `MicrometerDefinition` with type `CommonTagsHook`
+- `commonTags` → `MicrometerDefinition` with type `CommonTagsHook`, merging `static` tag
+  values with env var references generated from `fromLabels` entries
+
+For each entry in `commonTags.fromLabels`, the reconciler also adds a downward API env var to
+the proxy pod spec so the runtime can resolve the value per-pod.
 
 ### Validation
 
 The structured schema enables validation at the CRD level:
 
-1. **Standard binder names** — the `standardBinders` array should be validated against the
-   known set of binder names (see table below). Unknown names are rejected at admission time.
-2. **Common tags** — validated as a non-empty map of non-empty string keys and values when
-   present.
+1. **Standard binder names** — the `standardBinders` array is validated against the known set
+   of binder names (see table below). Unknown names are rejected at admission time.
+2. **Static tag keys/values** — `commonTags.static` validated as a non-empty map of non-empty
+   string keys and values when present.
+3. **`fromLabels` keys** — tag names in `commonTags.fromLabels` must be valid Prometheus label
+   names; label key values must be valid Kubernetes label keys.
+4. **Conflicts** — a tag name present in both `commonTags.static` and `commonTags.fromLabels`
+   is rejected to avoid ambiguity.
 
-Validation failures surface as conditions on the `KafkaProxy` status.
+Validation failures are surfaced on the `KafkaProxy` status as an `Accepted: False` condition
+with reason `Invalid` and a human-readable message identifying the problem, consistent with
+how other invalid configuration is reported by the operator. The proxy will not be
+(re)configured until the invalid field is corrected.
 
 ### Available standard binders
 
@@ -167,20 +189,20 @@ Documentation should include a recommended starting set (e.g. `ProcessorMetrics`
 
 ## Affected/not affected projects
 
-| Project                         | Affected | Notes                                                  |
-|---------------------------------|----------|--------------------------------------------------------|
-| `kroxylicious-operator`         | Yes      | CRD schema change, reconciler update, validation       |
-| `kroxylicious-kubernetes-api`   | Yes      | Generated Java types for the new CRD field             |
-| `kroxylicious-runtime`          | No       | Already supports `MicrometerDefinition` — no changes   |
-| `kroxylicious-design`           | Yes      | This proposal                                          |
+| Project                       | Affected | Notes                                                                               |
+|-------------------------------|----------|-------------------------------------------------------------------------------------|
+| `kroxylicious-operator`       | Yes      | CRD schema change, reconciler update, downward API env var injection, validation    |
+| `kroxylicious-kubernetes-api` | Yes      | Generated Java types for the new CRD field                                          |
+| `kroxylicious-runtime`        | Yes      | `CommonTagsHook` requires env var interpolation support for `commonTags.fromLabels` |
+| `kroxylicious-design`         | Yes      | This proposal                                                                       |
 
 ## Compatibility
 
 - The `micrometer` field is optional and defaults to the current behaviour (no binders).
   Existing `KafkaProxy` CRs are unaffected.
 - This is a purely additive CRD schema change — no breaking changes to the `v1alpha1` API.
-- The feature requires no changes to the proxy runtime; the reconciler maps the structured
-  CRD fields to the existing `MicrometerDefinition` model.
+- `commonTags.fromLabels` requires a runtime enhancement to `CommonTagsHook` for env var
+  interpolation. The `commonTags.static` and `standardBinders` fields require no runtime changes.
 
 ## Rejected alternatives
 
@@ -216,6 +238,23 @@ unless explicitly overridden was considered. This was rejected because:
 - It increases metric cardinality for users who don't need JVM metrics.
 - It introduces upgrade risk — adding new defaults in a future release would change existing
   deployments' metric output.
+
+### Promoting all labels automatically
+
+Automatically promoting every label on the `KafkaProxy` CR as a common tag was considered.
+This was rejected because Kubernetes stamps system labels on resources (e.g.
+`app.kubernetes.io/managed-by`, `helm.sh/chart`) that would pollute metric tag sets with
+internal tooling detail and increase cardinality unpredictably. Explicit opt-in via
+`commonTags.fromLabels` keeps the tag set under the operator's control.
+
+### Using annotations as the source for tag values
+
+Using annotations rather than labels as the source for `commonTagsFromLabels` was considered.
+Labels are the appropriate Kubernetes construct for identifying and categorising resources —
+values like zone, environment, and team naturally belong there and are already present on most
+resources. Annotations are intended for arbitrary tooling metadata and their values are opaque
+strings, potentially requiring a format convention (e.g. encoded YAML or JSON) with attendant
+parsing complexity and merge-order ambiguity. Labels are a cleaner fit.
 
 ### Per-VirtualKafkaCluster micrometer configuration
 
