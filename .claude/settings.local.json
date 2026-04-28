@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh pr *)",
+      "Bash(sort -k2)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git checkout *)",
+      "Bash(gh run *)",
+      "Bash(git rebase *)",
+      "Bash(git cherry-pick *)",
+      "Bash(gh api *)",
+      "Bash(gh workflow *)",
+      "Bash(git mv *)",
+      "Bash(git reset *)",
+      "Bash(git show *)",
+      "Bash(mv /tmp/working-workflow.yml .github/workflows/proposal-numbering.yml)",
+      "Bash(git rm *)",
+      "Bash(chmod +x *)",
+      "Bash(git branch *)"
+    ]
+  }
+}

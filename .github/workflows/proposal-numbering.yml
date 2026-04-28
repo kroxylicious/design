@@ -146,7 +146,8 @@ jobs:
                     const targetFile = needsRename ? expectedFilename : file;
                     warnings.push(
                       `# Update title: remove any old number prefix and add PR number`,
-                      `sed -i.bak '0,/^# /{s/^# \\([0-9]\\{3\\}\\|xxx\\|nnn\\|000\\) - /# ${prNumber} - /; t; s/^# /# ${prNumber} - /}' ${targetFile} && rm ${targetFile}.bak`
+                      `sed -i.bak '0,/^# /{s/^# \\([0-9]\\{3\\}\\|xxx\\|nnn\\|000\\) - /# ${prNumber} - /; t; s/^# /# ${prNumber} - /}' ${targetFile} && rm ${targetFile}.bak`,
+                      `git add ${targetFile}`
                     );
                   }
 
