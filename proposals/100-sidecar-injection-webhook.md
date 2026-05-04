@@ -32,8 +32,9 @@ The webhook is design to eventually operate under a strict two-party trust model
 Making the boundary between the webhook administrator and the application pod owner a _reliable_ trust boundary will require further development than is specified in this proposal.
 However pod annotations in the `sidecar.kroxylicious.io/` namespace form the basic building blocks for a flexible but reliable trust boundary.
 * Some annotations are always set by the webhook.
-For example, the proxy obtains its configuration via a `sidecar.kroxylicious.io/proxy-config` pod annotation which is projected into the sidecar container via a `downwardAPI` volume.
-The webhook always overwrites that annotation (`sidecar.kroxylicious.io/proxy-config`) on the pod, regardless of any value the app owner may have set.
+For example, the webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` and stores it in a `sidecar.kroxylicious.io/proxy-config` pod annotation (see [Config injection](#config-injection)).
+This annotation is projected into the sidecar container as a file via a `downwardAPI` volume.
+The webhook always overwrites `sidecar.kroxylicious.io/proxy-config` on the pod, regardless of any value the app owner may have set.
 * The administrator can delegate some annotations to be specified by/overridden by the application owner. When specified by the application owner they will not be overwritten by the webhook. Examples defined in this proposal are `sidecar.kroxylicious.io/resources-cpu` and `sidecar.kroxylicious.io/resources-memory` (see below).
 * Annotations which the administrator has **not** delegated will have their effect overridden by the webhook based on the Administrator-controlled `KroxyliciousSidecarConfig` resource. A warning will be logged when such overriding is necessary.
 
@@ -60,6 +61,8 @@ The webhook sets `KAFKA_BOOTSTRAP_SERVERS` to point at the sidecar, but nothing 
 The Istio model — an init container with `NET_ADMIN` that sets up iptables rules to redirect Kafka-port traffic to the sidecar, excluding the proxy process by UID — would enforce this, but requires granting `NET_ADMIN` to the init container, conflicting with the security posture of dropping all capabilities.
 
 In practice, bypassing the sidecar requires the application to deliberately hardcode the real Kafka address. An app owner determined to bypass can also opt out of injection entirely via pod labels. The enforcement boundary is RBAC on who can create pods in the namespace, not network controls within the pod. If the threat model requires enforcement against a hostile app owner, iptables redirection could be added as an opt-in capability in a future iteration.
+
+SASL handling (e.g. rejecting downstream SASL handshakes or requiring proxy-initiated authentication to the target cluster) is out of scope for the alpha. The proxy passes SASL frames through unmodified.
 
 ### CRD: `KroxyliciousSidecarConfig`
 
