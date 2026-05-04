@@ -138,9 +138,9 @@ The management endpoint binds to `0.0.0.0` because kubelet HTTP probes target th
 
 ### Native sidecar containers
 
-On Kubernetes 1.28+, the webhook injects the proxy as a native sidecar — an init container with `restartPolicy: Always`. This gives proper startup ordering (proxy starts before the application) and shutdown ordering (proxy stops after the application). On older clusters, the webhook falls back to injecting into `spec.containers`.
+On Kubernetes 1.29+ (where the `SidecarContainers` feature gate is enabled by default), the webhook injects the proxy as a native sidecar — an init container with `restartPolicy: Always`. This gives proper startup ordering (proxy starts before the application) and shutdown ordering (proxy stops after the application). On older clusters, the webhook falls back to injecting into `spec.containers`.
 
-The webhook detects the cluster's Kubernetes version at startup and chooses the injection strategy accordingly.
+The webhook detects the cluster's Kubernetes version at startup and chooses the injection strategy accordingly. For clusters running alpha versions of features (e.g. native sidecars on 1.28, OCI image volumes on 1.31-1.32), the deployer can set the `FEATURE_GATES` environment variable on the webhook (e.g. `FEATURE_GATES=SidecarContainers=true,ImageVolume=true`) to override the version-based defaults.
 
 ### Sidecar container spec
 
