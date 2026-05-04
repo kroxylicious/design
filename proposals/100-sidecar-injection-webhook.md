@@ -26,7 +26,7 @@ Manual sidecar construction is error-prone and creates a maintenance burden. A w
 
 The webhook is design to eventually operate under a strict two-party trust model:
 
-- **Webhook administrator**: controls what gets injected — the proxy image, upstream Kafka address, filter definitions, security context. These are never overridable by the app owner.
+- **Webhook administrator**: controls what gets injected — the proxy image, target Kafka address, filter definitions, security context. These are never overridable by the app owner.
 - **Application pod owner**: can opt out of injection, and may override specific settings (bootstrap port, node ID range, resource requests) if the admin explicitly delegates those annotations.
 
 Making the boundary between the webhook administrator and the application pod owner a _reliable_ trust boundary will require further development than is specified in this proposal.
@@ -55,7 +55,7 @@ When configured to fail open and the webhook experiences an internal errors, it 
 
 #### Bypass prevention
 
-The webhook sets `KAFKA_BOOTSTRAP_SERVERS` to point at the sidecar, but nothing prevents an application from connecting directly to the upstream Kafka cluster. Kubernetes `NetworkPolicy` cannot help here: it operates at the pod level, so a policy blocking egress to Kafka would also block the sidecar's upstream connection.
+The webhook sets `KAFKA_BOOTSTRAP_SERVERS` to point at the sidecar, but nothing prevents an application from connecting directly to the target Kafka cluster. Kubernetes `NetworkPolicy` cannot help here: it operates at the pod level, so a policy blocking egress to Kafka would also block the sidecar's connection to the target cluster.
 
 The Istio model — an init container with `NET_ADMIN` that sets up iptables rules to redirect Kafka-port traffic to the sidecar, excluding the proxy process by UID — would enforce this, but requires granting `NET_ADMIN` to the init container, conflicting with the security posture of dropping all capabilities.
 
@@ -68,7 +68,7 @@ A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidec
 1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
 2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
 3. **Config is invalid in a way the webhook can detect** (e.g. malformed delegated annotation values, plugin image without a digest): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
-4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable upstream Kafka, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
+4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -76,7 +76,7 @@ kind: KroxyliciousSidecarConfig
 metadata:
   name: my-config
 spec:
-  upstreamBootstrapServers: kafka-prod.internal:9092
+  targetBootstrapServers: kafka-prod.internal:9092
   bootstrapPort: 9092              # default, configurable
   nodeIdRange:
     startInclusive: 0
@@ -88,7 +88,7 @@ spec:
     - name: my-filter
       type: io.example.MyFilterFactory
       config: { ... }
-  upstreamTls:
+  targetClusterTls:
     trustAnchorSecretRef:
       name: kafka-ca
       key: ca.crt
@@ -142,9 +142,9 @@ The injected sidecar follows the same patterns as `ProxyDeploymentDependentResou
 
 The security context is never weakened. If the pod already has a stricter security context, it is preserved.
 
-### Upstream TLS
+### Target cluster TLS
 
-When `spec.upstreamTls.trustAnchorSecretRef` is set, the webhook adds a volume mounting the referenced Secret into the sidecar and configures the proxy to use it as a PEM trust store. The Secret must exist in the pod's namespace.
+When `spec.targetClusterTls.trustAnchorSecretRef` is set, the webhook adds a volume mounting the referenced Secret into the sidecar and configures the proxy to use it as a PEM trust store. The Secret must exist in the pod's namespace.
 
 ### Delegated annotations
 
@@ -273,13 +273,13 @@ When the admin specifies plugin images in `KroxyliciousSidecarConfig.spec.plugin
 - **Supply chain**: a compromised plugin image contains malicious code with access to Kafka traffic and mounted credentials. Mitigate with image signing and digest-pinned references.
 - **Dependency conflicts**: as described above under flat classpath limitations.
 
-### Upstream cluster selection
+### Target cluster selection
 
-In many deployments the admin manages multiple Kafka clusters (e.g. production, staging) and the app owner needs to choose which one their pod connects to. Rather than creating a separate `KroxyliciousSidecarConfig` per cluster, the admin defines an allow-list of named upstream clusters:
+In many deployments the admin manages multiple Kafka clusters (e.g. production, staging) and the app owner needs to choose which one their pod connects to. Rather than creating a separate `KroxyliciousSidecarConfig` per cluster, the admin defines an allow-list of named target clusters:
 
 ```yaml
 spec:
-  allowedUpstreamClusters:
+  allowedTargetClusters:
     - name: production
       bootstrapServers: kafka-prod.internal:9092
     - name: staging
@@ -289,12 +289,12 @@ spec:
 The app owner selects a cluster by annotation:
 
 ```yaml
-sidecar.kroxylicious.io/upstream-cluster: staging
+sidecar.kroxylicious.io/target-cluster: staging
 ```
 
 The admin retains control over which clusters are reachable. The app owner cannot specify an arbitrary bootstrap address — only names from the allow-list are accepted. If the annotation names a cluster not in the list, or is absent when multiple clusters are defined, injection is skipped with a warning.
 
-When `allowedUpstreamClusters` is not set, the existing `upstreamBootstrapServers` field is used directly and there is no cluster selection.
+When `allowedTargetClusters` is not set, the existing `targetBootstrapServers` field is used directly and there is no cluster selection.
 
 This is the lowest-risk form of delegation — the app owner chooses a network destination from an admin-controlled set — and is likely the highest-demand delegation feature for app teams. It is included in the initial implementation.
 
@@ -306,7 +306,7 @@ The delegated annotations mechanism (bootstrap port, node ID range, resource req
 2. **Filter configuration** — app owner adjusts parameters on admin-selected filters. Medium risk: bounded by the filter's config surface.
 3. **Plugin image selection** — app owner chooses what code runs in the proxy JVM. High risk: arbitrary code execution (see security analysis above).
 
-All delegation beyond upstream cluster selection requires the admin to explicitly list the delegated annotations. Nothing is delegated by default.
+All delegation beyond target cluster selection requires the admin to explicitly list the delegated annotations. Nothing is delegated by default.
 
 ### Webhook deployment
 
