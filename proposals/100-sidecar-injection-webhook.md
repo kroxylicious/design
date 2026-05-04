@@ -83,6 +83,13 @@ spec:
     endInclusive: 2
   managementPort: 9082             # default, configurable
   proxyImage: quay.io/kroxylicious/proxy:0.21.0   # optional override
+  resources:                       # default resource requests/limits for the sidecar
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
   setBootstrapEnvVar: true         # sets KAFKA_BOOTSTRAP_SERVERS on app containers
   filterDefinitions:
     - name: my-filter
@@ -148,24 +155,23 @@ When `spec.targetClusterTls.trustAnchorSecretRef` is set, the webhook adds a vol
 
 ### Delegated annotations
 
-The `delegatedAnnotations` field in `KroxyliciousSidecarConfig` lists which annotations the app owner may set to override sidecar parameters.
+The `delegatedAnnotations` field in `KroxyliciousSidecarConfig` lists which annotations the app owner may set on their pod to override sidecar parameters. The admin sets defaults via the CRD spec (e.g. `spec.resources`); delegation allows the app owner to override those defaults for a specific pod.
+
 Initially it will support:
 
 | Annotation | Effect |
 |-----------|--------|
-| `sidecar.kroxylicious.io/resources-cpu` | Override CPU request/limit of the sidecar container |
-| `sidecar.kroxylicious.io/resources-memory` | Override memory request/limit of the sidecar container |
+| `sidecar.kroxylicious.io/resources-cpu` | Override the CPU request/limit from `spec.resources` |
+| `sidecar.kroxylicious.io/resources-memory` | Override the memory request/limit from `spec.resources` |
 
-Delegation is opt-in per annotation. By default nothing is delegated. 
+Delegation is opt-in per annotation. By default nothing is delegated.
 
 ### Configuration drift detection
 
-The webhook stamps each injected pod with metadata annotations:
+The webhook stamps each injected pod with a `sidecar.kroxylicious.io/config-generation` annotation recording the `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time. This annotation serves two purposes:
 
-| Annotation | Value |
-|-----------|-------|
-| `sidecar.kroxylicious.io/config-generation` | The `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time |
-| `sidecar.kroxylicious.io/injection-timestamp` | ISO-8601 timestamp of when the sidecar was injected |
+1. **Idempotency guard**: its presence indicates that the sidecar has already been injected, preventing re-injection when the webhook is reinvoked.
+2. **Drift detection**: its value can be compared (equality only) with the current generation of the `KroxyliciousSidecarConfig` to identify pods running stale configuration.
 
 Because the webhook only mutates pods at creation time, configuration changes to `KroxyliciousSidecarConfig` do not propagate to running pods. This matches how Istio and Linkerd handle sidecar injection. Users must restart pods to pick up new configuration.
 
