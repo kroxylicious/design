@@ -30,12 +30,12 @@ The webhook is design to eventually operate under a strict two-party trust model
 - **Application pod owner**: can opt out of injection, and may override specific settings (bootstrap port, node ID range, resource requests) if the admin explicitly delegates those annotations.
 
 Making the boundary between the webhook administrator and the application pod owner a _reliable_ trust boundary will require further development than is specified in this proposal.
-However pod annotations in the `kroxylicious.io/` namespace form the basic building blocks for a flexible but reliable trust boundary.
+However pod annotations in the `sidecar.kroxylicious.io/` namespace form the basic building blocks for a flexible but reliable trust boundary.
 * Some annotations are always set by the webhook.
-For example, the proxy obtains its configuration via a `kroxylicious.io/proxy-config` pod annotation which is projected into the sidecar container via a `downwardAPI` volume.
-The webhook always overwrites that annotation (`kroxylicious.io/proxy-config`) on the pod, regardless of any value the app owner may have set.
-* The administrator can delegate some annotations to be specifed by/overridden the application owner. When specified by the application owner they will not be overwritten by the webhook. Examples defined in this proposal are `kroxylicious.io/sidecar-resources-cpu` and `kroxylicious.io/sidecar-resources-memory` (see below).
-* Annotations which the administrator has **not** delegated will have their effect overridden by the webhook based on the Administrator-controlled  `KroxyliciousSidecarConfig` resource. A warning will be logged when such overriding is necessary.
+For example, the proxy obtains its configuration via a `sidecar.kroxylicious.io/proxy-config` pod annotation which is projected into the sidecar container via a `downwardAPI` volume.
+The webhook always overwrites that annotation (`sidecar.kroxylicious.io/proxy-config`) on the pod, regardless of any value the app owner may have set.
+* The administrator can delegate some annotations to be specified by/overridden by the application owner. When specified by the application owner they will not be overwritten by the webhook. Examples defined in this proposal are `sidecar.kroxylicious.io/resources-cpu` and `sidecar.kroxylicious.io/resources-memory` (see below).
+* Annotations which the administrator has **not** delegated will have their effect overridden by the webhook based on the Administrator-controlled `KroxyliciousSidecarConfig` resource. A warning will be logged when such overriding is necessary.
 
 
 ### Injection decision
@@ -44,8 +44,8 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 
 | Mechanism | Key | Effect |
 |-----------|-----|--------|
-| Namespace label | `kroxylicious.io/sidecar-injection: enabled` | Webhook intercepts pod creates in this namespace |
-| Pod label | `kroxylicious.io/inject-sidecar: "false"` | Pod is excluded via `objectSelector` — never reaches the webhook |
+| Namespace label | `sidecar.kroxylicious.io/injection: enabled` | Webhook intercepts pod creates in this namespace |
+| Pod label | `sidecar.kroxylicious.io/inject: "false"` | Pod is excluded via `objectSelector` — never reaches the webhook |
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped.
 
@@ -66,7 +66,7 @@ In practice, bypassing the sidecar requires the application to deliberately hard
 A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidecar configuration. The webhook admin creates one per namespace. The following edge cases are handled:
 
 1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
-2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `kroxylicious.io/sidecar-config` annotation; without this annotation the webhook cannot choose and skips injection.
+2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
 3. **Config is invalid in a way the webhook can detect** (e.g. malformed delegated annotation values, plugin image without a digest): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
 4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable upstream Kafka, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
@@ -98,8 +98,8 @@ spec:
         reference: registry.example.com/my-filter:v1.0@sha256:abc123
         pullPolicy: IfNotPresent
   delegatedAnnotations:
-    - kroxylicious.io/sidecar-resources-cpu
-    - kroxylicious.io/sidecar-resources-memory
+    - sidecar.kroxylicious.io/resources-cpu
+    - sidecar.kroxylicious.io/resources-memory
 ```
 
 **Why a CRD, not a ConfigMap?** Schema validation by the API server, RBAC separation (admin creates, app owners can't modify), status conditions for observability, consistency with the existing Kroxylicious Kubernetes API.
@@ -108,7 +108,7 @@ spec:
 
 ### Config injection
 
-The webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` spec, using the same `Configuration` model from `kroxylicious-runtime`. The generated config is stored in a pod annotation (`kroxylicious.io/proxy-config`) and projected into the sidecar container via a `downwardAPI` volume.
+The webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` spec, using the same `Configuration` model from `kroxylicious-runtime`. The generated config is stored in a pod annotation (`sidecar.kroxylicious.io/proxy-config`) and projected into the sidecar container via a `downwardAPI` volume.
 
 This avoids creating per-pod ConfigMaps, which would require additional RBAC, lifecycle management for orphaned ConfigMaps, and unique name generation. The annotation approach is self-contained within the pod.
 
@@ -153,8 +153,8 @@ Initially it will support:
 
 | Annotation | Effect |
 |-----------|--------|
-| `kroxylicious.io/sidecar-resources-cpu` | Override CPU request/limit of the sidecar container |
-| `kroxylicious.io/sidecar-resources-memory` | Override memory request/limit of the sidecar container |
+| `sidecar.kroxylicious.io/resources-cpu` | Override CPU request/limit of the sidecar container |
+| `sidecar.kroxylicious.io/resources-memory` | Override memory request/limit of the sidecar container |
 
 Delegation is opt-in per annotation. By default nothing is delegated. 
 
@@ -164,8 +164,8 @@ The webhook stamps each injected pod with metadata annotations:
 
 | Annotation | Value |
 |-----------|-------|
-| `kroxylicious.io/config-generation` | The `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time |
-| `kroxylicious.io/injection-timestamp` | ISO-8601 timestamp of when the sidecar was injected |
+| `sidecar.kroxylicious.io/config-generation` | The `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time |
+| `sidecar.kroxylicious.io/injection-timestamp` | ISO-8601 timestamp of when the sidecar was injected |
 
 Because the webhook only mutates pods at creation time, configuration changes to `KroxyliciousSidecarConfig` do not propagate to running pods. This matches how Istio and Linkerd handle sidecar injection. Users must restart pods to pick up new configuration.
 
@@ -173,8 +173,8 @@ The generation stamp allows operators to identify stale pods:
 
 ```
 kubectl get pods -n my-ns -o json | jq '[.items[] |
-  select(.metadata.annotations["kroxylicious.io/config-generation"] != null) |
-  {name: .metadata.name, generation: .metadata.annotations["kroxylicious.io/config-generation"]}]'
+  select(.metadata.annotations["sidecar.kroxylicious.io/config-generation"] != null) |
+  {name: .metadata.name, generation: .metadata.annotations["sidecar.kroxylicious.io/config-generation"]}]'
 ```
 
 In a future iteration, a reconciler could watch for pods with outdated generations and surface an `UpToDate` condition on the `KroxyliciousSidecarConfig` status, giving operators visibility into configuration drift without requiring manual queries.
@@ -289,7 +289,7 @@ spec:
 The app owner selects a cluster by annotation:
 
 ```yaml
-kroxylicious.io/sidecar-upstream-cluster: staging
+sidecar.kroxylicious.io/upstream-cluster: staging
 ```
 
 The admin retains control over which clusters are reachable. The app owner cannot specify an arbitrary bootstrap address — only names from the allow-list are accepted. If the annotation names a cluster not in the list, or is absent when multiple clusters are defined, injection is skipped with a warning.
