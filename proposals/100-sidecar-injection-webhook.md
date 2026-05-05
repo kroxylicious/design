@@ -100,6 +100,9 @@ spec:
       cpu: 500m
       memory: 256Mi
   setBootstrapEnvVar: true           # sets KAFKA_BOOTSTRAP_SERVERS on app containers
+  secretMounts:
+    - name: kms
+      secretName: kms-credentials     # mounted at /opt/kroxylicious/secrets/kms/
   filterDefinitions:
     - name: my-filter
       type: io.example.MyFilterFactory
@@ -111,7 +114,7 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
-The `virtualClusters` list contains per-cluster settings (target bootstrap address, bootstrap port, node ID range, target cluster TLS). The alpha enforces exactly one entry (`minItems: 1`, `maxItems: 1`). Top-level fields (`managementPort`, `proxyImage`, `resources`, `filterDefinitions`, `plugins`, `setBootstrapEnvVar`) are shared across all virtual clusters.
+The `virtualClusters` list contains per-cluster settings (target bootstrap address, bootstrap port, node ID range, target cluster TLS). The alpha enforces exactly one entry (`minItems: 1`, `maxItems: 1`). Top-level fields (`managementPort`, `proxyImage`, `resources`, `filterDefinitions`, `plugins`, `secretMounts`, `setBootstrapEnvVar`) are shared across all virtual clusters.
 
 **Why a CRD, not a ConfigMap?** Schema validation by the API server, RBAC separation (admin creates, app owners can't modify), status conditions for observability, consistency with the existing Kroxylicious Kubernetes API.
 
@@ -174,7 +177,7 @@ The management endpoint binds to `0.0.0.0` because kubelet HTTP probes target th
 
 On Kubernetes 1.29+ (where the `SidecarContainers` feature gate is enabled by default), the webhook injects the proxy as a native sidecar — an init container with `restartPolicy: Always`. This gives proper startup ordering (proxy starts before the application) and shutdown ordering (proxy stops after the application). On older clusters, the webhook falls back to injecting into `spec.containers`.
 
-The webhook detects the cluster's Kubernetes version at startup and chooses the injection strategy accordingly. For clusters running alpha versions of features (e.g. native sidecars on 1.28, OCI image volumes on 1.31-1.32), the deployer can set the `FEATURE_GATES` environment variable on the webhook (e.g. `FEATURE_GATES=SidecarContainers=true,ImageVolume=true`) to override the version-based defaults.
+The webhook detects the cluster's Kubernetes version at startup and uses it to infer which features are available by default. However, the Kubernetes API server version does not reveal which alpha or beta feature gates are actually enabled on the cluster. Rather than requiring additional RBAC to query node or API server configuration, the webhook lets the deployer set the `FEATURE_GATES` environment variable explicitly (e.g. `FEATURE_GATES=SidecarContainers=true,ImageVolume=true`). This overrides the version-based defaults and is the recommended approach for clusters running features ahead of their default-on version (e.g. native sidecars on 1.28, OCI image volumes on 1.31-1.32).
 
 ### Sidecar container spec
 
@@ -191,6 +194,36 @@ The container-level security context is never weakened. If the pod already has a
 ### Target cluster TLS
 
 When `spec.virtualClusters[].targetClusterTls.trustAnchorSecretRef` is set, the webhook adds a volume mounting the referenced Secret into the sidecar and configures the proxy to use it as a PEM trust store. The Secret must exist in the pod's namespace.
+
+### Secret mounts
+
+Filter configuration is embedded in the proxy config YAML, which is stored in a pod annotation. Pod annotations are visible to anyone who can `get` pods. Filters that need secrets (e.g. KMS credentials for record encryption) must not have those values in the annotation.
+
+The `secretMounts` field on `KroxyliciousSidecarConfig` lets the webhook admin mount Kubernetes Secrets into the sidecar container. Each entry mounts all keys from the named Secret as read-only files under `/opt/kroxylicious/secrets/<name>/`. Filter config references these paths:
+
+```yaml
+spec:
+  secretMounts:
+    - name: kms
+      secretName: kms-credentials
+  filterDefinitions:
+    - name: envelope-encryption
+      type: io.kroxylicious.filter.encryption.EnvelopeEncryptionFilterFactory
+      config:
+        credentialsFile: /opt/kroxylicious/secrets/kms/credentials.json
+```
+
+The mount path is derived automatically from the `name` field — the admin does not specify `mountPath` directly. This keeps the sidecar's filesystem layout under webhook control, consistent with the operator's approach of using fixed base paths for secret volumes.
+
+**Why `secretMounts` over generic `sidecarVolumes`/`sidecarVolumeMounts`?** It signals clear intent (admin-controlled secrets for the sidecar), limits the surface to Secrets rather than arbitrary volumes, and is easier to validate. The field can be generalised later without breaking the existing API.
+
+**Trust model progression:**
+
+The CRD field for declaring secrets is stable across all the following trust levels — isolation improvements are additive webhook implementation details, not API changes.
+
+- **Alpha (filesystem isolation)**: Secrets are mounted only on the sidecar container. The app container cannot read the files because it does not have a volume mount for them. This provides defence against accidental leakage but not against a deliberately hostile app container (which could, in principle, access the files via `/proc/<pid>/root` if the process runs in the same PID namespace).
+- **Future (network isolation)**: An opt-in iptables init container (following the Istio model) could prevent the app container from reaching the services the secrets grant access to. This requires relaxing the pod security profile to allow `NET_ADMIN` on the init container, so it would be opt-in rather than default.
+- **Further future (container-level network namespaces)**: Kubernetes may add container-level network namespaces, providing network isolation without requiring `NET_ADMIN`.
 
 ### Configuration drift detection
 
