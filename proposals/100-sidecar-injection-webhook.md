@@ -70,7 +70,7 @@ A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidec
 
 1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
 2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
-3. **Config is invalid in a way the webhook can detect** (e.g. malformed delegated annotation values, plugin image without a digest): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
+3. **Config is invalid in a way the webhook can detect** (e.g. malformed delegated annotation values): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
 4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
 ```yaml
@@ -344,11 +344,10 @@ This is the lowest-risk form of delegation — the app owner chooses a network d
 
 ### Future delegation
 
-The delegated annotations mechanism (bootstrap port, node ID range, resource requests, plugin images) described above provides a general-purpose extension point for further delegation. These are ordered roughly by blast radius:
+The delegated annotations mechanism (bootstrap port, node ID range, resource requests) described above provides a general-purpose extension point for further delegation. These are ordered roughly by blast radius:
 
 1. **Port and resource overrides** — app owner adjusts operational parameters. Low risk.
 2. **Filter configuration** — app owner adjusts parameters on admin-selected filters. Medium risk: bounded by the filter's config surface.
-3. **Plugin image selection** — app owner chooses what code runs in the proxy JVM. High risk: arbitrary code execution (see security analysis above).
 
 All delegation beyond target cluster selection requires the admin to explicitly list the delegated annotations. Nothing is delegated by default.
 
