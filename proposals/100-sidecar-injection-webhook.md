@@ -51,7 +51,7 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 | Namespace label | `sidecar.kroxylicious.io/injection: enabled` | Webhook intercepts pod creates in this namespace |
 | Pod label | `sidecar.kroxylicious.io/injection: disabled` | Pod is excluded via `objectSelector` — never reaches the webhook |
 
-The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped.
+The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped. This is a name-based check, so a pod owner could circumvent injection by pre-adding a container with that name. This is accepted for the alpha — a determined pod owner can also opt out via labels. See [Configuration drift detection](#configuration-drift-detection) for a stronger approach planned for a future iteration.
 
 The failure policy of the webhook will be configurable.
 It will default to fail closed (`failurePolicy: Fail`), which is safe, but sacrifices availability of the Kubernetes control plane to admit workloads in cases where the webhook experiences internal errors.
@@ -246,6 +246,14 @@ kubectl get pods -n my-ns -o json | jq '[.items[] |
 ```
 
 In a future iteration, a reconciler could watch for pods with outdated generations and surface an `UpToDate` condition on the `KroxyliciousSidecarConfig` status, giving operators visibility into configuration drift without requiring manual queries.
+
+#### Annotation-based idempotency (future)
+
+The current idempotency check (container name) is weak: it can be circumvented by a pod owner pre-adding a container named `kroxylicious-proxy`, and it does not detect configuration drift during reinvocation. A stronger approach is to compare the `sidecar.kroxylicious.io/proxy-config` annotation on the pod against the configuration the webhook would generate right now. If the annotation is absent or differs, the webhook injects (or re-injects); if it matches, injection is skipped.
+
+This works because `ProxyConfigGenerator.generateConfig()` is deterministic: given the same `KroxyliciousSidecarConfigSpec` inputs, Jackson serialisation produces identical YAML. String equality on the annotation value is therefore a reliable idempotency check within the same webhook version. This also handles the reinvocation case (`reinvocationPolicy: IfNeeded`): if another mutating webhook modifies the pod after initial injection, the webhook can verify that the proxy config annotation is still correct.
+
+The generation stamp remains useful for fleet-wide drift detection (comparing against the current `KroxyliciousSidecarConfig` generation without reconstructing the expected config), but the annotation comparison becomes the primary idempotency mechanism.
 
 ### Third-party plugin support
 
