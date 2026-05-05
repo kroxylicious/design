@@ -17,6 +17,7 @@ A sidecar model is useful when:
 - The application should connect to Kafka via `localhost` rather than through a shared proxy tier.
 - Per-pod filter configuration is needed (e.g. different encryption keys per tenant).
 - The organisation prefers a service mesh-style deployment where each pod carries its own proxy.
+- The ownership of policy applied by the proxy is distinct from the ownership of the Kafka application.
 
 Manual sidecar construction is error-prone and creates a maintenance burden. A webhook automates injection, enforces a consistent security posture, and gives the webhook administrator control over what runs in the sidecar.
 
@@ -29,9 +30,11 @@ The webhook operates under a two-party trust model:
 - **Webhook administrator**: controls what gets injected — the proxy image, target Kafka address, filter definitions, security context. These are not overridable by the app owner.
 - **Application pod owner**: can opt out of injection via pod labels, and can select a specific `KroxyliciousSidecarConfig` by name via the `sidecar.kroxylicious.io/config` annotation.
 
+The initial implementation assumes that the application pod owner is not adversarial in the security sense: They're not actively trying to subvert the policies being enforced by the injected proxy.
+
 Pod annotations in the `sidecar.kroxylicious.io/` namespace form the building blocks for this trust boundary:
 * Some annotations are always set by the webhook.
-For example, the webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` and stores it in a `sidecar.kroxylicious.io/proxy-config` pod annotation (see [Config injection](#config-injection)).
+For example, the webhook generates proxy configuration YAML based on the `KroxyliciousSidecarConfig` and stores it in a `sidecar.kroxylicious.io/proxy-config` pod annotation (see [Config injection](#config-injection)).
 This annotation is projected into the sidecar container as a file via a `downwardAPI` volume.
 The webhook always overwrites `sidecar.kroxylicious.io/proxy-config` on the pod, regardless of any value the app owner may have set.
 * The `sidecar.kroxylicious.io/config` annotation allows the app owner to select which `KroxyliciousSidecarConfig` applies when multiple exist in the namespace.
@@ -46,7 +49,7 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 | Mechanism | Key | Effect |
 |-----------|-----|--------|
 | Namespace label | `sidecar.kroxylicious.io/injection: enabled` | Webhook intercepts pod creates in this namespace |
-| Pod label | `sidecar.kroxylicious.io/inject: "false"` | Pod is excluded via `objectSelector` — never reaches the webhook |
+| Pod label | `sidecar.kroxylicious.io/injection: disabled` | Pod is excluded via `objectSelector` — never reaches the webhook |
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped.
 
