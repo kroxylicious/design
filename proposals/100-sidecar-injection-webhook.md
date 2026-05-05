@@ -179,11 +179,13 @@ The webhook detects the cluster's Kubernetes version at startup and chooses the 
 
 The injected sidecar follows the same patterns as `ProxyDeploymentDependentResource` in the operator:
 
-- `securityContext`: `allowPrivilegeEscalation: false`, `capabilities: drop ALL`, `readOnlyRootFilesystem: true`
-- Probes: `startupProbe` (30 x 2s), `livenessProbe`, `readinessProbe` — all HTTP GET `/livez` on port 9190
+- Container-level `securityContext`: `allowPrivilegeEscalation: false`, `capabilities: drop ALL`, `readOnlyRootFilesystem: true`
+- Probes: `startupProbe` (initialDelay 5s, period 2s, failure threshold 30), `livenessProbe` (initialDelay 30s, period 10s, failure threshold 3), `readinessProbe` (initialDelay 5s, period 2s, failure threshold 5) — all HTTP GET `/livez` on the management port (default 9082)
 - `terminationMessagePolicy: FallbackToLogsOnError`
 
-The security context is never weakened. If the pod already has a stricter security context, it is preserved.
+If the pod has no pod-level `securityContext`, the webhook sets `runAsNonRoot: true` and `seccompProfile: RuntimeDefault`. If a pod-level security context is already present, it is left unchanged — the webhook does not attempt to merge or strengthen it.
+
+The container-level security context is never weakened. If the pod already has a stricter security context, it is preserved.
 
 ### Target cluster TLS
 
