@@ -131,7 +131,7 @@ The webhook maintains a single condition type:
 |-----------|---------|
 | `Ready` | The webhook has observed and accepted this configuration. `observedGeneration` on the condition tracks which generation was acknowledged. |
 
-The webhook sets `Ready=True` (reason `Accepted`) when it first observes the config via its informer. The condition is only updated when the generation changes, avoiding unnecessary status writes. If the status update fails (e.g. conflict), the webhook logs a warning but continues to inject pods normally — status is informational, not load-bearing.
+The webhook sets `Ready=True` (reason `Accepted`) when it first observes the config via its informer. The condition is only updated when the generation changes, avoiding unnecessary status writes. Status update failures (e.g. conflicts) should be retried; persistent failures should be surfaced via logging so that operators can investigate. A status update failure does not block pod admission, but a `KroxyliciousSidecarConfig` with a stale or missing `Ready` condition indicates a problem that needs attention.
 
 Example status:
 
@@ -147,7 +147,7 @@ status:
       observedGeneration: 3
 ```
 
-This gives operators visibility into whether the webhook has picked up the latest configuration, complementing the per-pod `sidecar.kroxylicious.io/config-generation` annotation for drift detection.
+This gives operators visibility into whether the webhook has picked up the latest configuration, complementing the per-pod `sidecar.kroxylicious.io/config-generation` annotation for drift detection. The user documentation should describe how these mechanisms work together and how operators are expected to use them to reason about the state of their sidecar fleet.
 
 ### Config injection
 
@@ -183,7 +183,7 @@ The injected sidecar follows the same patterns as `ProxyDeploymentDependentResou
 - Probes: `startupProbe` (initialDelay 5s, period 2s, failure threshold 30), `livenessProbe` (initialDelay 30s, period 10s, failure threshold 3), `readinessProbe` (initialDelay 5s, period 2s, failure threshold 5) — all HTTP GET `/livez` on the management port (default 9082)
 - `terminationMessagePolicy: FallbackToLogsOnError`
 
-If the pod has no pod-level `securityContext`, the webhook sets `runAsNonRoot: true` and `seccompProfile: RuntimeDefault`. If a pod-level security context is already present, it is left unchanged — the webhook does not attempt to merge or strengthen it.
+The webhook does not set a pod-level `securityContext`. Pod-level security policies (e.g. `runAsNonRoot`, `seccompProfile`) are the responsibility of the cluster admin via Kubernetes `PodSecurity` admission (`pod-security.kubernetes.io/enforce: restricted` namespace label) or equivalent policy enforcement. Setting pod-level security context from a mutating webhook risks ordering conflicts with other webhooks.
 
 The container-level security context is never weakened. If the pod already has a stricter security context, it is preserved.
 
