@@ -116,6 +116,39 @@ spec:
 
 **Why not reuse the operator's CRDs?** The operator CRDs model a shared proxy deployment with ingress networking, multi-cluster support, and cross-resource references. The sidecar use case is fundamentally simpler — one virtual cluster, localhost binding, no ingress. Coupling them would constrain both models.
 
+#### Status
+
+The CRD has a `status` subresource with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `observedGeneration` | `int64` | The `metadata.generation` most recently observed by the webhook |
+| `conditions` | `[]Condition` | Standard Kubernetes conditions (see below) |
+
+The webhook maintains a single condition type:
+
+| Condition | Meaning |
+|-----------|---------|
+| `Ready` | The webhook has observed and accepted this configuration. `observedGeneration` on the condition tracks which generation was acknowledged. |
+
+The webhook sets `Ready=True` (reason `Accepted`) when it first observes the config via its informer. The condition is only updated when the generation changes, avoiding unnecessary status writes. If the status update fails (e.g. conflict), the webhook logs a warning but continues to inject pods normally — status is informational, not load-bearing.
+
+Example status:
+
+```yaml
+status:
+  observedGeneration: 3
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: Accepted
+      message: ""
+      lastTransitionTime: "2025-01-15T10:30:00Z"
+      observedGeneration: 3
+```
+
+This gives operators visibility into whether the webhook has picked up the latest configuration, complementing the per-pod `sidecar.kroxylicious.io/config-generation` annotation for drift detection.
+
 ### Config injection
 
 The webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` spec, using the same `Configuration` model from `kroxylicious-runtime`. The generated config is stored in a pod annotation (`sidecar.kroxylicious.io/proxy-config`) and projected into the sidecar container via a `downwardAPI` volume.
@@ -337,17 +370,16 @@ The webhook is packaged as a container image and deployed as a single-replica `D
 
 The webhook operates independently of the operator. It does not depend on the operator being deployed, does not use JOSDK, and does not reference operator CRDs.
 
-The only shared dependencies are:
+The only shared dependency is:
 
-- `kroxylicious-kubernetes-api` — for the CRD Java types
 - `kroxylicious-runtime` — for the proxy `Configuration` model, used to generate valid proxy config YAML
 
 ## Affected/not affected projects
 
 | Project | Affected | Nature of change |
 |---------|----------|-----------------|
-| `kroxylicious-kubernetes-web-hook` | Yes | New module |
-| `kroxylicious-kubernetes-api` | Yes | New CRD: `KroxyliciousSidecarConfig` |
+| `kroxylicious-kubernetes/kroxylicious-admission` | Yes | New module: webhook implementation |
+| `kroxylicious-kubernetes/kroxylicious-admission-api` | Yes | New module: `KroxyliciousSidecarConfig` CRD |
 | `kroxylicious-app` | Already merged | `classpath-plugins/` directory scanning |
 | `kroxylicious-operator` | No | |
 | `kroxylicious-runtime` | No | Used as a dependency, not modified |
