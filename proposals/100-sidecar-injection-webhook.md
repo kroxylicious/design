@@ -24,19 +24,19 @@ Manual sidecar construction is error-prone and creates a maintenance burden. A w
 
 ### Trust model
 
-The webhook is design to eventually operate under a strict two-party trust model:
+The webhook operates under a two-party trust model:
 
-- **Webhook administrator**: controls what gets injected — the proxy image, target Kafka address, filter definitions, security context. These are never overridable by the app owner.
-- **Application pod owner**: can opt out of injection, and may override specific settings (bootstrap port, node ID range, resource requests) if the admin explicitly delegates those annotations.
+- **Webhook administrator**: controls what gets injected — the proxy image, target Kafka address, filter definitions, security context. These are not overridable by the app owner.
+- **Application pod owner**: can opt out of injection via pod labels, and can select a specific `KroxyliciousSidecarConfig` by name via the `sidecar.kroxylicious.io/config` annotation.
 
-Making the boundary between the webhook administrator and the application pod owner a _reliable_ trust boundary will require further development than is specified in this proposal.
-However pod annotations in the `sidecar.kroxylicious.io/` namespace form the basic building blocks for a flexible but reliable trust boundary.
+Pod annotations in the `sidecar.kroxylicious.io/` namespace form the building blocks for this trust boundary:
 * Some annotations are always set by the webhook.
 For example, the webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` and stores it in a `sidecar.kroxylicious.io/proxy-config` pod annotation (see [Config injection](#config-injection)).
 This annotation is projected into the sidecar container as a file via a `downwardAPI` volume.
 The webhook always overwrites `sidecar.kroxylicious.io/proxy-config` on the pod, regardless of any value the app owner may have set.
-* The administrator can delegate some annotations to be specified by/overridden by the application owner. When specified by the application owner they will not be overwritten by the webhook. Examples defined in this proposal are `sidecar.kroxylicious.io/resources-cpu` and `sidecar.kroxylicious.io/resources-memory` (see below).
-* Annotations which the administrator has **not** delegated will have their effect overridden by the webhook based on the Administrator-controlled `KroxyliciousSidecarConfig` resource. A warning will be logged when such overriding is necessary.
+* The `sidecar.kroxylicious.io/config` annotation allows the app owner to select which `KroxyliciousSidecarConfig` applies when multiple exist in the namespace.
+
+Annotation-based delegation of operational parameters (resource overrides, filter configuration) is not included in this proposal but could be added in a future iteration (see [Future delegation](#future-delegation)).
 
 
 ### Injection decision
@@ -70,7 +70,7 @@ A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidec
 
 1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
 2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
-3. **Config is invalid in a way the webhook can detect** (e.g. malformed delegated annotation values): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
+3. **Config is invalid in a way the webhook can detect** (e.g. missing required fields): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
 4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
 ```yaml
@@ -79,42 +79,43 @@ kind: KroxyliciousSidecarConfig
 metadata:
   name: my-config
 spec:
-  targetBootstrapServers: kafka-prod.internal:9092
-  bootstrapPort: 9092              # default, configurable
-  nodeIdRange:
-    startInclusive: 0
-    endInclusive: 2
-  managementPort: 9082             # default, configurable
+  virtualClusters:
+    - name: my-cluster
+      targetBootstrapServers: kafka-prod.internal:9092
+      bootstrapPort: 9092            # default, configurable
+      nodeIdRange:
+        startInclusive: 0
+        endInclusive: 2
+      targetClusterTls:
+        trustAnchorSecretRef:
+          name: kafka-ca
+          key: ca.crt
+  managementPort: 9082               # default, configurable
   proxyImage: quay.io/kroxylicious/proxy:0.21.0   # optional override
-  resources:                       # default resource requests/limits for the sidecar
+  resources:                         # resource requests/limits for the sidecar
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
       cpu: 500m
       memory: 256Mi
-  setBootstrapEnvVar: true         # sets KAFKA_BOOTSTRAP_SERVERS on app containers
+  setBootstrapEnvVar: true           # sets KAFKA_BOOTSTRAP_SERVERS on app containers
   filterDefinitions:
     - name: my-filter
       type: io.example.MyFilterFactory
       config: { ... }
-  targetClusterTls:
-    trustAnchorSecretRef:
-      name: kafka-ca
-      key: ca.crt
   plugins:
     - name: my-plugin
       image:
         reference: registry.example.com/my-filter:v1.0@sha256:abc123
         pullPolicy: IfNotPresent
-  delegatedAnnotations:
-    - sidecar.kroxylicious.io/resources-cpu
-    - sidecar.kroxylicious.io/resources-memory
 ```
+
+The `virtualClusters` list contains per-cluster settings (target bootstrap address, bootstrap port, node ID range, target cluster TLS). The alpha enforces exactly one entry (`minItems: 1`, `maxItems: 1`). Top-level fields (`managementPort`, `proxyImage`, `resources`, `filterDefinitions`, `plugins`, `setBootstrapEnvVar`) are shared across all virtual clusters.
 
 **Why a CRD, not a ConfigMap?** Schema validation by the API server, RBAC separation (admin creates, app owners can't modify), status conditions for observability, consistency with the existing Kroxylicious Kubernetes API.
 
-**Why not reuse the operator's CRDs?** The operator CRDs model a shared proxy deployment with ingress networking, multi-cluster support, and cross-resource references. The sidecar use case is fundamentally simpler — one virtual cluster, localhost binding, no ingress. Coupling them would constrain both models.
+**Why not reuse the operator's CRDs?** The operator CRDs model a shared proxy deployment with ingress networking, multi-cluster support, and cross-resource references. The sidecar use case is fundamentally simpler — localhost binding, no ingress, a single virtual cluster in the alpha. Coupling them would constrain both models.
 
 #### Status
 
@@ -161,11 +162,11 @@ A typical sidecar config is a few hundred bytes, well within the ~256KB practica
 
 | Port | Purpose | Bind address |
 |------|---------|-------------|
-| 9092 | Kafka bootstrap | `localhost` |
-| 9093+ | Per-broker ports (one per node ID) | `localhost` |
-| 9082 | Management (`/livez`, `/metrics`) | `0.0.0.0` |
+| `bootstrapPort` (default 9092) | Kafka bootstrap | `localhost` |
+| `bootstrapPort`+1 onwards | Per-broker ports (one per node ID) | `localhost` |
+| `managementPort` (default 9082) | Management (`/livez`, `/metrics`) | `0.0.0.0` |
 
-The webhook sets `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` on application containers (configurable, can be disabled).
+The webhook sets `KAFKA_BOOTSTRAP_SERVERS=localhost:<bootstrapPort>` on application containers (configurable via `setBootstrapEnvVar`, defaults to `true`).
 
 The management endpoint binds to `0.0.0.0` because kubelet HTTP probes target the pod IP, not loopback. This means the application container can also reach `/livez` and `/metrics`, but neither endpoint exposes sensitive data.
 
@@ -189,20 +190,7 @@ The container-level security context is never weakened. If the pod already has a
 
 ### Target cluster TLS
 
-When `spec.targetClusterTls.trustAnchorSecretRef` is set, the webhook adds a volume mounting the referenced Secret into the sidecar and configures the proxy to use it as a PEM trust store. The Secret must exist in the pod's namespace.
-
-### Delegated annotations
-
-The `delegatedAnnotations` field in `KroxyliciousSidecarConfig` lists which annotations the app owner may set on their pod to override sidecar parameters. The admin sets defaults via the CRD spec (e.g. `spec.resources`); delegation allows the app owner to override those defaults for a specific pod.
-
-Initially it will support:
-
-| Annotation | Effect |
-|-----------|--------|
-| `sidecar.kroxylicious.io/resources-cpu` | Override the CPU request/limit from `spec.resources` |
-| `sidecar.kroxylicious.io/resources-memory` | Override the memory request/limit from `spec.resources` |
-
-Delegation is opt-in per annotation. By default nothing is delegated.
+When `spec.virtualClusters[].targetClusterTls.trustAnchorSecretRef` is set, the webhook adds a volume mounting the referenced Secret into the sidecar and configures the proxy to use it as a PEM trust store. The Secret must exist in the pod's namespace.
 
 ### Configuration drift detection
 
@@ -317,39 +305,18 @@ When the admin specifies plugin images in `KroxyliciousSidecarConfig.spec.plugin
 - **Supply chain**: a compromised plugin image contains malicious code with access to Kafka traffic and mounted credentials. Mitigate with image signing and digest-pinned references.
 - **Dependency conflicts**: as described above under flat classpath limitations.
 
-### Target cluster selection
+### Virtual clusters
 
-In many deployments the admin manages multiple Kafka clusters (e.g. production, staging) and the app owner needs to choose which one their pod connects to. Rather than creating a separate `KroxyliciousSidecarConfig` per cluster, the admin defines an allow-list of named target clusters:
+The `virtualClusters` list defines the target Kafka clusters that the sidecar proxy will serve. Each entry specifies a name, target bootstrap address, localhost listening port, node ID range, and optional TLS configuration.
 
-```yaml
-spec:
-  allowedTargetClusters:
-    - name: production
-      bootstrapServers: kafka-prod.internal:9092
-    - name: staging
-      bootstrapServers: kafka-staging.internal:9092
-```
-
-The app owner selects a cluster by annotation:
-
-```yaml
-sidecar.kroxylicious.io/target-cluster: staging
-```
-
-The admin retains control over which clusters are reachable. The app owner cannot specify an arbitrary bootstrap address — only names from the allow-list are accepted. If the annotation names a cluster not in the list, or is absent when multiple clusters are defined, injection is skipped with a warning.
-
-When `allowedTargetClusters` is not set, the existing `targetBootstrapServers` field is used directly and there is no cluster selection.
-
-This is the lowest-risk form of delegation — the app owner chooses a network destination from an admin-controlled set — and is likely the highest-demand delegation feature for app teams. It is included in the initial implementation.
+The alpha enforces exactly one virtual cluster entry (`minItems: 1`, `maxItems: 1`). The list structure is forward-looking: future iterations could relax `maxItems` to support multi-cluster applications (e.g. MirrorMaker2) where a single pod connects to multiple Kafka clusters through the same sidecar. App-owner selection of virtual cluster by name or annotation is deferred.
 
 ### Future delegation
 
-The delegated annotations mechanism (bootstrap port, node ID range, resource requests) described above provides a general-purpose extension point for further delegation. These are ordered roughly by blast radius:
+Annotation-based delegation could allow the app owner to override specific sidecar parameters on a per-pod basis, with the admin explicitly opting in via the `KroxyliciousSidecarConfig`. Possible future delegation, ordered roughly by blast radius:
 
-1. **Port and resource overrides** — app owner adjusts operational parameters. Low risk.
+1. **Resource overrides** — app owner adjusts CPU/memory requests and limits. Low risk.
 2. **Filter configuration** — app owner adjusts parameters on admin-selected filters. Medium risk: bounded by the filter's config surface.
-
-All delegation beyond target cluster selection requires the admin to explicitly list the delegated annotations. Nothing is delegated by default.
 
 ### Webhook deployment
 
