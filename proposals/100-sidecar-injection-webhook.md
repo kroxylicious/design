@@ -132,6 +132,7 @@ When the webhook skips injection for a reason other than pod opt-out, it labels 
 |-------|---------|
 | `no-config` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
 | `already-injected` | A container named `kroxylicious-proxy` already exists in the pod |
+| `multiple-configs` | Multiple `KroxyliciousSidecarConfig` resources exist in the namespace and no explicit config was selected via annotation |
 
 Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them.
 
