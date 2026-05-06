@@ -53,6 +53,24 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped. This is a name-based check, so a pod owner could circumvent injection by pre-adding a container with that name. This is accepted for the alpha — a determined pod owner can also opt out via labels. See [Configuration drift detection](#configuration-drift-detection) for a stronger approach planned for a future iteration.
 
+#### Skip labelling
+
+When the webhook skips injection for a reason other than pod opt-out, it labels the pod with `sidecar.kroxylicious.io/injection-skipped` so that operators can find affected pods without grepping logs. The label value indicates the reason:
+
+| Value | Meaning |
+|-------|---------|
+| `no-config` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
+| `already-injected` | A container named `kroxylicious-proxy` already exists in the pod |
+
+Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them.
+
+This allows operators to enumerate skipped pods:
+
+```
+kubectl get pods -l sidecar.kroxylicious.io/injection-skipped
+kubectl get pods -l sidecar.kroxylicious.io/injection-skipped=no-config
+```
+
 The failure policy of the webhook will be configurable.
 It will default to fail closed (`failurePolicy: Fail`), which is safe, but sacrifices availability of the Kubernetes control plane to admit workloads in cases where the webhook experiences internal errors.
 When configured to fail open and the webhook experiences an internal errors, it will log the error and return `allowed: true`; the pod will be admitted unmodified. 
@@ -69,7 +87,7 @@ SASL handling (e.g. rejecting downstream SASL handshakes or requiring proxy-init
 
 ### CRD: `KroxyliciousSidecarConfig`
 
-A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidecar configuration. The webhook admin creates one per namespace. The following edge cases are handled:
+A namespaced CRD (group `sidecar.kroxylicious.io`, version `v1alpha1`) defines the sidecar configuration. The webhook admin creates one per namespace. The following edge cases are handled:
 
 1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
 2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
@@ -77,7 +95,7 @@ A namespaced CRD (group `kroxylicious.io`, version `v1alpha1`) defines the sidec
 4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
 ```yaml
-apiVersion: kroxylicious.io/v1alpha1
+apiVersion: sidecar.kroxylicious.io/v1alpha1
 kind: KroxyliciousSidecarConfig
 metadata:
   name: my-config
