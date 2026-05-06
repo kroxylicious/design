@@ -1,4 +1,4 @@
-# Proposal 016 — Sidecar Injection Webhook
+# 100 - Sidecar Injection Webhook
 
 A Kubernetes mutating admission webhook that automatically injects a Kroxylicious proxy sidecar into application pods. The sidecar intercepts Kafka traffic on localhost, allowing filters to be applied transparently without changes to the application.
 
