@@ -53,27 +53,10 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped. This is a name-based check, so a pod owner could circumvent injection by pre-adding a container with that name. This is accepted for the alpha — a determined pod owner can also opt out via labels. See [Configuration drift detection](#configuration-drift-detection) for a stronger approach planned for a future iteration.
 
-#### Skip labelling
-
-When the webhook skips injection for a reason other than pod opt-out, it labels the pod with `sidecar.kroxylicious.io/injection-skipped` so that operators can find affected pods without grepping logs. The label value indicates the reason:
-
-| Value | Meaning |
-|-------|---------|
-| `no-config` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
-| `already-injected` | A container named `kroxylicious-proxy` already exists in the pod |
-
-Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them.
-
-This allows operators to enumerate skipped pods:
-
-```
-kubectl get pods -l sidecar.kroxylicious.io/injection-skipped
-kubectl get pods -l sidecar.kroxylicious.io/injection-skipped=no-config
-```
-
 The failure policy of the webhook will be configurable.
 It will default to fail closed (`failurePolicy: Fail`), which is safe, but sacrifices availability of the Kubernetes control plane to admit workloads in cases where the webhook experiences internal errors.
-When configured to fail open and the webhook experiences an internal errors, it will log the error and return `allowed: true`; the pod will be admitted unmodified. 
+When configured to fail open and the webhook experiences an internal error, it will log the error and return `allowed: true`; the pod will be admitted unmodified. 
+
 
 #### Bypass prevention
 
@@ -87,12 +70,7 @@ SASL handling (e.g. rejecting downstream SASL handshakes or requiring proxy-init
 
 ### CRD: `KroxyliciousSidecarConfig`
 
-A namespaced CRD (group `sidecar.kroxylicious.io`, version `v1alpha1`) defines the sidecar configuration. The webhook admin creates one per namespace. The following edge cases are handled:
-
-1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
-2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
-3. **Config is invalid in a way the webhook can detect** (e.g. missing required fields): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
-4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
+A namespaced CRD (group `sidecar.kroxylicious.io`, version `v1alpha1`) defines the sidecar configuration. 
 
 ```yaml
 apiVersion: sidecar.kroxylicious.io/v1alpha1
@@ -141,6 +119,64 @@ The `virtualClusters` list contains per-cluster settings (target bootstrap addre
 
 **Why not reuse the operator's CRDs?** The operator CRDs model a shared proxy deployment with ingress networking, multi-cluster support, and cross-resource references. The sidecar use case is fundamentally simpler — localhost binding, no ingress, a single virtual cluster in the alpha. Coupling them would constrain both models.
 
+The webhook admin creates one per namespace. The following edge cases are handled:
+
+1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
+2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
+3. **Config is invalid in a way the webhook can detect** (e.g. missing required fields): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
+4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
+
+When the webhook skips injection for a reason other than pod opt-out, it labels the pod with `sidecar.kroxylicious.io/injection-skipped` so that operators can find affected pods without grepping logs. The label value indicates the reason:
+
+| Value | Meaning |
+|-------|---------|
+| `no-config` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
+| `already-injected` | A container named `kroxylicious-proxy` already exists in the pod |
+
+Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them.
+
+This allows operators to enumerate skipped pods:
+
+```
+kubectl get pods -l sidecar.kroxylicious.io/injection-skipped
+kubectl get pods -l sidecar.kroxylicious.io/injection-skipped=no-config
+```
+
+### Config injection
+
+The webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` spec, using the same `Configuration` model from `kroxylicious-runtime`. The generated config is stored in a pod annotation (`sidecar.kroxylicious.io/proxy-config`) and projected into the sidecar container via a `downwardAPI` volume.
+
+This avoids creating per-pod ConfigMaps, which would require additional RBAC, lifecycle management for orphaned ConfigMaps, and unique name generation. The annotation approach is self-contained within the pod.
+
+A typical sidecar config is a few hundred bytes, well within the ~256KB practical annotation size limit.
+
+### Configuration drift detection
+
+The webhook stamps each injected pod with a `sidecar.kroxylicious.io/config-generation` annotation recording the `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time. This annotation serves two purposes:
+
+1. **Idempotency guard**: its presence indicates that the sidecar has already been injected, preventing re-injection when the webhook is reinvoked.
+2. **Drift detection**: its value can be compared (equality only) with the current generation of the `KroxyliciousSidecarConfig` to identify pods running stale configuration.
+
+Because the webhook only mutates pods at creation time, configuration changes to `KroxyliciousSidecarConfig` do not propagate to running pods. This matches how Istio and Linkerd handle sidecar injection. Users must restart pods to pick up new configuration.
+
+The generation stamp allows operators to identify stale pods:
+
+```
+kubectl get pods -n my-ns -o json | jq '[.items[] |
+  select(.metadata.annotations["sidecar.kroxylicious.io/config-generation"] != null) |
+  {name: .metadata.name, generation: .metadata.annotations["sidecar.kroxylicious.io/config-generation"]}]'
+```
+
+In a future iteration, a reconciler could watch for pods with outdated generations and surface an `UpToDate` condition on the `KroxyliciousSidecarConfig` status, giving operators visibility into configuration drift without requiring manual queries.
+
+#### Annotation-based idempotency (future)
+
+The current idempotency check (container name) is weak: it can be circumvented by a pod owner pre-adding a container named `kroxylicious-proxy`, and it does not detect configuration drift during reinvocation. A stronger approach is to compare the `sidecar.kroxylicious.io/proxy-config` annotation on the pod against the configuration the webhook would generate right now. If the annotation is absent or differs, the webhook injects (or re-injects); if it matches, injection is skipped.
+
+This works because `ProxyConfigGenerator.generateConfig()` is deterministic: given the same `KroxyliciousSidecarConfigSpec` inputs, Jackson serialisation produces identical YAML. String equality on the annotation value is therefore a reliable idempotency check within the same webhook version. This also handles the reinvocation case (`reinvocationPolicy: IfNeeded`): if another mutating webhook modifies the pod after initial injection, the webhook can verify that the proxy config annotation is still correct.
+
+The generation stamp remains useful for fleet-wide drift detection (comparing against the current `KroxyliciousSidecarConfig` generation without reconstructing the expected config), but the annotation comparison becomes the primary idempotency mechanism.
+
 #### Status
 
 The CRD has a `status` subresource with the following fields:
@@ -173,14 +209,6 @@ status:
 ```
 
 This gives operators visibility into whether the webhook has picked up the latest configuration, complementing the per-pod `sidecar.kroxylicious.io/config-generation` annotation for drift detection. The user documentation should describe how these mechanisms work together and how operators are expected to use them to reason about the state of their sidecar fleet.
-
-### Config injection
-
-The webhook generates proxy configuration YAML from the `KroxyliciousSidecarConfig` spec, using the same `Configuration` model from `kroxylicious-runtime`. The generated config is stored in a pod annotation (`sidecar.kroxylicious.io/proxy-config`) and projected into the sidecar container via a `downwardAPI` volume.
-
-This avoids creating per-pod ConfigMaps, which would require additional RBAC, lifecycle management for orphaned ConfigMaps, and unique name generation. The annotation approach is self-contained within the pod.
-
-A typical sidecar config is a few hundred bytes, well within the ~256KB practical annotation size limit.
 
 ### Port allocation
 
@@ -245,33 +273,6 @@ The CRD field for declaring secrets is stable across all the following trust lev
 - **Alpha (filesystem isolation)**: Secrets are mounted only on the sidecar container. The app container cannot read the files because it does not have a volume mount for them. This provides defence against accidental leakage but not against a deliberately hostile app container (which could, in principle, access the files via `/proc/<pid>/root` if the process runs in the same PID namespace).
 - **Future (network isolation)**: An opt-in iptables init container (following the Istio model) could prevent the app container from reaching the services the secrets grant access to. This requires relaxing the pod security profile to allow `NET_ADMIN` on the init container, so it would be opt-in rather than default.
 - **Further future (container-level network namespaces)**: Kubernetes may add container-level network namespaces, providing network isolation without requiring `NET_ADMIN`.
-
-### Configuration drift detection
-
-The webhook stamps each injected pod with a `sidecar.kroxylicious.io/config-generation` annotation recording the `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time. This annotation serves two purposes:
-
-1. **Idempotency guard**: its presence indicates that the sidecar has already been injected, preventing re-injection when the webhook is reinvoked.
-2. **Drift detection**: its value can be compared (equality only) with the current generation of the `KroxyliciousSidecarConfig` to identify pods running stale configuration.
-
-Because the webhook only mutates pods at creation time, configuration changes to `KroxyliciousSidecarConfig` do not propagate to running pods. This matches how Istio and Linkerd handle sidecar injection. Users must restart pods to pick up new configuration.
-
-The generation stamp allows operators to identify stale pods:
-
-```
-kubectl get pods -n my-ns -o json | jq '[.items[] |
-  select(.metadata.annotations["sidecar.kroxylicious.io/config-generation"] != null) |
-  {name: .metadata.name, generation: .metadata.annotations["sidecar.kroxylicious.io/config-generation"]}]'
-```
-
-In a future iteration, a reconciler could watch for pods with outdated generations and surface an `UpToDate` condition on the `KroxyliciousSidecarConfig` status, giving operators visibility into configuration drift without requiring manual queries.
-
-#### Annotation-based idempotency (future)
-
-The current idempotency check (container name) is weak: it can be circumvented by a pod owner pre-adding a container named `kroxylicious-proxy`, and it does not detect configuration drift during reinvocation. A stronger approach is to compare the `sidecar.kroxylicious.io/proxy-config` annotation on the pod against the configuration the webhook would generate right now. If the annotation is absent or differs, the webhook injects (or re-injects); if it matches, injection is skipped.
-
-This works because `ProxyConfigGenerator.generateConfig()` is deterministic: given the same `KroxyliciousSidecarConfigSpec` inputs, Jackson serialisation produces identical YAML. String equality on the annotation value is therefore a reliable idempotency check within the same webhook version. This also handles the reinvocation case (`reinvocationPolicy: IfNeeded`): if another mutating webhook modifies the pod after initial injection, the webhook can verify that the proxy config annotation is still correct.
-
-The generation stamp remains useful for fleet-wide drift detection (comparing against the current `KroxyliciousSidecarConfig` generation without reconstructing the expected config), but the annotation comparison becomes the primary idempotency mechanism.
 
 ### Third-party plugin support
 
