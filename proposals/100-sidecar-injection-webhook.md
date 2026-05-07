@@ -130,17 +130,17 @@ When the webhook skips injection for a reason other than pod opt-out, it labels 
 
 | Value | Meaning |
 |-------|---------|
-| `no-config` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
-| `already-injected` | A container named `kroxylicious-proxy` already exists in the pod |
-| `multiple-configs` | Multiple `KroxyliciousSidecarConfig` resources exist in the namespace and no explicit config was selected via annotation |
+| `no-KroxyliciousSidecarConfig` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
+| `ambiguous-KroxyliciousSidecarConfig` | Multiple `KroxyliciousSidecarConfig` resources exist in the namespace and no explicit config was selected via annotation |
+| `container-name-conflict` | A container named `kroxylicious-proxy` already exists in the pod |
 
-Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them.
+Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them. Reinvocation of the webhook (e.g. due to `reinvocationPolicy: IfNeeded`) is expected Kubernetes behaviour and does not set the label.
 
 This allows operators to enumerate skipped pods:
 
 ```
 kubectl get pods -l sidecar.kroxylicious.io/injection-skipped
-kubectl get pods -l sidecar.kroxylicious.io/injection-skipped=no-config
+kubectl get pods -l sidecar.kroxylicious.io/injection-skipped=no-KroxyliciousSidecarConfig
 ```
 
 ### Config injection
@@ -174,7 +174,9 @@ In a future iteration, a reconciler could watch for pods with outdated generatio
 
 The current idempotency check (container name) is weak: it can be circumvented by a pod owner pre-adding a container named `kroxylicious-proxy`, and it does not detect configuration drift during reinvocation. A stronger approach is to compare the `sidecar.kroxylicious.io/proxy-config` annotation on the pod against the configuration the webhook would generate right now. If the annotation is absent or differs, the webhook injects (or re-injects); if it matches, injection is skipped.
 
-This works because `ProxyConfigGenerator.generateConfig()` is deterministic: given the same `KroxyliciousSidecarConfigSpec` inputs, Jackson serialisation produces identical YAML. String equality on the annotation value is therefore a reliable idempotency check within the same webhook version. This also handles the reinvocation case (`reinvocationPolicy: IfNeeded`): if another mutating webhook modifies the pod after initial injection, the webhook can verify that the proxy config annotation is still correct.
+For annotation comparison to be a reliable idempotency check, config generation must be deterministic: the same `KroxyliciousSidecarConfigSpec` must always produce byte-identical serialised output within a given webhook version. The implementation must guarantee this; how it does so is not a concern of this proposal. String equality on the annotation value is therefore a reliable idempotency check within the same webhook version. This also handles the reinvocation case (`reinvocationPolicy: IfNeeded`): if another mutating webhook modifies the pod after initial injection, the webhook can verify that the proxy config annotation is still correct.
+
+A webhook upgrade that changes serialisation output means existing pods' annotations no longer match what the webhook would generate, making them appear as configuration drift even though the `KroxyliciousSidecarConfig` itself hasn't changed. Since nothing proactively re-injects running pods, remediation requires pods to cycle.
 
 The generation stamp remains useful for fleet-wide drift detection (comparing against the current `KroxyliciousSidecarConfig` generation without reconstructing the expected config), but the annotation comparison becomes the primary idempotency mechanism.
 
@@ -189,13 +191,16 @@ The CRD has a `status` subresource with the following fields:
 
 The webhook maintains a single condition type:
 
-| Condition | Meaning |
-|-----------|---------|
-| `Ready` | The webhook has observed and accepted this configuration. `observedGeneration` on the condition tracks which generation was acknowledged. |
+| Condition | Status | Reason | Meaning |
+|-----------|--------|--------|---------|
+| `Ready` | `True` | `Accepted` | The webhook has observed and accepted this configuration. |
+| `Ready` | `False` | `Invalid` | The webhook has observed this configuration and determined it is invalid. The `message` field describes the problem. |
 
-The webhook sets `Ready=True` (reason `Accepted`) when it first observes the config via its informer. The condition is only updated when the generation changes, avoiding unnecessary status writes. Status update failures (e.g. conflicts) should be retried; persistent failures should be surfaced via logging so that operators can investigate. A status update failure does not block pod admission, but a `KroxyliciousSidecarConfig` with a stale or missing `Ready` condition indicates a problem that needs attention.
+The webhook sets `Ready=True` (reason `Accepted`) when it first observes a valid config via its informer. If the webhook can determine that the config is invalid (e.g. missing required fields beyond what the CRD schema enforces), it sets `Ready=False` (reason `Invalid`) with a descriptive message, surfacing the problem directly on the CRD where an operator would naturally look. The condition is only updated when the generation changes, avoiding unnecessary status writes. Status update failures (e.g. conflicts) should be retried; persistent failures should be surfaced via logging so that operators can investigate. A status update failure does not block pod admission, but a `KroxyliciousSidecarConfig` with a stale or missing `Ready` condition indicates a problem that needs attention.
 
-Example status:
+Per-namespace issues (no config found, multiple ambiguous configs) are not properties of a single CRD and are surfaced via the `sidecar.kroxylicious.io/injection-skipped` label on affected pods.
+
+Example status (valid config):
 
 ```yaml
 status:
@@ -207,6 +212,20 @@ status:
       message: ""
       lastTransitionTime: "2025-01-15T10:30:00Z"
       observedGeneration: 3
+```
+
+Example status (invalid config):
+
+```yaml
+status:
+  observedGeneration: 2
+  conditions:
+    - type: Ready
+      status: "False"
+      reason: Invalid
+      message: "spec.virtualClusters[0].targetBootstrapServers is required"
+      lastTransitionTime: "2025-01-15T10:25:00Z"
+      observedGeneration: 2
 ```
 
 This gives operators visibility into whether the webhook has picked up the latest configuration, complementing the per-pod `sidecar.kroxylicious.io/config-generation` annotation for drift detection. The user documentation should describe how these mechanisms work together and how operators are expected to use them to reason about the state of their sidecar fleet.
@@ -227,17 +246,19 @@ The management endpoint binds to `0.0.0.0` because kubelet HTTP probes target th
 
 On Kubernetes 1.29+ (where the `SidecarContainers` feature gate is enabled by default), the webhook injects the proxy as a native sidecar — an init container with `restartPolicy: Always`. This gives proper startup ordering (proxy starts before the application) and shutdown ordering (proxy stops after the application). On older clusters, the webhook falls back to injecting into `spec.containers`.
 
-The webhook detects the cluster's Kubernetes version at startup and uses it to infer which features are available by default. However, the Kubernetes API server version does not reveal which alpha or beta feature gates are actually enabled on the cluster. Rather than requiring additional RBAC to query node or API server configuration, the webhook lets the deployer set the `FEATURE_GATES` environment variable explicitly (e.g. `FEATURE_GATES=SidecarContainers=true,ImageVolume=true`). This overrides the version-based defaults and is the recommended approach for clusters running features ahead of their default-on version (e.g. native sidecars on 1.28, OCI image volumes on 1.31-1.32).
+The webhook detects the cluster's Kubernetes version at startup and uses it to infer which features are available by default. However, the Kubernetes API server version does not reveal which alpha or beta feature gates are actually enabled on the cluster. Rather than requiring additional RBAC to query node or API server configuration, the webhook supports a `K8S_FEATURE_GATES` environment variable as an escape hatch (e.g. `K8S_FEATURE_GATES=SidecarContainers=true,ImageVolume=true`). This overrides the version-based defaults for clusters running features ahead of their default-on version (e.g. native sidecars on 1.28, OCI image volumes on 1.31-1.32). Deployers who set this variable are responsible for keeping it in sync with their cluster configuration; version-based detection is the recommended default.
 
 ### Sidecar container spec
 
 The injected sidecar follows the same patterns as `ProxyDeploymentDependentResource` in the operator:
 
-- Container-level `securityContext`: `allowPrivilegeEscalation: false`, `capabilities: drop ALL`, `readOnlyRootFilesystem: true`
+- Container-level `securityContext`: `allowPrivilegeEscalation: false`, `capabilities: drop ALL`, `readOnlyRootFilesystem: true`, `seccompProfile: RuntimeDefault`
 - Probes: `startupProbe` (initialDelay 5s, period 2s, failure threshold 30), `livenessProbe` (initialDelay 30s, period 10s, failure threshold 3), `readinessProbe` (initialDelay 5s, period 2s, failure threshold 5) — all HTTP GET `/livez` on the management port (default 9082)
 - `terminationMessagePolicy: FallbackToLogsOnError`
 
 The webhook does not set a pod-level `securityContext`. Pod-level security policies (e.g. `runAsNonRoot`, `seccompProfile`) are the responsibility of the cluster admin via Kubernetes `PodSecurity` admission (`pod-security.kubernetes.io/enforce: restricted` namespace label) or equivalent policy enforcement. Setting pod-level security context from a mutating webhook risks ordering conflicts with other webhooks.
+
+The sidecar explicitly sets `seccompProfile: RuntimeDefault` at the container level, so it does not inherit a permissive pod-level profile (e.g. `Unconfined`). Container-level seccomp profiles override pod-level, so this does not affect the application container. Future iterations could allow configuring the sidecar's seccomp profile via `KroxyliciousSidecarConfig` if the proxy itself needs a different profile (e.g. for io_uring).
 
 The container-level security context is never weakened. If the pod already has a stricter security context, it is preserved.
 
