@@ -53,9 +53,9 @@ Injection is opt-in at the namespace level and opt-out at the pod level, followi
 
 The `MutatingWebhookConfiguration` uses `namespaceSelector` to scope interception and `objectSelector` to exclude opted-out pods. The webhook itself is idempotent: if a container named `kroxylicious-proxy` already exists, injection is skipped. This is a name-based check, so a pod owner could circumvent injection by pre-adding a container with that name. This is accepted for the alpha — a determined pod owner can also opt out via labels. See [Configuration drift detection](#configuration-drift-detection) for a stronger approach planned for a future iteration.
 
-The failure policy of the webhook will be configurable.
-It will default to fail closed (`failurePolicy: Fail`), which is safe, but sacrifices availability of the Kubernetes control plane to admit workloads in cases where the webhook experiences internal errors.
-When configured to fail open and the webhook experiences an internal error, it will log the error and return `allowed: true`; the pod will be admitted unmodified. 
+The `MutatingWebhookConfiguration` sets `failurePolicy: Fail` (fail-closed). If the webhook is unreachable or returns an error, Kubernetes rejects the pod. On unexpected internal errors, the webhook returns HTTP 500 and lets the K8s failure policy govern the outcome — there is no separate application-level failure policy.
+
+A separate `UNINJECTED_POD_POLICY` environment variable (default `Admit`) controls what happens when the webhook successfully processes a request but cannot inject — for example, because there is no `KroxyliciousSidecarConfig` in the namespace or multiple configs exist without an explicit selection. When set to `Admit`, the pod is admitted without injection (consistent with Istio/Linkerd behaviour). When set to `Deny`, the pod is rejected, ensuring no workload runs un-proxied in a namespace where injection is expected.
 
 
 #### Bypass prevention
@@ -119,11 +119,11 @@ The `virtualClusters` list contains per-cluster settings (target bootstrap addre
 
 **Why not reuse the operator's CRDs?** The operator CRDs model a shared proxy deployment with ingress networking, multi-cluster support, and cross-resource references. The sidecar use case is fundamentally simpler — localhost binding, no ingress, a single virtual cluster in the alpha. Coupling them would constrain both models.
 
-The webhook admin creates one per namespace. The following edge cases are handled:
+The webhook admin creates one or more per namespace. The following edge cases are handled:
 
-1. **No config in namespace**: the pod is admitted without injection (debug log only). This is the common case for namespaces where the admin has enabled the namespace label but not yet created a config.
-2. **Multiple configs in namespace**: the pod is admitted without injection (warning logged). The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose and skips injection.
-3. **Config is invalid in a way the webhook can detect** (e.g. missing required fields): the webhook logs a warning and admits the pod without injection. Consistent with fail-open semantics.
+1. **No config in namespace**: governed by `UNINJECTED_POD_POLICY`. When `Admit` (default), the pod is admitted without injection (debug log only) — this is the common case for namespaces where the admin has enabled the namespace label but not yet created a config. When `Deny`, the pod is rejected.
+2. **Multiple configs in namespace**: governed by `UNINJECTED_POD_POLICY`. The pod can select a specific config via the `sidecar.kroxylicious.io/config` annotation; without this annotation the webhook cannot choose. When `Admit`, the pod is admitted without injection (warning logged). When `Deny`, the pod is rejected.
+3. **Config is invalid in a way the webhook can detect** (e.g. missing required fields): governed by `UNINJECTED_POD_POLICY`. When `Admit`, the webhook logs a warning and admits the pod without injection. When `Deny`, the pod is rejected.
 4. **Config is invalid in a way only the proxy can detect** (e.g. unreachable target Kafka cluster, wrong TLS trust anchor, non-existent filter type): the webhook injects the sidecar normally. The proxy will fail its startup probe and the pod will not become ready, surfacing the problem via standard Kubernetes health-check mechanisms.
 
 When the webhook skips injection for a reason other than pod opt-out, it labels the pod with `sidecar.kroxylicious.io/injection-skipped` so that operators can find affected pods without grepping logs. The label value indicates the reason:
@@ -405,7 +405,7 @@ Annotation-based delegation could allow the app owner to override specific sidec
 
 ### Webhook deployment
 
-The webhook is packaged as a container image and deployed as a single-replica `Deployment` in a dedicated `kroxylicious-webhook` namespace. Install manifests are provided for:
+The webhook is packaged as a container image and deployed as a multi-replica `Deployment` (2 replicas, with a `PodDisruptionBudget` and pod anti-affinity) in a dedicated `kroxylicious-webhook` namespace. Install manifests are provided for:
 
 - Namespace, ServiceAccount, ClusterRole, ClusterRoleBinding
 - Deployment (port 8443)
