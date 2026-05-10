@@ -415,7 +415,12 @@ The webhook is packaged as a container image and deployed as a multi-replica `De
 
 **TLS**: Kubernetes requires HTTPS for admission webhooks. The primary path uses cert-manager with a self-signed issuer. A manual alternative (admin provides cert/key Secret) is documented. The webhook watches cert files for rotation and reloads the SSLContext.
 
-**RBAC**: The webhook needs only `get`, `list`, `watch` on `KroxyliciousSidecarConfig` resources and `get`, `list`, `watch` on namespaces. No ConfigMap or Secret creation permissions are needed.
+**RBAC**: The webhook needs only:
+* `get`, `list`, `watch` on `KroxyliciousSidecarConfig` resources, 
+* `get`, `patch` and `update` on `KroxyliciousSidecarConfig/status`,
+
+No permissions on namespaces are needed: the selection/filtering of the namespaces is done by the Kubernete's admission controller, using the `MutatingWebhookConfiguration`'s `namespaceSelector`, rather than in the webhook itself.
+No `ConfigMap` or `Secret` creation permissions are needed since references to these resources from the `KroxyliciousSidecarConfig` are not validated by the webhook.
 
 **HTTP server**: Uses the JDK built-in `HttpsServer` (same pattern as `OperatorMain.java`), serving `POST /mutate` and `GET /livez`. No additional HTTP framework dependencies.
 
