@@ -133,6 +133,9 @@ When the webhook skips injection for a reason other than pod opt-out, it labels 
 | `no-KroxyliciousSidecarConfig` | No `KroxyliciousSidecarConfig` was found for the pod's namespace |
 | `ambiguous-KroxyliciousSidecarConfig` | Multiple `KroxyliciousSidecarConfig` resources exist in the namespace and no explicit config was selected via annotation |
 | `container-name-conflict` | A container named `kroxylicious-proxy` already exists in the pod |
+| `invalid-KroxyliciousSidecarConfig` | The resolved `KroxyliciousSidecarConfig` failed webhook-side validation |
+
+In practice, `invalid-KroxyliciousSidecarConfig` is not expected to occur for structural issues because the CRD schema validation enforced by the API server covers those constraints. However, the webhook also validates cross-field semantic constraints that cannot be expressed in the OpenAPI schema (such as port collisions between `bootstrapPort` and `managementPort`, or broker port ranges exceeding 65535). The label and admission-time check exist as a defensive guard for structural issues and as the primary enforcement point for semantic issues.
 
 Pods that opted out via `sidecar.kroxylicious.io/injection: disabled` are not labelled — they already carry a label that identifies them. Reinvocation of the webhook (e.g. due to `reinvocationPolicy: IfNeeded`) is expected Kubernetes behaviour and does not set the label.
 
@@ -153,10 +156,7 @@ A typical sidecar config is a few hundred bytes, well within the ~256KB practica
 
 ### Configuration drift detection
 
-The webhook stamps each injected pod with a `sidecar.kroxylicious.io/config-generation` annotation recording the `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time. This annotation serves two purposes:
-
-1. **Idempotency guard**: its presence indicates that the sidecar has already been injected, preventing re-injection when the webhook is reinvoked.
-2. **Drift detection**: its value can be compared (equality only) with the current generation of the `KroxyliciousSidecarConfig` to identify pods running stale configuration.
+The webhook stamps each injected pod with a `sidecar.kroxylicious.io/config-generation` annotation recording the `metadata.generation` of the `KroxyliciousSidecarConfig` at injection time. This annotation serves drift detection: its value can be compared (equality only) with the current generation of the `KroxyliciousSidecarConfig` to identify pods running stale configuration. Idempotency currently relies on the container name check described below.
 
 Because the webhook only mutates pods at creation time, configuration changes to `KroxyliciousSidecarConfig` do not propagate to running pods. This matches how Istio and Linkerd handle sidecar injection. Users must restart pods to pick up new configuration.
 
