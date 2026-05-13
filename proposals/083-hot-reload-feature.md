@@ -4,7 +4,7 @@
 
 This proposal introduces a mechanism for applying configuration changes to a running Kroxylicious proxy without a full restart. It defines a core `KafkaProxy.applyConfiguration(Configuration)` operation that accepts a complete configuration, detects what changed, and converges the running state to match — restarting only the affected virtual clusters while leaving unaffected clusters available.
 
-This proposal extends the virtual cluster lifecycle model (Proposal 016) with reload operations, an edge-based failure policy, and a configuration change orchestration layer. Where Proposal 016 defines the per-VC state machine and the `VirtualClusterManager` that owns it, this proposal defines the change detection pipeline, the reload orchestration, and the two policy layers (terminal failure and configuration failure) that govern how the proxy responds to problems during reload.
+This proposal extends the virtual cluster lifecycle model (Proposal 016) with reload operations, an edge-based failure policy, and a configuration change orchestration layer. Where Proposal 016 defines the per-VC state machine and the `VirtualClusterRegistry` that owns it, this proposal defines the change detection pipeline, the reload orchestration, and the two policy layers (terminal failure and configuration failure) that govern how the proxy responds to problems during reload.
 
 ## Current situation
 
@@ -41,14 +41,23 @@ class KafkaProxy {
    *
    * <h2>Scope</h2>
    * <p>This method handles <em>replacement</em> configurations on an already-running
-   * proxy. The initial configuration continues to be supplied via the {@link KafkaProxy}
-   * constructor at proxy startup; that path is unchanged by this proposal.
+   * proxy. The initial configuration is supplied via the {@link KafkaProxy}
+   * constructor at proxy startup.
    *
    * <p>Within that scope, this method applies only the virtual-cluster sections of
    * the configuration and the named filter definitions that those virtual clusters
    * reference. Other configuration sections (management, metrics, admin, etc.) are
-   * out of scope and are not reconciled by this operation; changes to those sections
-   * still require a proxy restart.
+   * out of scope.
+   *
+   * <p>If {@code newConfig} differs from the running configuration in any out-of-scope
+   * section, the apply is rejected as a pre-flight check before any virtual-cluster
+   * change is attempted: the returned future completes exceptionally with an
+   * {@link OutOfScopeChangeException} naming the differing section(s) and the proxy's
+   * running state is unchanged. Changes to those sections still require a proxy restart.
+   * Rejecting (rather than silently ignoring) out-of-scope diffs preserves freedom of
+   * manoeuvre: if a future iteration supports hot-reload of additional sections, the
+   * exception simply stops being thrown for those sections — silent-ignore would by
+   * contrast become a breaking semantic change without an API-version bump.
    *
    * <h2>Validation contract</h2>
    * <p>Static validation (schema conformance, required fields, field-value
@@ -71,8 +80,13 @@ class KafkaProxy {
    *
    * <p>All other failures surface through the returned future:
    * <ul>
-   *   <li><b>Catastrophic failure</b> — the apply could not be evaluated (e.g.
-   *       internal proxy bug, unexpected I/O failure inside the orchestrator).
+   *   <li><b>Input rejection</b> — the submitted configuration is not acceptable
+   *       to this method (e.g. a change to an out-of-scope section). Detected as a
+   *       pre-flight check before any state change is attempted; no virtual cluster
+   *       is touched. The future completes exceptionally with a specific exception
+   *       type identifying the rejection reason (e.g. {@link OutOfScopeChangeException}).</li>
+   *   <li><b>Catastrophic failure</b> — the apply began but could not be completed
+   *       (e.g. internal proxy bug, unexpected I/O failure inside the orchestrator).
    *       The future completes exceptionally.</li>
    *   <li><b>Per-component failure</b> — the apply was evaluated and one or
    *       more components (virtual clusters or referenced filters) failed to
@@ -185,6 +199,8 @@ proxy.applyConfiguration(newConfig)
      });
 ```
 
+The caller supplies `oldConfig` from its own state — the proxy does not currently expose a getter for its running configuration. This is sufficient because triggers that perform rollback typically already have their own source-of-truth for the previous desired state (a Kubernetes ConfigMap revision, an HTTP-endpoint request history, a previously-loaded file). If a future use case requires the proxy to be queryable for its current state, an accessor can be added without changing the `applyConfiguration` contract.
+
 Each of these is a trigger-side concern. The proxy does not need to know which policy is in use, and adding a new policy in the future does not require any proxy changes.
 
 **Trigger mechanisms are explicitly out of scope for this proposal.** The `KafkaProxy.applyConfiguration()` operation is the internal interface that any trigger plugs into. How the new configuration arrives — whether via an HTTP endpoint, a file watcher detecting a changed ConfigMap, or a Kubernetes operator callback — is a separate concern. Deferring this keeps the proposal focused and avoids blocking on unresolved questions about trigger design (see [Trigger mechanisms](#trigger-mechanisms-future-work) below).
@@ -196,33 +212,36 @@ When `KafkaProxy.applyConfiguration()` is called, the proxy compares the new con
 - **`VirtualClusterChangeDetector`** — identifies clusters that were added, removed, or modified by comparing `VirtualClusterModel` instances via `equals()`. A cluster requires a restart if any property that contributes to `VirtualClusterModel.equals()` changed (bootstrap address, TLS settings, gateway configuration, etc.).
 - **`FilterChangeDetector`** — identifies clusters affected by filter configuration changes. A cluster requires a restart if a `NamedFilterDefinition` it references changed (type or configuration, compared via `equals()`), or if the `defaultFilters` list changed (order matters, since filter chain execution is sequential) and the cluster relies on default filters.
 
-Detectors return a `ChangeResult(clustersToRemove, clustersToAdd, clustersToModify)`. Results from all detectors are aggregated and then passed onto `VirtualClusterManager` to perform relevant operations.
+Detectors return a `ChangeResult(clustersToRemove, clustersToAdd, clustersToModify)`. Results from all detectors are aggregated and then passed onto `VirtualClusterRegistry` to perform relevant operations.
 
 Clusters where none of these changed are left untouched — they continue serving traffic throughout the apply operation.
 
 ### Cluster modification via lifecycle transitions
 
-A modified virtual cluster is restarted by driving it through the lifecycle states defined in Proposal 016. Proposal 016 defines the per-VC state machine (`VirtualClusterLifecycleState`) and the `VirtualClusterRegistry` that enforces valid transitions. This proposal adds the reload operations that drive those transitions.
+The reload operations are exposed as **methods on `VirtualClusterRegistry`** (Proposal 016). Each method drives the per-VC state machine (`VirtualClusterLifecycleState`) through one of three transition sequences. This proposal adds these methods; Proposal 016's existing state machine and transition guards are unchanged.
 
-The three change operations map to lifecycle transitions as follows:
+**`removeVirtualCluster(clusterName)`**
 
-**Modify (Restart VC):** `SERVING → DRAINING → [drain connections] → [deregister gateways] → INITIALIZING → [register gateways] → SERVING`
+- **Lifecycle path:** `SERVING → DRAINING → [drain connections] → [deregister gateways] → STOPPED`
+- **Behaviour:** The cluster is permanently torn down. It reaches the terminal Stopped state via the `draining → stopped` edge.
+- **Failure reporting:** This is an intentional removal, not a failure; it is not reported through `ConfigurationResult.errors()`.
 
-A modified cluster is torn down and rebuilt with the new configuration. During restart, the lifecycle state cycles through Draining and back to Initializing without ever reaching the terminal Stopped state.
+**`replaceVirtualCluster(clusterName, newModel)`**
 
-**Remove:** `SERVING → DRAINING → [drain connections] → [deregister gateways] → STOPPED`
+- **Intent:** Apply a new configuration to an existing cluster. The method is named by intent rather than implementation.
+- **Current implementation:** Equivalent to `removeVirtualCluster(clusterName)` followed by `addVirtualCluster(newModel)` — the cluster cycles through `SERVING → DRAINING → [drain connections] → [deregister gateways] → INITIALIZING → [register gateways] → SERVING`. Clients connected to the cluster are disconnected during the drain phase.
+- **Caveats of the current implementation:** The drain + re-init approach means a replaced cluster experiences a brief period of unavailability while its ports are unbound and rebound. It also creates a thundering herd when all disconnected clients reconnect simultaneously after the cluster comes back up; mitigation strategies (e.g. staggered connection acceptance) are future work. These are properties of the *current implementation*, not of the `replaceVirtualCluster` contract — a future implementation may eliminate them without breaking callers.
+- **Failure reporting:** If the invocation fails — i.e. the VC traverses the `initializing → failed → stopped` path during the apply — the failure is reported as a `ConfigurationError` entry in the result returned to the caller. The caller decides whether to retry, rollback, alert, or shut down via the `whenComplete` patterns shown above.
 
-A removed cluster is permanently torn down. It reaches the terminal Stopped state via `draining → stopped`. This is an intentional removal, not a failure; it is not reported through `ConfigurationResult.errors()`.
+**`addVirtualCluster(newModel)`**
 
-If a *modify* or *add* operation fails — i.e. a VC traverses the `initializing → failed → stopped` path during the apply — the failure is reported as a `ConfigurationError` entry in the result returned to the caller. The caller decides whether to retry, rollback, alert, or shut down via the `whenComplete` patterns shown above.
+- **Lifecycle path:** `[create lifecycle manager in INITIALIZING] → [register gateways] → SERVING`
+- **Behaviour:** A new cluster starts in the Initializing state with a fresh `VirtualClusterLifecycle`, registers its gateways with the `EndpointRegistry`, and transitions to Serving.
+- **Failure reporting:** If the invocation fails — i.e. the VC traverses the `initializing → failed → stopped` path during the apply — the failure is reported as a `ConfigurationError` entry in the result returned to the caller. The caller decides whether to retry, rollback, alert, or shut down via the `whenComplete` patterns shown above.
 
-**Add:** `[create lifecycle manager in INITIALIZING] → [register gateways] → SERVING`
+**Processing order**
 
-A new cluster starts in the Initializing state with a fresh `VirtualClusterLifecycleManager`, registers its gateways with the `EndpointRegistry`, and transitions to Serving.
-
-Changes are processed in the order: **remove → modify → add**. Removing clusters first frees up ports and resources that new or modified clusters may need.
-
-This means a modified cluster experiences a brief period of unavailability while its ports are unbound and rebound. Clients connected to the cluster will be disconnected during the drain phase. This is a deliberate design choice. More surgical approaches — such as swapping the filter chain on existing connections without dropping them, or performing a rolling handoff — would reduce disruption, but they add significant complexity. The remove+add approach is the right starting point: it is straightforward, predictable, and consistent with how the proxy handles startup failures today. The remove+add approach also creates a thundering herd when all disconnected clients reconnect simultaneously after the cluster comes back up; mitigation strategies (e.g. staggered connection acceptance) are future work.
+Changes are processed in the order: **remove → replace → add**. Removing clusters first frees up ports and resources that new or replacement clusters may need.
 
 ### Graceful connection draining
 
@@ -231,6 +250,22 @@ Before tearing down a modified or removed cluster, the proxy drives its lifecycl
 Once all connections are drained (or the drain timeout expires), the lifecycle transitions out of Draining:
 - For **restart**, gateways are deregistered and re-registered, the lifecycle transitions through Initializing to Serving.
 - For **remove**, the lifecycle manager transitions from Draining to Stopped via `drainComplete()`. This is the `draining → stopped` edge — the terminal failure callback does **not** fire.
+
+
+### ConfigurationReloadOrchestrator
+
+`ConfigurationReloadOrchestrator` is an internal class of `kroxylicious-runtime`. It is not part of the public API; embedders interact with the proxy only via `KafkaProxy.applyConfiguration()`. `KafkaProxy` constructs and holds the orchestrator privately, and embedders never obtain a reference to it.
+
+The orchestrator owns the apply pipeline end-to-end. Its responsibilities are:
+
+- **Concurrency control** — serialises overlapping apply calls (see [Concurrency control](#concurrency-control) below).
+- **Pre-flight validation** — runs static-validation on `newConfig` before any state-changing work, and rejects out-of-scope changes (see the Javadoc on `KafkaProxy.applyConfiguration` and the [Orchestration pipeline](#orchestration-pipeline) section below).
+- **Change detection** — calls the `VirtualClusterChangeDetector` and `FilterChangeDetector` (described in [Configuration change detection](#configuration-change-detection) above) directly. The detectors are internal collaborators of the orchestrator; the orchestrator does *not* receive a pre-computed `ChangeResult` from `KafkaProxy`.
+- **Per-VC change execution** — drives the `VirtualClusterRegistry` (Proposal 016) to apply the detected changes in `removeVirtualCluster → replaceVirtualCluster → addVirtualCluster` order. Each method invocation runs the corresponding per-VC lifecycle transitions described in [Cluster modification via lifecycle transitions](#cluster-modification-via-lifecycle-transitions) above.
+- **`FilterChainFactory` hot-swap** — atomically swaps the `FilterChainFactory` reference held by `KafkaProxy` on success (see [FilterChainFactory hot-swap](#filterchainfactory-hot-swap) below).
+- **Result construction** — accumulates per-component outcomes into a `ConfigurationResult` and completes the future returned to the caller.
+
+The orchestrator does **not** own connection-level mechanics, per-VC lifecycle state, or endpoint registration — those remain with the per-VC `VirtualClusterLifecycle`, the `VirtualClusterRegistry` (both Proposal 016), and the `EndpointRegistry` (existing infrastructure) respectively. The orchestrator coordinates these collaborators; it does not duplicate their responsibilities.
 
 
 ### FilterChainFactory hot-swap
@@ -265,6 +300,9 @@ The complete `KafkaProxy.applyConfiguration()` pipeline flows through these laye
 KafkaProxy.applyConfiguration(newConfig)
     │
     ├── Guards: proxy must be running, orchestrator must be initialized
+    ├── Pre-flight: reject if newConfig differs from current config in any
+    │   out-of-scope section (future completes exceptionally with
+    │   OutOfScopeChangeException; no further evaluation)
     │
     ▼
 ConfigurationReloadOrchestrator.reload(newConfig)
@@ -272,26 +310,23 @@ ConfigurationReloadOrchestrator.reload(newConfig)
     ├── Acquires reloadLock (prevents concurrent reloads)
     ├── Validates new configuration via Features framework
     ├── Creates new FilterChainFactory with updated filter definitions
-    ├── Builds ConfigurationChangeContext (old/new config, models, factories)
     │
-    ▼
-ConfigurationChangeHandler.handleConfigurationChange(context)
-    │
-    ├── Aggregates ChangeDetector results:
+    ├── Aggregates ChangeDetector results (called directly by orchestrator):
     │     VirtualClusterChangeDetector → added/removed/modified VCs
     │     FilterChangeDetector → VCs affected by filter changes
     │
-    ├── Processes changes in order: Remove → Modify → Add
-    │     For each change: invoke the corresponding VirtualClusterManager
-    │     method. Accumulate successes; collect failures as ConfigurationError
-    │     entries.
+    ├── Processes changes in order: remove → replace → add
+    │     For each change: invoke the corresponding VirtualClusterRegistry
+    │     method (removeVirtualCluster / replaceVirtualCluster / addVirtualCluster).
+    │     Accumulate successes; collect failures as ConfigurationError entries.
     │
     ▼
-VirtualClusterManager (for each affected VC)
+VirtualClusterRegistry (for each affected VC)
     │
-    ├── removeVirtualCluster:   SERVING → DRAINING → drain → deregister → STOPPED
-    ├── restartVirtualCluster:  SERVING → DRAINING → drain → deregister → INITIALIZING → register → SERVING
-    ├── addVirtualCluster:      INITIALIZING → register → SERVING
+    ├── removeVirtualCluster:    SERVING → DRAINING → drain → deregister → STOPPED
+    ├── replaceVirtualCluster:   SERVING → DRAINING → drain → deregister → INITIALIZING → register → SERVING
+    │                            (current impl; intent is "apply newModel" — future impl may be more surgical)
+    ├── addVirtualCluster:       INITIALIZING → register → SERVING
     │
     ▼
 On success (no errors): swap FilterChainFactory, update current config, complete
@@ -429,5 +464,5 @@ Each of these can be designed and implemented independently once the core `Kafka
 - **`ConfigurationReconciler` naming**: Considered to describe the "compare desired vs current and converge" pattern, but rejected because Kubernetes reconcilers already exist in the Kroxylicious codebase and overloading the term would cause confusion.
 - **Plan/apply split on the public interface**: Considered exposing separate `plan()` and `apply()` methods to enable dry-run validation. Decided this is an internal concern — the trigger just needs `KafkaProxy.applyConfiguration()`. A validate/dry-run capability can be added later without changing the interface.
 - **Inline configuration via HTTP POST body**: Discussed having the HTTP endpoint accept the full YAML configuration in the request body. An alternative view is that configuration should always live in files (for source control, auditability, consistent state) and the HTTP endpoint should just trigger reading from a specified file path. This question is deferred along with the HTTP trigger design.
-- **Separate VirtualClusterManager for reload**: The original hot-reload design had a `VirtualClusterManager` that was purely an operation orchestrator (with `EndpointRegistry` and `ConnectionDrainManager` dependencies). Rather than maintaining two classes with the same name, the reload operations merge into the [Proposal 016](https://github.com/kroxylicious/design/blob/main/proposals/016-virtual-cluster-lifecycle.md) `VirtualClusterManager`, which already owns the VC model list and lifecycle managers. The merged class gains `EndpointRegistry` and `ConnectionDrainManager` dependencies and the `removeVirtualCluster`/`restartVirtualCluster`/`addVirtualCluster` methods.
+- **Separate VirtualClusterManager for reload**: The original hot-reload design had a `VirtualClusterManager` that was purely an operation orchestrator (with `EndpointRegistry` and `ConnectionDrainManager` dependencies). Rather than maintaining two classes with the same name, the reload operations merge into the [Proposal 016](https://github.com/kroxylicious/design/blob/main/proposals/016-virtual-cluster-lifecycle.md) class (originally also called `VirtualClusterManager`, renamed to `VirtualClusterRegistry` in kroxylicious PR #3888), which already owns the VC model list and lifecycle managers. The merged class gains `EndpointRegistry` and `ConnectionDrainManager` dependencies and the `removeVirtualCluster`/`replaceVirtualCluster`/`addVirtualCluster` methods.
 - **Two terminal states (`Stopped` and `TerminallyFailed`)**: Considered adding a separate terminal state for unrecoverable failures. Rejected because the distinction is about the transition edge, not the terminal state — a stopped cluster is permanently done regardless of why. The edge-based policy hook achieves the same goal without adding state machine complexity.
