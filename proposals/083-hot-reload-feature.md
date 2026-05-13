@@ -147,6 +147,11 @@ Because the proxy does not act on `errors()`, callers express their failure poli
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
+         if (ex instanceof ConcurrentApplyException) {
+             // Another apply is in flight; the proxy is healthy. Don't shut down — retry later.
+             LOGGER.atWarn().log("apply rejected: another apply in progress; will retry");
+             return;
+         }
          if (ex != null) {
              LOGGER.atError().setCause(ex).log("Configuration apply failed catastrophically");
              proxy.shutdown();
@@ -171,6 +176,10 @@ The future completes with the aggregate result *before* any action is taken, so 
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
+         if (ex instanceof ConcurrentApplyException) {
+             // Another apply is in flight; not a real failure — trigger can retry later.
+             return;
+         }
          if (ex != null) {
              alerter.send("catastrophic-apply-failure", ex);
              return;
@@ -187,16 +196,20 @@ proxy.applyConfiguration(newConfig)
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
-         if (result != null && result.hasErrors()) {
-             proxy.applyConfiguration(oldConfig)
+        if (ex instanceof ConcurrentApplyException) {
+        // Another apply is in flight; not a real failure — trigger can retry later.
+        return;
+        }
+        if (result != null && result.hasErrors()) {
+        proxy.applyConfiguration(oldConfig)
                   .whenComplete((rollbackResult, rollbackEx) -> {
-                      if (rollbackEx != null || rollbackResult.hasErrors()) {
-                          // rollback itself failed — last-resort policy
-                          proxy.shutdown();
+        if (rollbackEx != null || rollbackResult.hasErrors()) {
+        // rollback itself failed — last-resort policy
+        proxy.shutdown();
                       }
-                  });
-         }
-     });
+                              });
+                              }
+                              });
 ```
 
 The caller supplies `oldConfig` from its own state — the proxy does not currently expose a getter for its running configuration. This is sufficient because triggers that perform rollback typically already have their own source-of-truth for the previous desired state (a Kubernetes ConfigMap revision, an HTTP-endpoint request history, a previously-loaded file). If a future use case requires the proxy to be queryable for its current state, an accessor can be added without changing the `applyConfiguration` contract.
@@ -350,6 +363,13 @@ Rejecting (rather than queuing) the second call is deliberate. Queuing would rai
 By rejecting fast, the proxy forces these decisions onto the trigger, where they can be made with full knowledge of the trigger's source of truth. A trigger that wants "always apply the most recent config" can implement it cleanly via the rejection-and-retry loop (debounce, then call `applyConfiguration` with the latest config); a trigger that needs different semantics can implement those too without the proxy having pre-committed to a policy.
 
 `ConcurrentApplyException` is the exceptional-completion cause for this scenario (i.e. accessed via `future.exceptionally(...)` or the `ex` parameter of `whenComplete`, not thrown synchronously from `applyConfiguration` itself — that distinction matches the rest of the error-reporting contract).
+
+**Implication for callers' error-handling patterns.** Because `ConcurrentApplyException` indicates the apply was *not attempted* — another apply was in flight, and the proxy's state may reflect *that* apply's changes — callers must distinguish it from per-component failure or catastrophic failure when reacting to the future's exceptional completion. In particular:
+
+- A trigger that performs rollback on apply failure (the [Rollback on failure](#core-api-kafkaproxyapplyconfiguration) pattern shown above) must *not* roll back on `ConcurrentApplyException`: doing so would replay this trigger's `oldConfig` over the *other* trigger's just-applied changes, undoing them.
+- A trigger that shuts down on apply failure (the [Shut down on any failure](#core-api-kafkaproxyapplyconfiguration) pattern shown above) must *not* shut down on `ConcurrentApplyException`: the proxy is healthy and the other trigger is mid-apply.
+
+The recommended discrimination is `ex instanceof ConcurrentApplyException` — respond with retry (or no-op) rather than the destructive policy. The same discipline applies to any other "rejected before attempt" exception (e.g. `OutOfScopeChangeException`): those also indicate the proxy did not change state, and the trigger's response should reflect that.
 
 ### Worked examples
 
