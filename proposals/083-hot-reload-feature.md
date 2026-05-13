@@ -104,17 +104,17 @@ The caller provides a complete `Configuration` object. The proxy compares the in
 
 ```java
 public interface ConfigurationResult {
-  /**
-   * Returns the per-component failures encountered while applying the configuration.
-   * One entry per failed component (e.g. one virtual cluster, one referenced filter).
-   * Empty when the apply succeeded with no failed components.
-   * <p>
-   * The returned collection is immutable; iteration order is unspecified.
-   */
-  Collection<ConfigurationError> errors();
+    /**
+     * Returns the per-component failures encountered while applying the configuration.
+     * One entry per failed component (e.g. one virtual cluster, one referenced filter).
+     * Empty when the apply succeeded with no failed components.
+     * <p>
+     * The returned collection is immutable; iteration order is unspecified.
+     */
+    Collection<ConfigurationError> errors();
 
-  /** Convenience predicate equivalent to {@code !errors().isEmpty()}. */
-  default boolean hasErrors() { return !errors().isEmpty(); }
+    /** Convenience predicate equivalent to {@code !errors().isEmpty()}. */
+    default boolean hasErrors() { return !errors().isEmpty(); }
 }
 
 public record ConfigurationError(String humanReadableIdentifier, Throwable cause) { }
@@ -133,21 +133,21 @@ Because the proxy does not act on `errors()`, callers express their failure poli
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
-        if (ex != null) {
-        LOGGER.atError().setCause(ex).log("Configuration apply failed catastrophically");
+         if (ex != null) {
+             LOGGER.atError().setCause(ex).log("Configuration apply failed catastrophically");
              proxy.shutdown();
              return;
-                     }
-                     for (var error : result.errors()) {
-        LOGGER.atError()
+         }
+         for (var error : result.errors()) {
+             LOGGER.atError()
                    .setCause(error.cause())
-        .addKeyValue("component", error.humanReadableIdentifier())
-        .log("Configuration apply failed for component");
+                   .addKeyValue("component", error.humanReadableIdentifier())
+                   .log("Configuration apply failed for component");
          }
-                 if (result.hasErrors()) {
-        proxy.shutdown();
+         if (result.hasErrors()) {
+             proxy.shutdown();
          }
-                 });
+     });
 ```
 
 The future completes with the aggregate result *before* any action is taken, so logging happens before shutdown — no ordering problem.
@@ -157,15 +157,15 @@ The future completes with the aggregate result *before* any action is taken, so 
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
-        if (ex != null) {
-        alerter.send("catastrophic-apply-failure", ex);
+         if (ex != null) {
+             alerter.send("catastrophic-apply-failure", ex);
              return;
-                     }
-                     for (var error : result.errors()) {
-        alerter.send("component-apply-failure", error);
          }
-                 // Surviving components continue serving; no proxy-level action taken.
-                 });
+         for (var error : result.errors()) {
+             alerter.send("component-apply-failure", error);
+         }
+         // Surviving components continue serving; no proxy-level action taken.
+     });
 ```
 
 **Rollback on failure** (a sophisticated trigger):
@@ -173,16 +173,16 @@ proxy.applyConfiguration(newConfig)
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
-        if (result != null && result.hasErrors()) {
-        proxy.applyConfiguration(oldConfig)
+         if (result != null && result.hasErrors()) {
+             proxy.applyConfiguration(oldConfig)
                   .whenComplete((rollbackResult, rollbackEx) -> {
-        if (rollbackEx != null || rollbackResult.hasErrors()) {
-        // rollback itself failed — last-resort policy
-        proxy.shutdown();
+                      if (rollbackEx != null || rollbackResult.hasErrors()) {
+                          // rollback itself failed — last-resort policy
+                          proxy.shutdown();
                       }
-                              });
-                              }
-                              });
+                  });
+         }
+     });
 ```
 
 Each of these is a trigger-side concern. The proxy does not need to know which policy is in use, and adding a new policy in the future does not require any proxy changes.
@@ -416,6 +416,7 @@ Each of these can be designed and implemented independently once the core `Kafka
 - Filter definitions and their configuration are unchanged.
 - The on-disk configuration file format is unchanged.
 - The lifecycle state model (Proposal 016) is unchanged; this proposal only adds operations that drive transitions through the existing state machine.
+- **Proposal 016 compatibility:** This proposal supersedes the *Virtual Cluster Failure Policy* section of Proposal 016. The `onVirtualClusterStopped.serve` configuration described there is not implemented; failure-handling policy is instead expressed by the caller via `whenComplete` on the `CompletableFuture<ConfigurationResult>` returned by `applyConfiguration()`.
 
 ## Rejected alternatives
 
