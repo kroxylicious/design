@@ -31,84 +31,84 @@ The central operation is:
 
 ```java
 class KafkaProxy {
-  // ... add the following method
+    // ... add the following method
 
-  /**
-   * Apply the given configuration to this running proxy, restarting only the
-   * virtual clusters whose effective configuration differs from the current
-   * running state. Unaffected clusters continue serving traffic throughout
-   * the apply.
-   *
-   * <h2>Scope</h2>
-   * <p>This method handles <em>replacement</em> configurations on an already-running
-   * proxy. The initial configuration is supplied via the {@link KafkaProxy}
-   * constructor at proxy startup.
-   *
-   * <p>Within that scope, this method applies only the virtual-cluster sections of
-   * the configuration and the named filter definitions that those virtual clusters
-   * reference. Other configuration sections (management, metrics, admin, etc.) are
-   * out of scope.
-   *
-   * <p>If {@code newConfig} differs from the running configuration in any out-of-scope
-   * section, the apply is rejected as a pre-flight check before any virtual-cluster
-   * change is attempted: the returned future completes exceptionally with an
-   * {@link OutOfScopeChangeException} naming the differing section(s) and the proxy's
-   * running state is unchanged. Changes to those sections still require a proxy restart.
-   * Rejecting (rather than silently ignoring) out-of-scope diffs preserves freedom of
-   * manoeuvre: if a future iteration supports hot-reload of additional sections, the
-   * exception simply stops being thrown for those sections — silent-ignore would by
-   * contrast become a breaking semantic change without an API-version bump.
-   *
-   * <h2>Validation contract</h2>
-   * <p>Static validation (schema conformance, required fields, field-value
-   * ranges, internal consistency) is the caller's responsibility and is
-   * expected to have been performed on {@code newConfig} before this method
-   * is called.
-   *
-   * <p>Validation which depends on runtime state (port conflicts, plugin
-   * instantiation, TLS material readability) is performed during
-   * {@code applyConfiguration()} and reported via the returned future's
-   * {@link ConfigurationResult}.
-   *
-   * <h2>Error reporting</h2>
-   * <p>This method throws synchronously <em>only</em> for programmer errors:
-   * <ul>
-   *   <li>{@link NullPointerException} if {@code newConfig} is {@code null};</li>
-   *   <li>{@link IllegalStateException} if the proxy has not been started or
-   *       has been shut down.</li>
-   * </ul>
-   *
-   * <p>All other failures surface through the returned future:
-   * <ul>
-   *   <li><b>Input rejection</b> — the submitted configuration is not acceptable
-   *       to this method (e.g. a change to an out-of-scope section). Detected as a
-   *       pre-flight check before any state change is attempted; no virtual cluster
-   *       is touched. The future completes exceptionally with a specific exception
-   *       type identifying the rejection reason (e.g. {@link OutOfScopeChangeException}).</li>
-   *   <li><b>Catastrophic failure</b> — the apply began but could not be completed
-   *       (e.g. internal proxy bug, unexpected I/O failure inside the orchestrator).
-   *       The future completes exceptionally.</li>
-   *   <li><b>Per-component failure</b> — the apply was evaluated and one or
-   *       more components (virtual clusters or referenced filters) failed to
-   *       converge. The future completes normally with a {@code ConfigurationResult}
-   *       whose {@code errors()} collection is non-empty.</li>
-   * </ul>
-   *
-   * <p>Failure-handling policy (whether to shut down on partial failure, attempt
-   * a rollback, alert, or retry) is the caller's responsibility, expressed via
-   * the standard {@link java.util.concurrent.CompletableFuture#whenComplete}
-   * pattern. The proxy itself takes no policy action based on {@code errors()};
-   * it only reports.
-   *
-   * @param newConfig the desired end-state configuration; must be non-null
-   *                  and statically valid
-   * @return a future that completes with a {@link ConfigurationResult} describing
-   *         any per-component failures encountered while applying the
-   *         configuration
-   * @throws NullPointerException  if {@code newConfig} is {@code null}
-   * @throws IllegalStateException if the proxy is not in the running state
-   */
-  public CompletableFuture<ConfigurationResult> applyConfiguration(Configuration newConfig);
+    /**
+     * Apply the given configuration to this running proxy, restarting only the
+     * virtual clusters whose effective configuration differs from the current
+     * running state. Unaffected clusters continue serving traffic throughout
+     * the apply.
+     *
+     * <h2>Scope</h2>
+     * <p>This method handles <em>replacement</em> configurations on an already-running
+     * proxy. The initial configuration is supplied via the {@link KafkaProxy}
+     * constructor at proxy startup.
+     *
+     * <p>Within that scope, this method applies only the virtual-cluster sections of
+     * the configuration and the named filter definitions that those virtual clusters
+     * reference. Other configuration sections (management, metrics, admin, etc.) are
+     * out of scope.
+     *
+     * <p>If {@code newConfig} differs from the running configuration in any out-of-scope
+     * section, the apply is rejected as a pre-flight check before any virtual-cluster
+     * change is attempted: the returned future completes exceptionally with an
+     * {@link OutOfScopeChangeException} naming the differing section(s) and the proxy's
+     * running state is unchanged. Changes to those sections still require a proxy restart.
+     * Rejecting (rather than silently ignoring) out-of-scope diffs preserves freedom of
+     * manoeuvre: if a future iteration supports hot-reload of additional sections, the
+     * exception simply stops being thrown for those sections — silent-ignore would by
+     * contrast become a breaking semantic change without an API-version bump.
+     *
+     * <h2>Validation contract</h2>
+     * <p>Static validation (schema conformance, required fields, field-value
+     * ranges, internal consistency) is the caller's responsibility and is
+     * expected to have been performed on {@code newConfig} before this method
+     * is called.
+     *
+     * <p>Validation which depends on runtime state (port conflicts, plugin
+     * instantiation, TLS material readability) is performed during
+     * {@code applyConfiguration()} and reported via the returned future's
+     * {@link ConfigurationResult}.
+     *
+     * <h2>Error reporting</h2>
+     * <p>This method throws synchronously <em>only</em> for programmer errors:
+     * <ul>
+     *   <li>{@link NullPointerException} if {@code newConfig} is {@code null};</li>
+     *   <li>{@link IllegalStateException} if the proxy has not been started or
+     *       has been shut down.</li>
+     * </ul>
+     *
+     * <p>All other failures surface through the returned future:
+     * <ul>
+     *   <li><b>Input rejection</b> — the submitted configuration is not acceptable
+     *       to this method (e.g. a change to an out-of-scope section). Detected as a
+     *       pre-flight check before any state change is attempted; no virtual cluster
+     *       is touched. The future completes exceptionally with a specific exception
+     *       type identifying the rejection reason (e.g. {@link OutOfScopeChangeException}).</li>
+     *   <li><b>Catastrophic failure</b> — the apply began but could not be completed
+     *       (e.g. internal proxy bug, unexpected I/O failure inside the orchestrator).
+     *       The future completes exceptionally.</li>
+     *   <li><b>Per-component failure</b> — the apply was evaluated and one or
+     *       more components (virtual clusters or referenced filters) failed to
+     *       converge. The future completes normally with a {@code ConfigurationResult}
+     *       whose {@code errors()} collection is non-empty.</li>
+     * </ul>
+     *
+     * <p>Failure-handling policy (whether to shut down on partial failure, attempt
+     * a rollback, alert, or retry) is the caller's responsibility, expressed via
+     * the standard {@link java.util.concurrent.CompletableFuture#whenComplete}
+     * pattern. The proxy itself takes no policy action based on {@code errors()};
+     * it only reports.
+     *
+     * @param newConfig the desired end-state configuration; must be non-null
+     *                  and statically valid
+     * @return a future that completes with a {@link ConfigurationResult} describing
+     *         any per-component failures encountered while applying the
+     *         configuration
+     * @throws NullPointerException  if {@code newConfig} is {@code null}
+     * @throws IllegalStateException if the proxy is not in the running state
+     */
+    public CompletableFuture<ConfigurationResult> applyConfiguration(Configuration newConfig);
 }
 ```
 
@@ -196,20 +196,20 @@ proxy.applyConfiguration(newConfig)
 ```java
 proxy.applyConfiguration(newConfig)
      .whenComplete((result, ex) -> {
-        if (ex instanceof ConcurrentApplyException) {
-        // Another apply is in flight; not a real failure — trigger can retry later.
-        return;
-        }
-        if (result != null && result.hasErrors()) {
-        proxy.applyConfiguration(oldConfig)
+         if (ex instanceof ConcurrentApplyException) {
+             // Another apply is in flight; not a real failure — trigger can retry later.
+             return;
+         }
+         if (result != null && result.hasErrors()) {
+             proxy.applyConfiguration(oldConfig)
                   .whenComplete((rollbackResult, rollbackEx) -> {
-        if (rollbackEx != null || rollbackResult.hasErrors()) {
-        // rollback itself failed — last-resort policy
-        proxy.shutdown();
+                      if (rollbackEx != null || rollbackResult.hasErrors()) {
+                          // rollback itself failed — last-resort policy
+                          proxy.shutdown();
                       }
-                              });
-                              }
-                              });
+                  });
+         }
+     });
 ```
 
 The caller supplies `oldConfig` from its own state — the proxy does not currently expose a getter for its running configuration. This is sufficient because triggers that perform rollback typically already have their own source-of-truth for the previous desired state (a Kubernetes ConfigMap revision, an HTTP-endpoint request history, a previously-loaded file). If a future use case requires the proxy to be queryable for its current state, an accessor can be added without changing the `applyConfiguration` contract.
