@@ -150,6 +150,7 @@ void testReconciliation(OperatorCapability operator) {
 |---|---|---|
 | `ProxyFixture` | Injected (class-scoped) | Environment config, no timing implications |
 | `OperatorCapability` | Injected for `@Operator` tests | Tag declares requirement; skip handled by extension |
+| `KubernetesClient` | Injected (test parameter) | General-purpose access to cluster resource state |
 | `ProxyHandle` | Always explicit via `apply()` | Convergence is a blocking operation; must be visible |
 
 ### `OperatorCapability` — Operator-Observable State
@@ -166,7 +167,25 @@ interface OperatorCapability {
 
 `observedGeneration()` returns the generation the operator has most recently reconciled for a given resource. `waitForReconciliation()` blocks until the operator has reconciled past the specified generation. The fixture implementation can use whatever signal backs this — `status.observedGeneration`, annotation changes, or lifecycle state transitions — without affecting the test.
 
-Tests that assert on specific operator mechanisms (e.g. `OperatorChangeDetectionST` verifying that checksum annotations change in response to referent mutations) should observe resource state directly rather than through `OperatorCapability`. Those tests exist to prove a specific mechanism works; abstracting it away would hide the thing being tested.
+Tests that assert on specific operator mechanisms — such as `OperatorChangeDetectionST` verifying that checksum annotations change in response to referent mutations — use `OperatorCapability` for convergence and deployment agnosticism, but observe the specific resource state via an injected `KubernetesClient`. The `KubernetesClient` is a general-purpose facility for reading cluster state; it is not operator-specific. This keeps `OperatorCapability` focused on the generic reconciliation contract while giving tests direct access to the resources they need to assert on:
+
+```java
+@Operator
+@Test
+void shouldUpdateChecksumWhenFilterConfigChanges(
+        OperatorCapability operator, KubernetesClient kubeClient) {
+    ProxyHandle proxy = proxyFixture.apply(scenario);
+    String beforeChecksum = readChecksumAnnotation(kubeClient, deploymentName);
+    long generation = operator.observedGeneration(arbitraryFilter);
+
+    resourceManager.replaceResourceWithRetries(arbitraryFilter, current ->
+            current.getSpec().setConfigTemplate(replacementConfig));
+
+    operator.waitForReconciliation(arbitraryFilter, generation);
+    assertThat(readChecksumAnnotation(kubeClient, deploymentName))
+            .isNotEqualTo(beforeChecksum);
+}
+```
 
 `waitForRestart()` is intentionally absent — it lives on `ProxyHandle` because it applies to all fixture types. Other capabilities (`MetricsCapability`, `TlsCapability`) follow the same injection pattern for their respective tags.
 
@@ -339,24 +358,26 @@ void shouldUpdateWhenFilterConfigurationChanges(String namespace) {
 ```java
 @Operator
 @Test
-void shouldUpdateWhenFilterConfigurationChanges(OperatorCapability operator) {
+void shouldUpdateWhenFilterConfigurationChanges(
+        OperatorCapability operator, KubernetesClient kubeClient) {
     ProxyHandle proxy = proxyFixture.apply(ProxyScenario.builder()
             .withUpstream(clusterName)
             .withFilter(new SimpleTransformFilterSpec("foo", "bar"))
             .build());
 
+    String beforeChecksum = readChecksumAnnotation(kubeClient, deploymentName);
     long generation = operator.observedGeneration(arbitraryFilter);
 
     resourceManager.replaceResourceWithRetries(arbitraryFilter, current ->
             current.getSpec().setConfigTemplate(replacementConfig));
 
     operator.waitForReconciliation(arbitraryFilter, generation);
+    assertThat(readChecksumAnnotation(kubeClient, deploymentName))
+            .isNotEqualTo(beforeChecksum);
 }
 ```
 
-`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so `operator.observedGeneration()` is called against stable state — no polling required to establish a baseline. The direct `resourceManager.replaceResourceWithRetries` call is intentionally visible — these tests exist to prove the operator detects and responds to mutations made outside the fixture.
-
-A test like `OperatorChangeDetectionST` that specifically asserts the checksum annotation mechanism works would not use `OperatorCapability` for this — it would read the pod template annotation directly, since the annotation is the thing being tested.
+`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so both `operator.observedGeneration()` and `readChecksumAnnotation()` are called against stable state — no polling required to establish a baseline. `OperatorCapability` handles convergence and deployment agnosticism (the test works whether the operator was installed via OLM or Helm); the `KubernetesClient` gives direct access to the resource state being asserted on. The direct `resourceManager.replaceResourceWithRetries` call is intentionally visible — these tests exist to prove the operator detects and responds to mutations made outside the fixture.
 
 ## Affected/Not Affected Projects
 
