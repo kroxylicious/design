@@ -100,9 +100,7 @@ This is an explicit call — not magic JUnit injection — because the test auth
 
 Two implementations cover the primary deployment mechanisms:
 
-**`OperatorProxyFixture`**: applies the Kroxylicious CRDs via Server-Side Apply, then waits for observable convergence signals in sequence:
-1. The pod template's `kroxylicious.io/referent-checksum` annotation changes from its previous value — the operator has seen and processed the update.
-2. The Deployment reaches stable state — updated replicas are ready and serving.
+**`OperatorProxyFixture`**: applies the Kroxylicious CRDs via Server-Side Apply, then waits for observable convergence signals — the operator has reconciled the resource (e.g. `status.observedGeneration` matches `metadata.generation`) and the Deployment has reached stable state with updated replicas ready and serving. The specific convergence signals may evolve as the operator matures (see [OperatorCapability](#operatorcapability--operator-observable-state)).
 
 **`ManifestProxyFixture`**: translates `ProxyScenario` into a proxy configuration file and a Kubernetes Deployment, applies them, then waits for the Deployment to reach stable state.
 
@@ -140,11 +138,11 @@ Tests tagged `@Operator` have `OperatorCapability` injected as a test parameter 
 ```java
 @Operator
 @Test
-void testChecksumChanges(OperatorCapability operator) {
+void testReconciliation(OperatorCapability operator) {
     ProxyHandle proxy = proxyFixture.apply(scenario);
-    String before = operator.currentChecksum();
+    long generation = operator.observedGeneration(filterResource);
     proxy.reconfigure(updatedScenario);
-    operator.waitForChecksumChange(before);
+    operator.waitForReconciliation(filterResource, generation);
 }
 ```
 
@@ -156,15 +154,19 @@ void testChecksumChanges(OperatorCapability operator) {
 
 ### `OperatorCapability` — Operator-Observable State
 
-`OperatorCapability` is narrow and precise. It contains only things that require the operator to be present — state that does not exist in a manifest-managed deployment:
+`OperatorCapability` models the externally observable state of the operator — what an observer can determine by inspecting Kubernetes resource status, not by knowing the operator's internal mechanisms.
 
 ```java
 interface OperatorCapability {
-    String currentChecksum();
-    void waitForChecksumChange(String previousChecksum);
+    long observedGeneration(HasMetadata resource);
+    void waitForReconciliation(HasMetadata resource, long sinceGeneration);
     List<StatusCondition> currentStatusConditions();
 }
 ```
+
+`observedGeneration()` returns the generation the operator has most recently reconciled for a given resource. `waitForReconciliation()` blocks until the operator has reconciled past the specified generation. The fixture implementation can use whatever signal backs this — `status.observedGeneration`, annotation changes, or lifecycle state transitions — without affecting the test.
+
+Tests that assert on specific operator mechanisms (e.g. `OperatorChangeDetectionST` verifying that checksum annotations change in response to referent mutations) should observe resource state directly rather than through `OperatorCapability`. Those tests exist to prove a specific mechanism works; abstracting it away would hide the thing being tested.
 
 `waitForRestart()` is intentionally absent — it lives on `ProxyHandle` because it applies to all fixture types. Other capabilities (`MetricsCapability`, `TlsCapability`) follow the same injection pattern for their respective tags.
 
@@ -343,16 +345,18 @@ void shouldUpdateWhenFilterConfigurationChanges(OperatorCapability operator) {
             .withFilter(new SimpleTransformFilterSpec("foo", "bar"))
             .build());
 
-    String before = operator.currentChecksum();
+    long generation = operator.observedGeneration(arbitraryFilter);
 
     resourceManager.replaceResourceWithRetries(arbitraryFilter, current ->
             current.getSpec().setConfigTemplate(replacementConfig));
 
-    operator.waitForChecksumChange(before);
+    operator.waitForReconciliation(arbitraryFilter, generation);
 }
 ```
 
-`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so `operator.currentChecksum()` is called against stable state. The direct `resourceManager.replaceResourceWithRetries` call is intentionally visible — these tests exist to prove the operator detects and responds to mutations made outside the fixture.
+`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so `operator.observedGeneration()` is called against stable state — no polling required to establish a baseline. The direct `resourceManager.replaceResourceWithRetries` call is intentionally visible — these tests exist to prove the operator detects and responds to mutations made outside the fixture.
+
+A test like `OperatorChangeDetectionST` that specifically asserts the checksum annotation mechanism works would not use `OperatorCapability` for this — it would read the pod template annotation directly, since the annotation is the thing being tested.
 
 ## Affected/Not Affected Projects
 
@@ -383,7 +387,7 @@ We considered having operator tests use `proxyFixture.apply()` for all mutations
 
 ### Merging `OperatorCapability` into `ProxyHandle`
 
-We considered putting operator-specific methods (checksum observation, status conditions) directly on `ProxyHandle`, with runtime exceptions for unsupported operations. This conflates two concerns: `ProxyHandle` represents a converged proxy regardless of deployment mechanism, while `OperatorCapability` represents state that only exists in operator-managed deployments. Keeping them separate means `ProxyHandle` has no methods that might throw "not supported" — every method on it is meaningful for every fixture type.
+We considered putting operator-specific methods (reconciliation observation, status conditions) directly on `ProxyHandle`, with runtime exceptions for unsupported operations. This conflates two concerns: `ProxyHandle` represents a converged proxy regardless of deployment mechanism, while `OperatorCapability` represents state that only exists in operator-managed deployments. Keeping them separate means `ProxyHandle` has no methods that might throw "not supported" — every method on it is meaningful for every fixture type.
 
 ### Per-environment fixture implementations
 
