@@ -135,20 +135,9 @@ A downstream distributor implements `Installer` for their distribution and compo
 
 ### Fixture Implementations
 
-Fixtures compose an `Installer` (where applicable) with proxy deployment logic:
+Tests never instantiate fixtures or installers — the JUnit extension reads system properties (`-Dfixture`, `-Dinstaller`) and composes them. The composition is extension-internal; the test sees only an injected `ProxyFixture`.
 
-```java
-// CRD-backed: installer puts operator in cluster, fixture deploys via CRDs
-new CrdProxyFixture(new ManifestInstaller())
-new CrdProxyFixture(new OlmInstaller())
-new CrdProxyFixture(new MyDownstreamInstaller())
-
-// Manifest-backed: deploys proxy directly, no operator
-new ManifestProxyFixture()
-
-// Standalone: local Java process, no Kubernetes
-new StandaloneProxyFixture()
-```
+Three fixture implementations cover the deployment mechanisms:
 
 **`CrdProxyFixture`**: takes an `Installer` as a constructor dependency. The installer puts the operator into the cluster; the fixture applies Kroxylicious CRDs (`KafkaProxy`, `VirtualKafkaCluster`, `KafkaProtocolFilter`) via Server-Side Apply, then waits for observable convergence signals — the controller has reconciled the resources and the Deployment has reached stable state with updated replicas ready and serving. The fixture knows the CRD schema and the convergence protocol, not the operator's internals.
 
@@ -285,13 +274,13 @@ The principle is that **environment differences are absorbed by the fixture, not
 
 Where a fixture genuinely cannot run in a given environment — OLM absent, OCP required — it throws `AssumptionViolatedException` and the test skips. This is the same mechanism as `@Operator` and `@AdmissionWebhook` tags, extended to cluster environment. A test run on minikube naturally skips OLM deployment tests and any OCP-specific webhook behaviour tests without configuration.
 
-### Deployment Tests
+### Installer Tests
 
-A separate, lightweight test class per supported install method confirms that the installation mechanism produces a working proxy. Each test is a single scenario: deploy a proxy with a file-based filter (one that reads substitution values from a mounted file), produce a message, assert the consumer sees the transformed value.
+The `systemtest-installer` module contains a single smoke test: deploy a proxy with a file-based filter (one that reads substitution values from a mounted file), produce a message, assert the consumer sees the transformed value. The test does not vary between installers — it is the same test run with different `-Dinstaller` and `-Dfixture` values. CI provides the matrix; the test provides the assertion.
 
-This test is deliberately minimal — it is not a feature matrix. Its purpose is to catch installation failures: the plugin does not load, the Secret is not mounted, the file path is wrong. Features are correct by virtue of the feature test suite; the deployment test only asserts that the installation mechanism puts the proxy in a state where features can run.
+This test is deliberately minimal — it is not a feature matrix. Its purpose is to catch installation failures: the plugin does not load, the Secret is not mounted, the file path is wrong. Features are correct by virtue of the `systemtest-feature` module; the installer test only asserts that the installation mechanism puts the proxy in a state where features can run.
 
-Each deployment test has a single reason to fail: the consumer did not see the transformed value. Every possible installation failure collapses into that one observable. No separate assertions per failure mode are needed or wanted; they all manifest identically, and the test name tells you which installation mechanism failed.
+Each installer test run has a single reason to fail: the consumer did not see the transformed value. Every possible installation failure collapses into that one observable. No separate assertions per failure mode are needed or wanted; they all manifest identically, and the CI matrix entry tells you which installation mechanism failed.
 
 | Install method | Fixture | Installer | File config mechanism |
 |---|---|---|---|
