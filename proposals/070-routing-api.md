@@ -1,16 +1,14 @@
-<!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
-
 # 70 - A Routing API
 
 This proposal discusses an API for routing requests to Kafka clusters.
 
 ## Current situation
 
-Kroxylicious currently supports `Filter` plugins as the top-level mechanism for adding behaviour to a proxy.
+Kroxylicious currently supports `Filter` plugins as the top-level mechanism for adding behaviour to a proxy instance.
 `Filters` can manipulate Kafka protocol requests and responses being sent by/to the Kafka client. 
 They can also originate requests of their own (for example to obtain metadata that's necessary for them to function).
 
-However, `Filters` cannot influence which Kafka cluster will receive the requests which it forwards or makes for itself.
+However, a `Filter` cannot influence which Kafka cluster will receive the requests it handles.
 
 ## Motivation
 
@@ -22,16 +20,25 @@ Here are some examples:
 Multiple backing Kafka clusters can be presented to clients as a single cluster. 
 Broker-side entities, such as topics, get bijectively mapped (for example using a per-backing cluster prefix) to the
 virtual entities presented to clients. 
+For databases, this is known as Data Virtualization.
 `Filters` cannot easily do this because they're always hooked up to a single backing Kafka cluster.
+
+* **Principal-aware routing**.
+A natural variation on basic [SASL termination](004-terminology-for-authentication.md) is to use the identity of the authenticated client to drive the decision about which backing cluster to route requests to.
+This could be used with some metadata about principals to ensure that a client is routed to a cluster that is local to it.
 
 * **Topic splicing**.
 Multiple separate topics in distinct backing clusters are presented to clients as a single topic.
 Only one backing topic is writable at any given logical time.
-
-* **Principal-aware routing**.
-A natural variation on basic SASL termination is to use the identity of the authenticated client to drive the decision about which backing cluster to route requests to.
  
 Kroxylicious is currently unable to address use cases like these.
+
+**Caveat:** It's worth noting that some aspects of the Kafka protocol prevents routing use cases which might, as first glance, appear possible. 
+An example is _Record-based routing_.
+While it's possible to use some attribute of an individual record (for example a header) to determine the destination for a `PRODUCE` request,
+problems arise when you consider how a router should handle the offsets in the `PRODUCE` response returned to the client. 
+While some client applications might not make use of record offsets, a proxy cannot make that assumption.
+It would be possible to route record _batches_ without complication, but a record batch is not a first class concept in the Kafka Producer API, and lacks relevant (e.g. user-supplied) metadata for making routing decisions.
 
 ## Proposal
 
