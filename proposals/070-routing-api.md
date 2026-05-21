@@ -1,6 +1,6 @@
 <!-- This template is provided as an example with sections you may wish to comment on with respect to your proposal. Add or remove sections as required to best articulate the proposal. -->
 
-# A Routing API
+# 70 - A Routing API
 
 This proposal discusses an API for routing requests to Kafka clusters.
 
