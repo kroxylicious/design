@@ -33,74 +33,228 @@ Only one backing topic is writable at any given logical time.
  
 Kroxylicious is currently unable to address use cases like these.
 
-**Caveat:** It's worth noting that some aspects of the Kafka protocol prevents routing use cases which might, as first glance, appear possible. 
+**Caveat:** It's worth noting that some aspects of the Kafka protocol prevent routing use cases which might, at first glance, appear possible. 
 An example is _Record-based routing_.
 While it's possible to use some attribute of an individual record (for example a header) to determine the destination for a `PRODUCE` request,
 problems arise when you consider how a router should handle the offsets in the `PRODUCE` response returned to the client. 
 While some client applications might not make use of record offsets, a proxy cannot make that assumption.
 It would be possible to route record _batches_ without complication, but a record batch is not a first class concept in the Kafka Producer API, and lacks relevant (e.g. user-supplied) metadata for making routing decisions.
 
+Not all use cases are equal in complexity.
+Producer-side routing (deciding which cluster handles a `PRODUCE` request based on its topic) delivers the most immediate value, 
+and has the simplest protocol interactions.
+Consumer-side operations, admin operations, and stateful protocol features (transactions, consumer groups, fetch sessions) each add successive layers of complexity.
+The API proposed here is general-purpose and does not prescribe which protocol features a `Router` must support; 
+individual `Router` implementations are free to support as much or as little of the protocol as their use case requires.
+
 ## Proposal
 
 ### Concepts
 
-To enable the use cases above we need a few new concepts:
+To enable the use cases above we need a few concepts:
 
-* A _receiver_ is something that can handle requests, and which will return at most one response. 
-* A _route_ represents a possible pathway from an incoming request towards a receiver.
-* A _router_ is a thing which decides which route should be used for a given request.
+* A _cluster_ is an upstream Kafka cluster that can handle requests.
+* A _router_ is a thing which decides which _route(s)_ should be used for a given request.
+* A _route_ is a named pathway from a router towards a _target_. 
+* A route's _target_ is either a cluster or another router. Routes may also have filters attached.
 
-Routers and backing Kafka clusters are both examples of receivers. 
-Slightly more generally, a receiver is anything that speaks the full Kafka procotol. 
-We don't consider a `Filter` to be a receiver, even though it can make short-circuit responses. 
-`Filters` usually rely on having a backing Kafka cluster to forward requests to.
-Generally speaking, a `Filter` might only handle a subset of the `ApiKeys` of the Kafka protocol.
-Routers and backing clusters necessarily handle the whole protocol.
+Because a route's target can be another router, routers and routes together form a directed graph.
+Furtermore, we will disallow loops in the graph, so we have a directed acyclic graph (DAG).
+
+```
+                                            route "foo"
+                                    .------[filters...]------> cluster-a
+                                   /
+  client --> virtual cluster --> router
+                 (my-vc)           \
+                                    '------[filters...]------> cluster-b
+                                            route "bar"
+```
+
+The _virtual cluster_ is the entry point: it binds a client-facing network address to a target (here, a router).
+The _router_ decides which _route_ each request should traverse.
+Each _route_ may carry its own filter chain, and terminates at a _cluster_ (or another router).
+Clusters are the leaf nodes of the graph.
+
+#### Virtual node IDs
+
+Kafka's protocol identifies brokers by integer _node IDs_.
+These node IDs are scoped to a single cluster — broker 0 in cluster-a is a completely different machine from broker 0 in cluster-b.
+When a router presents multiple clusters to the client as a single virtual cluster, there is a collision problem: the client might receive node ID 0 in a `METADATA` response from one route and node ID 0 from another, with no way to distinguish them.
+
+The solution is _virtual node IDs_.
+The runtime assigns each `(route, target-cluster node ID)` pair a unique virtual node ID.
+Virtual node IDs are `int32`, matching Kafka's wire format for node IDs. We believe this is large enough not to be a practical limit.
+All responses delivered to the router (and onward to the client) use virtual node IDs.
+All requests from the router use virtual node IDs.
+The runtime transparently translates between virtual and real node IDs at the boundary.
+
+This means a router author works entirely in terms of virtual node IDs and never needs to translate.
+When a `METADATA` response arrives with a list of brokers, the node IDs in that response are already virtual.
+When the router wants to send a request to one of those brokers, it simply passes the virtual node ID back.
+The runtime handles the mapping.
+
+The details of how the mapping works (the formula, the implementation) are described in the _Runtime_ section below.
+The key point here is that virtual node IDs are the universal addressing scheme within the routing API.
+
 
 ### Plugin API
 
-`Router` will be a top level plugin analogous to the `Filter` plugin interface, using the same `ServiceLoader`-based mechanism for runtime discovery.
+#### `Router`
+
+`Router` is a top-level plugin analogous to the `Filter` plugin interface, using the same `ServiceLoader`-based mechanism for runtime discovery.
+
 Each `Router` implementation will support 0 or more named routes.
 The available and required route names will depend on the implementation, which might ascribe different behaviour to different named routes.
-For example a `Router` implementing the 'union cluster' use case might simply use the route names as prefixes for names of the broker-side entities 
+For example, a `Router` implementing the 'union cluster' use case might simply use the route names as prefixes for names of the broker-side entities 
 it will expose (such as topics or consumer groups), and as such impose no restriction on the supported route names. 
-In contrast, a `Router` implementing the 'topic splicing' use case might require configuration about each of the clusters being used in the splice, which 
-would required the route names to be referenced in the `Router`'s configuration.
+In contrast, a `Router` implementing the 'topic splicing' use case might require configuration about each of the clusters being used in the splice, which would require the route names to be referenced in the `Router`'s configuration.
 
 ```java
 interface Router {
-    CompletionStage<RoutingResult> onClientRequest(short apiVersion,
-                                                   ApiKeys apiKey,
-                                                   RequestHeaderData header,
-                                                   ApiMessage request,
-                                                   RoutingContext context);
+    CompletionStage<RouterResult> onRequest(short apiVersion,
+                                            ApiKeys apiKey,
+                                            RequestHeaderData header,
+                                            ApiMessage request,
+                                            RouterContext context);
+
+    default Map<ApiKeys, String> staticRoutes() {
+        return Map.of();
+    }
+
+    default void close() {}
 }
 ```
 
-For a given incoming request a `Router` implementation can decide which route(s) to make a request to.
-We want to allow a router to potentially make multiple requests (e.g. to multiple clusters) and to have control over their processing (e.g. sequential or concurrent).
-For this reason the `RoutingContext` does not follow the builder pattern used in the `FilterContext`, but simply
-exposes methods to asynchronously send requests down a given route.
-This allows the `Router` author to make use of the `CompletionStage` API when issuing multiple requests. 
+A `Router` instance is created **per client connection**, not per virtual cluster.
+This means per-connection state (caches, session state) can live directly in the `Router` instance without synchronisation, since all calls to a given instance happen on a single Netty event loop thread.
+State shared across connections belongs in the `RouterFactory`'s initialisation data (see below).
+
+**`onRequest()`** is invoked for each incoming client request that is _dynamically routed_.
+The router inspects the request, decides which route(s) to use, sends one or more requests via the `RouterContext`, and eventually delivers a response to the client.
+The returned `CompletionStage<RouterResult>` completes when the router has finished processing the request.
+
+**`staticRoutes()`** returns a map of `ApiKeys` to route names for requests that should always be forwarded to a fixed route without deserialisation.
+This is a performance optimisation: the runtime can forward these requests as opaque frames, bypassing the cost of deserialisation (assuming no `Filters` require deserialization) and calling `onRequest()`.
+API keys not present in the map are dynamically routed via `onRequest()`.
+The default implementation returns an empty map (all requests dynamically routed).
+
+**`close()`** is called when the client connection is torn down.
+Implementations should release any per-connection resources (session caches, etc.).
+
+#### `RouterFactory`
+
+`RouterFactory` manages the lifecycle of `Router` instances, analogous to `FilterFactory` for filters.
 
 ```java
-interface RoutingContext {
+interface RouterFactory<C, I> {
+    I initialize(RouterFactoryContext context, C config);
 
-  CompletionStage<Response> sendRequest(String route, ...)
-  void sendResponse(Resonse)
-  void disconnect()
+    Router createRouter(RouterFactoryContext context, I initializationData);
 
+    void close(I initializationData);
 }
 ```
+
+**`initialize()`** is called once per virtual cluster that uses this router.
+The configuration type `C` is deserialized from the router's `config` property in the proxy configuration.
+The returned initialisation data `I` is shared across all `Router` instances created for that virtual cluster.
+Because `Router` instances may be created on different event loop threads, the initialisation data must be thread-safe.
+
+**`createRouter()`** is called once per client connection. It may run on a different thread than `initialize()`.
+
+**`close(I)`** is called when the virtual cluster shuts down, to release shared resources. It may run on a different thread than `initialize()`.
+
+**`RouterFactoryContext`** provides context to the factory:
+* `virtualClusterName()` — the name of the virtual cluster.
+* `routerName()` — the name of this router within the configuration.
+* `pluginInstance()` / `pluginImplementationNames()` — access to the plugin registry.
+
+#### `RouterContext`
+
+`RouterContext` is passed to `Router.onRequest()` and provides methods for issuing requests to routes and delivering responses to the client.
+
+```java
+interface RouterContext {
+
+    int bootstrapNodeId(String route);
+
+    CompletionStage<Response> sendRequestToNode(int virtualNodeId,
+                                                RequestHeaderData header,
+                                                ApiMessage request);
+
+    String sessionId();
+
+    Subject authenticatedSubject();
+}
+```
+
+We want to allow (but not require) a router to potentially make multiple requests (e.g. to multiple clusters) and to have control over their processing (e.g. sequential or concurrent).
+For this reason `RouterContext` does not follow the builder pattern used in the `FilterContext`, but simply exposes methods to asynchronously send requests.
+This allows the `Router` author to make use of the `CompletionStage` API when issuing multiple requests.
+
+**`bootstrapNodeId(route)`** returns the virtual node ID of the bootstrap broker for a named route.
+This is used to send the initial requests (e.g. `METADATA`) before the router has discovered the cluster's broker topology.
+Once `METADATA` responses arrive, the router uses the virtual node IDs from those responses to address specific brokers — no translation is needed, since the node IDs in responses are already virtual (see _Virtual node IDs_ above).
+
+**`sendRequestToNode(virtualNodeId, ...)`** sends a request to a specific broker, identified by its virtual node ID.
+The runtime resolves the virtual ID to a route and upstream broker address, opening a new connection if necessary.
+
+All requests are addressed by virtual node ID. There is no "send to any broker" method.
+This is a deliberate design choice: the Kafka protocol scopes most operations to a specific broker (partition leaders, group coordinators, per-broker `API_VERSIONS` negotiation).
+Providing a "send to any broker" convenience method would be a footgun for router authors — it would be easy to use for an API that actually requires a specific broker, and the resulting bug would only manifest at runtime under specific conditions (e.g. multi-broker clusters, rolling upgrades).
+By requiring a virtual node ID for every request, the router author is forced to think about broker targeting, which correctly reflects the protocol's reality.
+
+**`sessionId()`** and **`authenticatedSubject()`** provide observability and identity context.
+`authenticatedSubject()` returns the `Subject` established by upstream SASL processing (e.g. a SASL termination filter).
+If no SASL processing has occurred, the subject will be anonymous.
+Correct placement of SASL plugins in the topology is the operator's responsibility;
+a future proposal may add runtime validation of SASL plugin placement.
+
+All `RouterContext` methods are called on the same Netty event loop thread as `onRequest()`.
+No synchronisation is needed within a single `Router` instance.
+
+#### `RouterResult`
+
+`RouterResult` is the return type from `onRequest()`.
+It is a sealed type that encodes the outcome of request processing:
+
+```java
+sealed interface RouterResult {
+    record Completed(Response response) implements RouterResult {}
+    record CompletedNoResponse() implements RouterResult {}
+    record Disconnect() implements RouterResult {}
+}
+```
+
+**`Completed(response)`** — the router has produced a response for the client.
+The runtime delivers the response, automatically rewriting the correlation ID to match the client's original request.
+
+**`CompletedNoResponse()`** — the router has finished processing but there is no response to deliver.
+This is the correct result for fire-and-forget requests (e.g. `PRODUCE` with `acks=0`).
+Having a dedicated type rather than a nullable response field makes the `acks=0` case explicit.
+The runtime can log a warning if a router returns `Completed` for a request that has no response, or `CompletedNoResponse` for a request that expects one.
+
+**`Disconnect()`** — the router requests that the client connection be closed.
+
+This follows the pattern established by `FilterResult`, where the outcome is a value returned to the runtime rather than an imperative side-effect on the context.
+The sealed hierarchy can be extended with new variants (e.g. `CompletedThenDisconnect(Response)`) in future without breaking existing implementations.
+
+If the `CompletionStage<RouterResult>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
 
 
 ### Configuration
 
-Routers are configured at the top level of the proxy configuration, similarly to `filterDefinitions`:
-In addition to the `name`, `type` and `config` (which serve the same purpose for `Routers` as they do for `Filters`), a `routerDefinition` also supports a `routes` property.
-The `routes` property is optional, though any given implementation may have its own particular requirements for its `routes`.
+Routers are configured at the top level of the proxy configuration, alongside cluster definitions and virtual clusters.
 
 ```yaml
+clusterDefinitions:
+  - name: cluster-a
+    bootstrapServers: kafka-a:9092
+    tls: ...
+  - name: cluster-b
+    bootstrapServers: kafka-b:9092
+
 routerDefinitions:
   - name: my-router
     type: MyRouter
@@ -110,147 +264,275 @@ routerDefinitions:
         filters: 
           - my-first-filter
           - my-second-filter
-        cluster: my-backing-cluster
+        target:
+          cluster: cluster-a
       - name: bar
         filters: 
           - my-third-filter
-        router: my-other-router
+        target:
+          router: my-other-router
   - name: my-other-router
-    # ...
+    type: AnotherRouter
+    config: ...
+    routes:
+      - name: baz
+        target:
+          cluster: cluster-b
+
+virtualClusters:
+  - name: my-vc
+    target:
+      router: my-router
+    gateways: [...]
+    filters:
+      - my-audit-filter
 ```
 
-A route object has a `name`, an optional list of `filters` (being the names of the filters to be applied to requests/responses that traverse this route) and either a 
-`cluster` or a `router` property, which names the receiver which will handle requests after any filters have been applied. 
-Exactly one of `cluster` or `router` must be specified.
+The proxy configuration has three top-level definition lists:
 
-Because routers can refer to other routers they form a graph. 
+* **`clusterDefinitions`** — the catalogue of upstream Kafka clusters the proxy can connect to. Each has a `name`, `bootstrapServers`, and optional `tls` configuration.
 
+* **`routerDefinitions`** — router plugin instances. Each has a `name`, `type` (the plugin implementation name), optional `config`, and `routes`. In addition to the `name`, `type` and `config` (which serve the same purpose for routers as they do for filters), a router definition also supports a `routes` property. The `routes` property is optional, though any given implementation may have its own particular requirements for its routes.
+
+* **`virtualClusters`** — the entry points presented to clients. Each has a `name`, `gateways`, and a `target`.
+
+#### Routes
+
+A route has a `name`, an optional list of `filters` (the names of filters applied to requests/responses traversing this route), and a `target`.
+
+The `target` property is a discriminated union containing exactly one of:
+* `cluster` — the name of a cluster defined in `clusterDefinitions`.
+* `router` — the name of another router defined in `routerDefinitions`.
+
+This `target` structure is used uniformly on both routes and virtual clusters, providing a consistent way to express "what does this connect to" throughout the configuration.
+
+#### Virtual cluster changes
+
+The existing virtual cluster schema is modified:
+* The existing inline `targetCluster` property is deprecated but still supported for backwards compatibility. It will be removed in a future release.
+* A new `target` property supports referencing a cluster or router by name (as described above).
+* Exactly one of `target` or `targetCluster` must be specified.
+* Virtual clusters may have both `filters` and a `target` referencing a router. The virtual cluster's filters run before router dispatch, handling cross-cutting concerns such as audit logging or authorisation that apply regardless of the routing decision.
+
+For example, the old-style configuration:
+
+```yaml
+virtualClusters:
+  - name: my-vc
+    gateways: [...]
+    filters: [...]
+    targetCluster: 
+      bootstrapServers: kafka:9092
+``` 
+
+can be rewritten as:
+
+```yaml
+clusterDefinitions:
+  - name: my-cluster
+    bootstrapServers: kafka:9092
+
+virtualClusters:
+  - name: my-vc
+    gateways: [...]
+    filters: [...]
+    target:
+      cluster: my-cluster
 ```
-                           my-backing-cluster
-                          ^
-                         /
-                        / foo
-     requests          /
-    ---------> my-router
-                       \
-                        \ bar              
-                         \                ...
-                          v              /
-                           my-other-router --- ...
-                                         \
-                                          ...
-```
 
-All _possible_ routes through the graph can be determined statically from the proxy configuration, but the routing of any individual incoming request is determined at runtime.
+#### Router graph
+
+As mentioned earlier, because routers can refer to other routers via their routes, they form a directed graph.
+All possible routes through the graph can be determined statically from the proxy configuration, but the routing of any individual incoming request is determined at runtime.
 It may involve multiple outgoing requests to one or more clusters or routers.
-Validation performed at proxy startup will reject cyclic graphs.
-This will prevent the possibility of a request getting stuck in a router loop. 
+
+Validation performed at proxy startup will reject:
+* Cyclic graphs (preventing request loops).
+* Dangling references (routes or virtual clusters referencing undefined clusters or routers).
 
 In order for non-trivial router graphs to be useful, `Router` authors will need to follow the same _principle of composition_ as `Filter` authors.
-That is, a `Router` implementation should only talk to its receivers using the RouterContext API, and not, for example, make their own direct TCP connections to a backing cluster. 
-Doing so would shortcircuit any logic in upstream routers and filters, which could be manipulating broker-side entities like topic names.
-Such shortcircuiting would prevents use of that router implementation in a larger graph. 
-
-The `cluster` propety names a network-reachable backing cluster that speaks the Kafka procotol. It has the same schema as the `targetCluster` property of a virtual cluster.
-
-The existing virtual cluster schema will be modified to support top level `clusters` and to make use of `routers`.
-
-Specifically:
-
-* the existing `targetCluster` property will be made optional, and deprecated
-* a new `cluster` property will support referencing a target cluster by name (using a distict property name seems slightly nicer than overloading the allowed type of the existing `targetCluster` to support `string` or `object`).
-* support for new `router` property will be added. This is a reference to a router defined in `routerDefinitions`. 
-* exactly one of `router`, `cluster` or `targetCluster` will be required.
-* `router` is mutually exclusive with `filters`. 
-
-For example the old-style:
-
-```yaml
-virtualClusters:
-  - name: my-vc
-    portIdentifiesNode: ...
-    filters: 
-      ...
-    targetCluster: 
-      bootstrapServer: ...
-      tls: ...
-``` 
-
-would be rewritten:
-
-```yaml
-clusters:
-  - name: my-backing-cluster
-    bootstrapServer: ...
-    tls: ...
-virtualClusters:
-  - name: my-vc
-    portIdentifiesNode: ...
-    filters: 
-      ...
-    cluster: my-backing-cluster
-``` 
-
-An example of the `router` functionality:
-
-```yaml
-clusters:
-  - name: my-backing-cluster
-    bootstrapServer: ...
-    tls: ...
-routerDefinitions:
-  - name: my-router
-    type: MyRouter
-    config: 
-      ...
-    routes:
-    - name: to-backing-cluster
-      filters: # a list of filter names
-        ...
-      cluster: my-backing-cluster
-virtualClusters:
-  - name: my-vc
-    portIdentifiesNode: ...
-
-    router: my-router
-``` 
-
-(note how the `filters` have moved from the virtual cluster to the route).
-
-There are some design choices inherent in the above rendering of the concepts into a configuration API. 
-Let's call some of them out explicitly:
-
-* The names of filter, router, and cluster definitions are each global to the configuration, but in their own namespace (e.g. a filter and a router may each be called 'foo' without this being ambiguous).
-* A route is not a top-level entity, but belongs to a router. 
-* The names of routes must be unique within the scope of the containing router.
-* A route may have filters in addition to a receiver. In this way a route embodies and generalizes the concept of a 'filter chain', which has never really been formalised in the proxy.
-
+That is, a `Router` implementation should only talk to its targets using the `RouterContext` API, and not, for example, make their own direct TCP connections to a backing cluster. 
+Doing so would short-circuit any logic in downstream routers and filters, which could be manipulating broker-side entities like topic names.
 
 ### Runtime
 
-**TODO** Api versions. All `ApiKeys`.
-**TODO** Flow control & state machine.
+#### Threading model
+
+One `Router` instance exists per client connection, running on a single Netty event loop thread.
+All `onRequest()` invocations and `RouterContext` method calls for that instance happen on this thread.
+No synchronisation is needed within a `Router` instance.
+
+`RouterFactory.initialize()` may run on a different thread than `createRouter()`. 
+Any initialisation data shared across connections must be thread-safe.
+
+#### Request dispatch
+
+The runtime dispatches incoming requests in one of two modes:
+
+* **Static routes**: For API keys declared via `Router.staticRoutes()`, the runtime forwards the request as an opaque frame directly to the named route's backend, bypassing deserialisation and `Router.onRequest()`. This is a performance optimisation for APIs that the router does not need to inspect.
+
+* **Dynamic routes**: For all other API keys, the runtime deserialises the request, creates a `RouterContext`, and invokes `Router.onRequest()`. The router uses the context to send requests to routes and deliver a response to the client.
+
+#### Correlation ID management
+
+When a router sends requests via `RouterContext`, the runtime allocates _routing correlation IDs_ that are distinct from the client's original correlation IDs.
+Routing correlation IDs are negative integers (allocated from `Integer.MIN_VALUE / 2` upward), which distinguishes them from client-originated correlation IDs (which are non-negative).
+
+When the router returns a `Completed(response)` result, the runtime automatically rewrites the response header's correlation ID to match the client's original request.
+Routers never need to manage correlation IDs themselves.
+
+#### Response ordering
+
+A router may send multiple requests (fan-out) and compose their responses before delivering a single response to the client.
+Different routes may respond at different times.
+The runtime uses a _response sequencer_ to ensure that responses are delivered to the client in the same order as the original client requests, regardless of the order in which fan-out responses arrive.
+
+#### Node ID mapping implementation
+
+As described in _Virtual node IDs_ above, the runtime translates between real target-cluster node IDs and virtual node IDs.
+This is implemented by a `NodeIdMapping` abstraction (internal to the runtime) with two operations:
+
+* `toVirtual(route, targetNodeId)` — used when rewriting responses received from a target cluster (the runtime rewrites broker node IDs in `METADATA`, `PRODUCE`, `FIND_COORDINATOR`, and `DESCRIBE_CLUSTER` responses before they reach the router).
+* `fromVirtual(virtualNodeId)` — used when the router calls `sendRequestToNode()`, returning both the route name and the target-cluster node ID.
+
+The mapping has a strict invertibility invariant: `fromVirtual(toVirtual(route, t))` must return `(route, t)`.
+This means a virtual node ID always unambiguously identifies both the route and the target-cluster broker.
+
+The current implementation uses a bijective mapping with the formula:
+
+```
+V = offset + N × t
+```
+
+where `V` is the virtual node ID, `t` is the target-cluster node ID, `N` is the number of routes, and `offset` is the route's zero-based index.
+This mapping is deterministic, stateless, and O(1) in both directions.
+No coordination between proxy instances is required.
+
+The bijective mapping is _stable_: adding or removing brokers from a target cluster does not change the virtual node IDs of existing brokers.
+Likewise, adding or removing proxy instances has no effect on the mapping.
+This stability is important because Kafka clients cache broker metadata and will use previously-seen node IDs in subsequent requests.
+
+For single-route configurations, an identity mapping is used: the virtual ID equals the target ID, with zero overhead.
+
+All proxy instances presenting the same virtual cluster to clients must use the same `NodeIdMapping`.
+Changing the mapping strategy (e.g. from bijective to a different scheme) is expected to be a disruptive operation — not a zero-downtime change — because connected clients will hold stale virtual node IDs from the previous mapping.
+
+In future, if proxy instances were themselves presented to clients as broker nodes (e.g. in a clustered proxy deployment), the mapping would need to account for the proxy's own identity.
+Such a mapping would require strong consistency across proxy instances to ensure they agree on the virtual node ID assignment.
+The `NodeIdMapping` abstraction accommodates this evolution without changing the `Router` API.
+
+`NodeIdMapping` is a `sealed` interface — the runtime controls which implementations exist.
+`Router` authors never implement or interact with this interface directly.
+
+#### API version negotiation
+
+The Kafka protocol scopes `API_VERSIONS` to a single broker connection — a client sends `API_VERSIONS` each time it connects to a new broker.
+This means the proxy must forward `API_VERSIONS` to the specific broker the client believes it is talking to, not to an arbitrary broker.
+
+With `BijectiveNodeIdMapping`, each virtual node ID maps to exactly one real broker, so the router can use `sendRequestToNode()` to forward `API_VERSIONS` to the correct broker.
+With a `NodeIdMapping` where virtual IDs do not correspond to unique real brokers, the runtime would need to fan out `API_VERSIONS` to all brokers behind that virtual ID and return the intersection of their version ranges.
+
+The runtime's existing `ApiVersionsIntersectFilter` intersects each backend broker's version ranges with the proxy's own maximums.
+
+Routers may choose to _further constrain_ advertised API versions.
+For example, a router that fans out requests by topic name might cap `PRODUCE` to v12 to avoid handling topic IDs (which are cluster-specific in v13+), though this is an implementation simplification rather than a fundamental necessity.
+Version capping is the router's responsibility, not the runtime's.
+
+#### Flow control
+
+The runtime uses Netty's auto-read mechanism to apply TCP-level backpressure to the client connection.
+Auto-read is disabled while the router is processing a request and re-enabled when the `CompletionStage<RouterResult>` completes.
+This means the router's processing strategy directly determines the proxy's response latency and backpressure behaviour:
+
+* A router that forwards a request to a single backend and returns the response has latency equal to the backend's latency.
+* A router that fans out to multiple backends and waits for all responses (e.g. `CompletableFuture.allOf(...)`) has latency equal to the _maximum_ of the backends' latencies. A slow backend will hold up the client.
+* A router that fans out but completes as soon as one backend responds (e.g. for speculative execution) has latency equal to the _minimum_.
+
+The runtime does not impose its own timeout on router processing.
+If a router blocks indefinitely (e.g. a backend never responds), the client connection will stall.
+Routers are responsible for implementing their own timeouts if needed.
+
+Requests arriving before backend connections are ready are buffered and flushed when the connection becomes active.
+Backpressure from any upstream connection propagates to the client channel.
 
 
 ### Metrics
 
-Routers would benefit dedicated metrics, implemented in the runtime. 
-They would be broadly similar to the existing metrics for Filters.
+The runtime provides the following per-route metrics:
+
+* Request counters (total, errors) tagged by route name, API key, and routing mode (static/dynamic).
+* Request latency histograms tagged by route name and API key.
+* Error counters tagged by error type (unknown route, node forward failure, router failure).
+
+These are broadly similar to the existing per-filter metrics.
+
+#### Cardinality analysis
+
+The metric tag dimensions determine the number of distinct time series. Operators and monitoring systems need to be able to handle the resulting cardinality.
+
+| Tag | Typical values | Bound |
+|-----|---------------|-------|
+| route name | 2–5 per router | Bounded by configuration (number of routes). |
+| API key | ~80 defined in the Kafka protocol, but only ~20 are common in practice | Bounded by the protocol. Grows slowly (a few new keys per Kafka release). |
+| routing mode | `static`, `dynamic` | Fixed at 2. |
+| error type | `unknown_route`, `node_forward_failed`, `router_failed` | Fixed at 3. |
+
+The routing mode is determined per API key (an API key is either statically or dynamically routed, never both), so it does not multiply the cardinality — it is a property of the key, not an independent dimension.
+
+For the request counter, the worst-case cardinality per virtual cluster is `routes × API keys`. With 3 routes and 80 API keys, that is 240 series. In practice it will be much lower because most API keys are statically routed (producing one series per key, not per route) and many API keys are never used by a given client.
+
+For the latency histogram, the cardinality is `routes × API keys`. With 3 routes and 80 API keys, that is 240 series. Again, in practice most of these will never be populated.
+
+For the error counter, the cardinality is bounded by the 3 error types — negligible.
+
+This cardinality is comparable to the existing per-filter metrics and should not pose problems for standard monitoring deployments. We deliberately avoid high-cardinality tags such as client ID, topic name, or session ID.
+
 
 ## Affected/not affected projects
 
-The proxy.
+* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResult`, `Response`.
+* `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping, response sequencing, metrics.
+* `kroxylicious-bom` — version management for any new modules.
+* Not affected: existing filters, KMS, authoriser API. The Kubernetes operator will need a separate update to support router configuration in CRDs.
+
 
 ## Compatibility
 
-These changes would be fully backwards compatible:
-* There would be no impact on the `Filter` API: All existing filters would continue to work.
-* The changes to proxy configuration are backwards compatible. 
+These changes are fully backwards compatible:
+* There is no impact on the `Filter` API. All existing filters continue to work.
+* The inline `targetCluster` property on virtual clusters is deprecated but still supported. Existing configurations continue to work without changes.
+* The new `clusterDefinitions`, `routerDefinitions`, and `target` properties are purely additive.
 
-The choice to deprecate `targetCluster` in a virtual cluster, replacing it with `cluster` as a reference to a cluster defined at the top level, is made simply to try to reduce different ways of expressing the same configuration ("There should be one way to do it").
+The deprecation of inline `targetCluster`, replacing it with a named cluster reference via `target: { cluster: <name> }`, is made to reduce different ways of expressing the same configuration.
+Having a single `clusterDefinitions` list as the authoritative catalogue of upstream clusters makes the proxy's connectivity easy to audit.
+
 
 ## Rejected alternatives
 
-* One alternative is simply to not do this (or not right now).
-* `NetFilter` is an existing attempt at an abstraction for SASL Auth and cluster selection. It was never completed, and the interface never made it into the `kroxylicious-api` module. This proposal is more flexible since it allows routing decisions to happen after authentication. 
+* **Do nothing.** One alternative is simply not to add routing (or not right now). However, the use cases described in the motivation are real and cannot be addressed with the `Filter` API alone.
 
+* **`NetFilter`.** `NetFilter` is an existing attempt at an abstraction for SASL auth and cluster selection. It was never completed, and the interface never made it into the `kroxylicious-api` module. This proposal is more flexible since it allows routing decisions to happen after authentication.
+
+* **Top-level route definitions.** We considered making routes first-class top-level objects with their own definition list. This was rejected because a route's identity is inherently scoped to its parent router — the same route name in different routers means different things. Making routes top-level would require a fourth definition list and introduce potential for confusion.
+
+* **Uniform `nodes` list with `kind` discriminator.** We considered a single polymorphic list for all graph nodes (virtual clusters, routers, clusters) with a `kind` field to distinguish them. This was rejected because typed lists are more readable, and virtual clusters, routers, and clusters serve fundamentally different roles (ingress, logic, egress). Having separate lists makes it immediately obvious where to look for each type.
+
+* **`connectsTo` / `receiver` property name.** We considered a verb-based property name (`connectsTo`) for the target reference, as well as the abstract noun `receiver` to unify routers and clusters. We settled on `target` as a simpler noun, with explicit type discrimination (`cluster` or `router`) inside the object. This is more concrete than `receiver` and more conventional than a verb.
+
+* **Mutual exclusivity of filters and router on a virtual cluster.** The original draft of this proposal required that a virtual cluster specify either `filters` or a `router`, but not both. In practice, virtual-cluster-level filters handle cross-cutting concerns (audit logging, authorisation) that apply regardless of the routing decision. The implementation allows both, with filters running before router dispatch.
+
+
+## Design choices
+
+This section summarises the key design choices made in this proposal, for ease of reference.
+
+* **Virtual node IDs** provide a uniform addressing scheme that insulates router authors from the node ID collision problem inherent in multi-cluster topologies. The runtime owns the mapping; routers work exclusively with virtual IDs and never need to translate.
+* **Per-connection `Router` instances** allow per-connection state (caches, sessions) without synchronisation. Shared state lives in the `RouterFactory`'s initialisation data, which must be thread-safe.
+* **`RouterResult` as a sealed type** encodes request outcomes (response, no-response, disconnect) as values rather than side-effects, following the pattern established by `FilterResult`. The sealed hierarchy is extensible without breaking existing implementations.
+* **No "send to any broker" method.** All requests are addressed by virtual node ID. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
+* **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
+* **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
+* **Routes generalise filter chains.** A route may carry its own filter list in addition to a target, allowing different filter chains for different paths through the graph.
+* **Route-level SASL** (e.g. SASL initiator for upstream authentication) is achieved via per-route filters rather than a dedicated route-level property.
+* **Definition names** are global within their type (filters, routers, clusters each have their own namespace) but not across types.
+* **Version capping is the router's responsibility**, not the runtime's. The runtime provides the baseline intersection of proxy and backend version ranges; routers may further constrain as needed.
