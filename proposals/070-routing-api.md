@@ -193,9 +193,13 @@ We want to allow (but not require) a router to potentially make multiple request
 For this reason `RouterContext` does not follow the builder pattern used in the `FilterContext`, but simply exposes methods to asynchronously send requests.
 This allows the `Router` author to make use of the `CompletionStage` API when issuing multiple requests.
 
-**`bootstrapNodeId(route)`** returns the virtual node ID of the bootstrap broker for a named route.
-This is used to send the initial requests (e.g. `METADATA`) before the router has discovered the cluster's broker topology.
+**`bootstrapNodeId(route)`** returns the virtual node ID of a broker on the named route's cluster.
+This is used to send the initial requests (e.g. `METADATA`) before the router has discovered the cluster's full broker topology.
 Once `METADATA` responses arrive, the router uses the virtual node IDs from those responses to address specific brokers — no translation is needed, since the node IDs in responses are already virtual (see _Virtual node IDs_ above).
+
+The runtime is responsible for selecting which broker to return.
+A route's cluster may be configured with multiple bootstrap servers, and the runtime should randomise selection and round-robin on subsequent calls, mirroring how Kafka clients handle bootstrap addresses.
+This keeps the selection policy in the runtime, where it can be applied consistently, rather than requiring each router to implement its own strategy.
 
 **`sendRequestToNode(virtualNodeId, ...)`** sends a request to a specific broker, identified by its virtual node ID.
 The runtime resolves the virtual ID to a route and upstream broker address, opening a new connection if necessary.
