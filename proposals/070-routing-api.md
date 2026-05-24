@@ -179,7 +179,8 @@ interface RouterContext {
 
     int bootstrapNodeId(String route);
 
-    CompletionStage<Response> sendRequestToNode(int virtualNodeId,
+    CompletionStage<Response> sendRequestToNode(String route,
+                                                int virtualNodeId,
                                                 RequestHeaderData header,
                                                 ApiMessage request);
 
@@ -201,10 +202,18 @@ The runtime is responsible for selecting which broker to return.
 A route's cluster may be configured with multiple bootstrap servers, and the runtime should randomise selection and round-robin on subsequent calls, mirroring how Kafka clients handle bootstrap addresses.
 This keeps the selection policy in the runtime, where it can be applied consistently, rather than requiring each router to implement its own strategy.
 
-**`sendRequestToNode(virtualNodeId, ...)`** sends a request to a specific broker, identified by its virtual node ID.
-The runtime resolves the virtual ID to a route and upstream broker address, opening a new connection if necessary.
+**`sendRequestToNode(route, virtualNodeId, ...)`** sends a request to a specific broker, identified by the route and a virtual node ID.
+The runtime uses the route to determine which target cluster, and resolves the virtual node ID to a specific upstream broker address, opening a new connection if necessary.
 
-All requests are addressed by virtual node ID. There is no "send to any broker" method.
+The router passes both the route (which it knows from its routing decision) and the virtual node ID (which it knows from METADATA or `bootstrapNodeId()`).
+Both pieces of information are naturally available at every call site — the route is the fundamental output of the routing decision, and the virtual node ID comes from cached metadata.
+
+The route parameter is essential for supporting different `NodeIdMapping` strategies (see _Node ID mapping implementation_ below).
+With a dedicated (one-to-one) mapping, each virtual node belongs to exactly one route, so the route is redundant but serves as a cross-check.
+With a shared (many-to-one) mapping — for example, if proxy instances were presented to clients as broker nodes — a single virtual node may serve brokers from multiple routes, and the route parameter is the only way for the runtime to determine which target cluster the request should reach.
+Including the route in all cases avoids locking router implementations into a specific mapping strategy: the same router code works regardless of which mapping the runtime uses.
+
+There is no "send to any broker" method.
 This is a deliberate design choice: the Kafka protocol scopes most operations to a specific broker (partition leaders, group coordinators, per-broker `API_VERSIONS` negotiation).
 Providing a "send to any broker" convenience method would be a footgun for router authors — it would be easy to use for an API that actually requires a specific broker, and the resulting bug would only manifest at runtime under specific conditions (e.g. multi-broker clusters, rolling upgrades).
 By requiring a virtual node ID for every request, the router author is forced to think about broker targeting, which correctly reflects the protocol's reality.
@@ -397,33 +406,56 @@ As described in _Virtual node IDs_ above, the runtime translates between real ta
 This is implemented by a `NodeIdMapping` abstraction (internal to the runtime) with two operations:
 
 * `toVirtual(route, targetNodeId)` — used when rewriting responses received from a target cluster (the runtime rewrites broker node IDs in `METADATA`, `PRODUCE`, `FIND_COORDINATOR`, and `DESCRIBE_CLUSTER` responses before they reach the router).
-* `fromVirtual(virtualNodeId)` — used when the router calls `sendRequestToNode()`, returning both the route name and the target-cluster node ID.
+* `fromVirtual(route, virtualNodeId)` — used when the router calls `sendRequestToNode(route, virtualNodeId, ...)`, returning the target-cluster node ID.
 
-The mapping has a strict invertibility invariant: `fromVirtual(toVirtual(route, t))` must return `(route, t)`.
-This means a virtual node ID always unambiguously identifies both the route and the target-cluster broker.
+The mapping must satisfy: `fromVirtual(route, toVirtual(route, t))` returns `t` for any route and target node ID `t`.
+Note that the mapping does not need to recover the route from the virtual node ID alone — the route is always supplied by the router.
+This allows both _dedicated_ (one-to-one) and _shared_ (many-to-one) mapping strategies.
 
-The current implementation uses a bijective mapping with the formula:
+##### Mapping strategies
 
-```
-V = offset + N × t
-```
+The design supports several mapping strategies, each suited to different deployment topologies.
 
-where `V` is the virtual node ID, `t` is the target-cluster node ID, `N` is the number of routes, and `offset` is the route's zero-based index.
+**Dedicated mapping (one-to-one).**
+Each virtual node maps to exactly one `(route, target-broker)` pair.
+The current implementation uses a formula: `V = offset + N × t`, where `V` is the virtual node ID, `t` is the target-cluster node ID, `N` is the number of routes, and `offset` is the route's zero-based index.
 This mapping is deterministic, stateless, and O(1) in both directions.
 No coordination between proxy instances is required.
 
-The bijective mapping is _stable_: adding or removing brokers from a target cluster does not change the virtual node IDs of existing brokers.
+The client sees all brokers from all clusters (each with a unique virtual ID).
+Because each virtual node belongs to exactly one route, leader-directed requests (e.g. `PRODUCE`, `FETCH`) from a well-behaved client will only contain topics from one route — no decomposition is needed for these APIs.
+The route parameter in `sendRequestToNode()` is redundant here but serves as a cross-check.
+
+The dedicated mapping is _stable_: adding or removing brokers from a target cluster does not change the virtual node IDs of existing brokers.
 Likewise, adding or removing proxy instances has no effect on the mapping.
 This stability is important because Kafka clients cache broker metadata and will use previously-seen node IDs in subsequent requests.
 
-For single-route configurations, an identity mapping is used: the virtual ID equals the target ID, with zero overhead.
+For single-route configurations, an identity mapping (a special case of dedicated mapping) is used: the virtual ID equals the target ID, with zero overhead.
+
+**Shared mapping (many-to-one).**
+Multiple `(route, target-broker)` pairs map to the same virtual node.
+For example, if proxy instances are presented to clients as broker nodes, each proxy instance handles brokers from multiple routes.
+The client sees fewer nodes (one per proxy instance rather than one per target broker).
+
+Because a single virtual node may serve brokers from multiple routes, a leader-directed request to one virtual node _can_ contain topics from different routes — decomposition is needed even for `PRODUCE` and `FETCH`.
+The route parameter in `sendRequestToNode()` is essential here: without it, the runtime cannot determine which target cluster the request should reach.
+
+A shared mapping requires the proxy instances to agree on their assignments.
+If assignments change dynamically (e.g. a proxy instance leaves or joins), a router may hold stale metadata — its cached leader for a topic might reference a virtual node that no longer serves that route.
+This is not a programming error; it is a natural consequence of eventual consistency, analogous to Kafka's `NOT_LEADER_OR_FOLLOWER`.
+The runtime should respond with an appropriate error, triggering the router to refresh its metadata.
+
+A shared mapping would require strong consistency across proxy instances to ensure they agree on the virtual node ID assignments.
+
+**Role-based mapping.**
+Virtual nodes correspond to per-route functional roles (e.g. "partition leader", "group coordinator").
+If roles are scoped per route, this behaves like a dedicated mapping.
+If roles span routes, it behaves like a shared mapping.
+
+##### Operational considerations
 
 All proxy instances presenting the same virtual cluster to clients must use the same `NodeIdMapping`.
-Changing the mapping strategy (e.g. from bijective to a different scheme) is expected to be a disruptive operation — not a zero-downtime change — because connected clients will hold stale virtual node IDs from the previous mapping.
-
-In future, if proxy instances were themselves presented to clients as broker nodes (e.g. in a clustered proxy deployment), the mapping would need to account for the proxy's own identity.
-Such a mapping would require strong consistency across proxy instances to ensure they agree on the virtual node ID assignment.
-The `NodeIdMapping` abstraction accommodates this evolution without changing the `Router` API.
+Changing the mapping strategy (e.g. from dedicated to shared) is expected to be a disruptive operation — not a zero-downtime change — because connected clients will hold stale virtual node IDs from the previous mapping.
 
 `NodeIdMapping` is a `sealed` interface — the runtime controls which implementations exist.
 `Router` authors never implement or interact with this interface directly.
@@ -433,8 +465,8 @@ The `NodeIdMapping` abstraction accommodates this evolution without changing the
 The Kafka protocol scopes `API_VERSIONS` to a single broker connection — a client sends `API_VERSIONS` each time it connects to a new broker.
 This means the proxy must forward `API_VERSIONS` to the specific broker the client believes it is talking to, not to an arbitrary broker.
 
-With `BijectiveNodeIdMapping`, each virtual node ID maps to exactly one real broker, so the router can use `sendRequestToNode()` to forward `API_VERSIONS` to the correct broker.
-With a `NodeIdMapping` where virtual IDs do not correspond to unique real brokers, the runtime would need to fan out `API_VERSIONS` to all brokers behind that virtual ID and return the intersection of their version ranges.
+With a dedicated mapping, each virtual node ID maps to exactly one real broker, so the router can use `sendRequestToNode()` to forward `API_VERSIONS` to the correct broker.
+With a shared mapping, the runtime would need to fan out `API_VERSIONS` to all brokers behind that virtual node and return the intersection of their version ranges.
 
 The runtime's existing `ApiVersionsIntersectFilter` intersects each backend broker's version ranges with the proxy's own maximums.
 
@@ -531,9 +563,10 @@ Having a single `clusterDefinitions` list as the authoritative catalogue of upst
 This section summarises the key design choices made in this proposal, for ease of reference.
 
 * **Virtual node IDs** provide a uniform addressing scheme that insulates router authors from the node ID collision problem inherent in multi-cluster topologies. The runtime owns the mapping; routers work exclusively with virtual IDs and never need to translate.
+* **Route included in `sendRequestToNode`** to support both dedicated (one-to-one) and shared (many-to-one) node ID mappings. With a dedicated mapping the route is redundant; with a shared mapping it is essential. Including it in all cases avoids locking router implementations into a specific mapping strategy, allowing the same router code to work across deployment topologies (e.g. each-broker-is-a-node vs proxy-instances-as-nodes).
 * **Per-connection `Router` instances** allow per-connection state (caches, sessions) without synchronisation. Shared state lives in the `RouterFactory`'s initialisation data, which must be thread-safe.
 * **`RouterResult` as a sealed type** encodes request outcomes (response, no-response, disconnect) as values rather than side-effects, following the pattern established by `FilterResult`. The sealed hierarchy is extensible without breaking existing implementations.
-* **No "send to any broker" method.** All requests are addressed by virtual node ID. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
+* **No "send to any broker" method.** All requests are addressed by route and virtual node ID. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
 * **Routes generalise filter chains.** A route may carry its own filter list in addition to a target, allowing different filter chains for different paths through the graph.
