@@ -37,7 +37,7 @@ Addressing these enables:
 - **Test-first development**: a developer writing a new filter can write a failing system test as the first commit of their feature branch, without reading framework documentation or asking QE for help.
 - **Deployment-agnostic feature tests**: the same test runs against an operator-managed proxy, a manifest-managed proxy, or a Helm installation, with no changes to the test body.
 - **Reliable convergence**: `proxyFixture.apply()` is a blocking call with a defined contract — when it returns, the proxy is serving the requested configuration. Manual polling disappears from test classes.
-- **A TCK for downstream distributions**: downstream distributors implement `Installer` for their distribution and run upstream's test modules — feature, operator, installer, and webhook — without forking.
+- **A Technology Compatibility Kit (TCK) for downstream distributions**: downstream distributors implement `Installer` for their distribution and run upstream's test modules — feature, operator, installer, and webhook — without forking. The test modules define what "correct" means; the distributor proves their packaging satisfies it.
 
 ## Proposal
 
