@@ -14,7 +14,7 @@ The system test suite covers the right things at the right level. Assertions in 
 
 Every feature test class has a private `deployXxx()` method that reimplements the same builder/template pattern against the operator's CRD types. Adding a new optional parameter (e.g. `ExperimentalKmsConfig`) requires touching every one of them. Timing workarounds are scattered across test classes with comments pointing at unresolved issues. The convergence question — "is the proxy actually serving the configuration I just applied?" — is answered by ad hoc polling in each test class rather than by a framework-level contract.
 
-This setup cost has a second-order effect: system tests are written after features merge, delegated to QE because they are too expensive for a developer to include in a feature PR. The test framework is the bottleneck, not the assertions.
+This setup cost has a second-order effect: system tests are written after features merge, deferred until after merge and often left as an exercise to others because they are perceived as too expensive for a developer to include in a feature PR. The test framework is the bottleneck, not the assertions.
 
 The fix required is narrow: a thin setup layer that hides the deployment machinery without changing the assertions at all.
 
