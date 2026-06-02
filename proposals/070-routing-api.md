@@ -274,12 +274,14 @@ routerDefinitions:
     config: ...
     routes:
       - name: foo
+        id: 0
         filters: 
           - my-first-filter
           - my-second-filter
         target:
           cluster: cluster-a
       - name: bar
+        id: 1
         filters: 
           - my-third-filter
         target:
@@ -289,6 +291,7 @@ routerDefinitions:
     config: ...
     routes:
       - name: baz
+        id: 0
         target:
           cluster: cluster-b
 
@@ -311,7 +314,12 @@ The proxy configuration has three top-level definition lists:
 
 #### Routes
 
-A route has a `name`, an optional list of `filters` (the names of filters applied to requests/responses traversing this route), and a `target`.
+A route has a `name`, an `id`, an optional list of `filters` (the names of filters applied to requests/responses traversing this route), and a `target`.
+
+The `id` is an integer that identifies the route within the virtual node ID mapping formula (see _Node ID mapping implementation_ below).
+Route IDs must be unique within their parent router and in the range `[0, S)` where `S` is the number of routes in the router.
+The `id` is separate from the `name` to allow route names to be reordered in the configuration without changing the virtual node ID mapping.
+The proxy rejects configurations where the route count `S` is large enough that overflow is inevitable for plausible broker node IDs.
 
 The `target` property is a discriminated union containing exactly one of:
 * `cluster` — the name of a cluster defined in `clusterDefinitions`.
@@ -386,6 +394,24 @@ The runtime dispatches incoming requests in one of two modes:
 
 * **Dynamic routes**: For all other API keys, the runtime deserialises the request, creates a `RouterContext`, and invokes `Router.onRequest()`. The router uses the context to send requests to routes and deliver a response to the client.
 
+#### Nested router dispatch
+
+When a router calls `sendRequestToNode()` on a route whose target is another router, the runtime dispatches to the nested router rather than forwarding directly to a backend.
+The dispatch works as follows:
+
+1. The runtime creates (or retrieves from a per-connection cache) a `Router` instance for the nested router.
+2. A new `RouterContextImpl` is constructed for the nested router, with its own `NodeIdMapping`, routes, and bootstrap virtual node IDs.
+   The nested context shares the same client channel, response sequencer, correlation ID allocator, and metrics as the outer context.
+   Its forwarder callbacks wrap the outer forwarders to translate virtual node IDs from the nested space to the outermost space (see _Per-router scoping and nested dispatch_ above).
+3. The runtime invokes `nestedRouter.onRequest()` with the nested context.
+4. The `RouterResult` is mapped to a `CompletionStage<Response>`:
+   * `Completed(r)` → the response is returned to the outer router.
+   * `CompletedNoResponse` → null is returned (fire-and-forget).
+   * `Disconnect` → the future completes exceptionally (a nested router should not disconnect the client).
+
+Nested `Router` instances are cached per connection, keyed by the `(outerRoute, routerName)` pair.
+They are closed when the client connection closes, in `RouterDispatchHandler.handlerRemoved()`, before the outer router is closed.
+
 #### Correlation ID management
 
 When a router sends requests via `RouterContext`, the runtime allocates _routing correlation IDs_ that are distinct from the client's original correlation IDs.
@@ -418,7 +444,7 @@ The design supports several mapping strategies, each suited to different deploym
 
 **Dedicated mapping (one-to-one).**
 Each virtual node maps to exactly one `(route, target-broker)` pair.
-The current implementation uses a formula: `V = offset + N × t`, where `V` is the virtual node ID, `t` is the target-cluster node ID, `N` is the number of routes, and `offset` is the route's zero-based index.
+The current implementation uses a formula: `V = id + S × t`, where `V` is the virtual node ID, `t` is the target-cluster node ID, `S` is the number of routes in the router, and `id` is the route's configured identifier.
 This mapping is deterministic, stateless, and O(1) in both directions.
 No coordination between proxy instances is required.
 
@@ -428,9 +454,27 @@ The route parameter in `sendRequestToNode()` is redundant here but serves as a c
 
 The dedicated mapping is _stable_: adding or removing brokers from a target cluster does not change the virtual node IDs of existing brokers.
 Likewise, adding or removing proxy instances has no effect on the mapping.
+Because the route's `id` is explicit rather than derived from position, reordering routes in the configuration does not change the mapping.
 This stability is important because Kafka clients cache broker metadata and will use previously-seen node IDs in subsequent requests.
 
 For single-route configurations, an identity mapping (a special case of dedicated mapping) is used: the virtual ID equals the target ID, with zero overhead.
+
+##### Per-router scoping and nested dispatch
+
+Each router level has its own `NodeIdMapping`, scoped to its routes.
+In a nested topology where an outer router has a route targeting an inner router, the inner router works entirely within its own virtual node ID space — its mapping uses `S_inner` (the inner router's route count) and its routes' own `id` values.
+
+However, the runtime's address resolver maps a single integer virtual node ID to an upstream address.
+Nested virtual IDs must therefore be translated to the outermost level before reaching the address resolver.
+The translation exploits the outer mapping's unused route slot: for an outer route `r` with `id = k` that targets a nested router, the translation is `V_outer = k + S_outer × V_inner`.
+This is simply the outer mapping applied to the nested virtual ID _as if it were a target node ID_.
+
+Because the outer mapping guarantees uniqueness across its route slots, and the inner mapping guarantees uniqueness within its own space, the composed translation produces globally unique virtual node IDs.
+The composition generalises to arbitrary nesting depth: each level translates through its parent route's slot.
+
+Concretely, this translation is applied by the nested level's forwarder callbacks — the inner `RouterContextImpl` wraps the outer `nodeForwarder` to translate IDs before forwarding to the CCSM.
+Address caching from `METADATA` responses also uses the translated IDs, ensuring the CCSM's address resolver can find them.
+The `NodeIdResponseTranslator` uses the inner mapping (so the inner router sees its own virtual IDs in responses), while address caching uses the composed translation (so the CCSM sees outer virtual IDs).
 
 **Shared mapping (many-to-one).**
 Multiple `(route, target-broker)` pairs map to the same virtual node.
@@ -569,6 +613,7 @@ This section summarises the key design choices made in this proposal, for ease o
 * **No "send to any broker" method.** All requests are addressed by route and virtual node ID. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
+* **Explicit route `id`** decouples the virtual node ID mapping from route ordering. The `id` is an integer in `[0, S)` used in the formula `V = id + S × t`. Making it explicit means reordering routes in the YAML does not change the mapping, avoiding accidental virtual node ID shifts that would invalidate connected clients' cached metadata.
 * **Routes generalise filter chains.** A route may carry its own filter list in addition to a target, allowing different filter chains for different paths through the graph.
 * **Route-level SASL** (e.g. SASL initiator for upstream authentication) is achieved via per-route filters rather than a dedicated route-level property.
 * **Definition names** are global within their type (filters, routers, clusters each have their own namespace) but not across types.
