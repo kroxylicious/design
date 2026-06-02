@@ -255,6 +255,8 @@ This follows the pattern established by `FilterResult`, where the outcome is a v
 The sealed hierarchy can be extended with new variants (e.g. `CompletedThenDisconnect(Response)`) in future without breaking existing implementations.
 
 If the `CompletionStage<RouterResult>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
+In other words, Routers should generally handle errors with the terms of the Kafka protocol, by returning a response to the client which uses appropriate Kafka error codes. 
+Throwing an exception or returning an exceptionally-completed completion stage is to be avoided where possible.
 
 
 ### Configuration
@@ -488,7 +490,7 @@ The route parameter in `sendRequestToNode()` is essential here: without it, the 
 A shared mapping requires the proxy instances to agree on their assignments.
 If assignments change dynamically (e.g. a proxy instance leaves or joins), a router may hold stale metadata — its cached leader for a topic might reference a virtual node that no longer serves that route.
 This is not a programming error; it is a natural consequence of eventual consistency, analogous to Kafka's `NOT_LEADER_OR_FOLLOWER`.
-The runtime should respond with an appropriate error, triggering the router to refresh its metadata.
+The runtime should respond with an appropriate Kafka error code, triggering the router to refresh its metadata.
 
 A shared mapping would require strong consistency across proxy instances to ensure they agree on the virtual node ID assignments.
 
