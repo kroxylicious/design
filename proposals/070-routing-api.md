@@ -219,8 +219,9 @@ Providing a "send to any broker" convenience method would be a footgun for route
 By requiring a virtual node ID for every request, the router author is forced to think about broker targeting, which correctly reflects the protocol's reality.
 
 **`sessionId()`** and **`authenticatedSubject()`** provide observability and identity context.
-`authenticatedSubject()` returns the `Subject` established by upstream SASL processing (e.g. a SASL termination filter).
-If no SASL processing has occurred, the subject will be anonymous.
+`sessionId()` returns a string that uniquely identifies the connection with the Kafka client. It will have the same value for all invocations of `onRequest()` which happen for that client connection, both for the same router over time, and different routers in a topology.
+`authenticatedSubject()` returns the client's `Subject` established by mTLS or SASL processing on the VC filter chain (e.g. a SASL termination filter).
+If no authentication has occurred, the subject will be anonymous.
 Correct placement of SASL plugins in the topology is the operator's responsibility;
 a future proposal may add runtime validation of SASL plugin placement.
 
@@ -401,7 +402,7 @@ The dispatch works as follows:
 
 1. The runtime creates (or retrieves from a per-connection cache) a `Router` instance for the nested router.
 2. A new `RouterContextImpl` is constructed for the nested router, with its own `NodeIdMapping`, routes, and bootstrap virtual node IDs.
-   The nested context shares the same client channel, response sequencer, correlation ID allocator, and metrics as the outer context.
+   The nested context shares the same Netty client channel, response sequencer, correlation ID allocator, and metrics as the outer context.
    Its forwarder callbacks wrap the outer forwarders to translate virtual node IDs from the nested space to the outermost space (see _Per-router scoping and nested dispatch_ above).
 3. The runtime invokes `nestedRouter.onRequest()` with the nested context.
 4. The `RouterResult` is mapped to a `CompletionStage<Response>`:
@@ -533,7 +534,7 @@ If a router blocks indefinitely (e.g. a backend never responds), the client conn
 Routers are responsible for implementing their own timeouts if needed.
 
 Requests arriving before backend connections are ready are buffered and flushed when the connection becomes active.
-Backpressure from any upstream connection propagates to the client channel.
+Backpressure from any upstream connection propagates to the Netty client channel.
 
 
 ### Metrics
