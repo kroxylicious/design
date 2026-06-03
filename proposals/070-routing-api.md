@@ -134,8 +134,8 @@ State shared across connections belongs in the `RouterFactory`'s initialisation 
 The router inspects the request, decides which route(s) to use, sends one or more requests via the `RouterContext`, and eventually delivers a response to the client.
 The returned `CompletionStage<RouterResult>` completes when the router has finished processing the request.
 
-**`staticRoutes()`** returns a map of `ApiKeys` to route names for requests that should always be forwarded to a fixed route without deserialisation.
-This is a performance optimisation: the runtime can forward these requests as opaque frames, bypassing the cost of deserialisation (assuming no `Filters` require deserialization) and calling `onRequest()`.
+**`staticRoutes()`** returns a map of `ApiKeys` to route names for requests that should always be forwarded to a fixed route without `onRequest()` being called.
+This allows a potential performance optimisation: if no filters express an interest either the runtime can forward these requests as opaque frames, bypassing the cost of deserialisation.
 API keys not present in the map are dynamically routed via `onRequest()`.
 The default implementation returns an empty map (all requests dynamically routed).
 
