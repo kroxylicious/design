@@ -239,9 +239,17 @@ If a test in `systemtest-operator` runs but the active fixture is `ManifestProxy
 
 ### `KafkaClient` Abstraction
 
-The existing `KafkaClient` interface with its multiple implementations (StrimziTestClient, KcatClient, KafClient, PythonTestClient) — selected at runtime via environment variable — is the right shape and largely works. The gap is off-cluster support. All current implementations run as Kubernetes jobs; an off-cluster client (an embedded Java client in the test JVM, or a client process on a bare metal host) has no namespace and no container image.
+The same separation of concerns that motivates the fixture model applies to how tests interact with Kafka. A test expresses intent — produce a message, consume from a topic, commit a transaction — without knowing which client library speaks the protocol or where that client runs. These are three independent axes:
 
-The current interface conflates the core produce/consume contract with Kubernetes-specific machinery:
+| Axis | What it answers | Examples |
+|---|---|---|
+| Test intent | What does the test want to do? | Produce, consume, create topic, transact |
+| Client driver | Which protocol implementation? | Java client, librdkafka (via FFI), Sarama (via FFI), kcat CLI |
+| Execution environment | Where does the client run? | In-process (test JVM), Kubernetes Job, local process |
+
+The test sees only intent. The framework composes driver and execution environment. CI can vary them independently — the same feature test runs against the Java client in-process, librdkafka via FFI, or kcat in a Kubernetes pod.
+
+The existing `KafkaClient` interface (StrimziTestClient, KcatClient, KafClient, PythonTestClient) conflates all three axes. Every implementation is a specific driver running as a Kubernetes Job. The interface itself mixes the produce/consume contract with Kubernetes-specific machinery:
 
 ```java
 KafkaClient inNamespace(String namespace);
@@ -249,23 +257,26 @@ String getImage();
 void preloadImage();
 ```
 
-These move to a `KubernetesClientCapability`:
+The proposed model separates them. `KafkaClient` becomes a richer test-facing API — pure intent, expressed in terms of Kafka operations rather than CLI invocations:
 
 ```java
 interface KafkaClient {
-    ExecResult produceMessages(...);
-    List<ConsumerRecord> consumeMessages(...);
-    <C> Optional<C> as(Class<C> capability);
-}
+    void produce(String topic, String bootstrap, List<ProducerRecord> records);
+    List<ConsumerRecord> consume(String topic, String bootstrap, int count);
+    void createTopic(String topic, String bootstrap, int partitions, int replicas);
 
-interface KubernetesClientCapability {
-    KafkaClient inNamespace(String namespace);
-    String getImage();
-    void preloadImage();
+    // Richer operations — enabled by in-process drivers
+    void produceInTransaction(String topic, String bootstrap, List<ProducerRecord> records);
+    void commitOffsets(String groupId, String bootstrap, Map<TopicPartition, Long> offsets);
+    AdminClient admin(String bootstrap);
 }
 ```
 
-An off-cluster embedded Java client implements `KafkaClient` only. The existing pod-based clients implement both. Code that pre-pulls images or sets a namespace calls `as(KubernetesClientCapability.class)` and skips gracefully if absent.
+The current produce/consume contract is sufficient for existing feature tests and is the starting point. The richer operations — transactions, consumer group management, admin — are the target shape. These are difficult or impossible to express via CLI-based drivers (kcat cannot commit a transaction mid-test), but fall out naturally from in-process drivers: the Java client directly, or librdkafka and Sarama via Java Foreign Function Interface. CLI drivers implement produce and consume; in-process drivers implement the full surface.
+
+The current interface methods that are not test-intent (`inNamespace`, `getImage`, `preloadImage`) are execution-environment concerns and move out of the test-facing contract entirely. The framework wires the right driver and execution environment based on system properties (`-Dclient.driver=java|librdkafka|sarama`, `-Dclient.location=in-process|on-cluster`).
+
+This separation has a concrete payoff beyond cleanliness: Kroxylicious is a protocol proxy, and proving it works correctly with multiple client implementations — not just the Java client — is a first-class testing concern. A librdkafka or Sarama driver exercised via Java Foreign Function Interface from the test JVM would run in-process (fast, no pod startup cost) while proving protocol compatibility with a fundamentally different client implementation. The same feature test, unchanged, validates behaviour across client libraries.
 
 **Bootstrap address pairing**: an off-cluster client needs an externally accessible bootstrap address, not the cluster-internal Service DNS. This pairs naturally with `ProxyHandle.bootstrap(ClientLocation)` — the framework wires client location to bootstrap address at test setup time. The test author calls `proxy.bootstrap()` and receives the right address for the client that is configured.
 
