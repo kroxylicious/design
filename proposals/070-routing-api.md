@@ -25,7 +25,7 @@ For databases, this is known as Data Virtualization.
 
 * **Principal-aware routing**.
 A natural variation on basic [SASL termination](004-terminology-for-authentication.md) is to use the identity of the authenticated client to drive the decision about which backing cluster to route requests to.
-This could be used with some metadata about principals to ensure that a client is routed to a cluster that is local to it.
+For example, this could be used with some metadata about principals to ensure that a client is routed to a cluster that is local to it.
 
 * **Topic splicing**.
 Multiple separate topics in distinct backing clusters are presented to clients as a single topic.
@@ -54,7 +54,7 @@ individual `Router` implementations are free to support as much or as little of 
 To enable the use cases above we need a few concepts:
 
 * A _cluster_ is an upstream Kafka cluster that can handle requests.
-* A _router_ is a thing which decides which _route(s)_ should be used for a given request.
+* A _router_ is a thing which decides which _route(s)_ should be used for a given request and formulates the response to return to the client.
 * A _route_ is a named pathway from a router towards a _target_. 
 * A route's _target_ is either a cluster or another router. Routes may also have filters attached.
 
