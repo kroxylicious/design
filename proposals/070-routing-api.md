@@ -126,7 +126,7 @@ interface Router {
 }
 ```
 
-A `Router` instance is created **per client connection**, not per virtual cluster.
+A `Router` instance (and thus a graph instance) is created **per client connection**, not per virtual cluster.
 This means per-connection state (caches, session state) can live directly in the `Router` instance without synchronisation, since all calls to a given instance happen on a single Netty event loop thread.
 State shared across connections belongs in the `RouterFactory`'s initialisation data (see below).
 
@@ -194,7 +194,7 @@ We want to allow (but not require) a router to potentially make multiple request
 For this reason `RouterContext` does not follow the builder pattern used in the `FilterContext`, but simply exposes methods to asynchronously send requests.
 This allows the `Router` author to make use of the `CompletionStage` API when issuing multiple requests.
 
-**`bootstrapNodeId(route)`** returns the virtual node ID of a broker on the named route's cluster.
+**`bootstrapNodeId(route)`** returns a virtual node ID of a broker on the named route's cluster.
 This is used to send the initial requests (e.g. `METADATA`) before the router has discovered the cluster's full broker topology.
 Once `METADATA` responses arrive, the router uses the virtual node IDs from those responses to address specific brokers — no translation is needed, since the node IDs in responses are already virtual (see _Virtual node IDs_ above).
 
