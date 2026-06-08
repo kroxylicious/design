@@ -91,8 +91,9 @@ Client → [VC filters] → Router → Route A: [user filters] → [implicit fil
 ```
 
 Each route gets its own filter chain: user-configured filters (e.g. topic name rewriting,
-SASL initiator for upstream authentication) followed by runtime-managed implicit filters
-(node ID mapping, broker address rewriting, API version intersection).
+SASL initiator for upstream authentication), Router-provided protocol filters (e.g.
+partition filtering, identifier mapping), and runtime baseline filters (node ID mapping,
+broker address rewriting, API version intersection).
 
 Each route has two distinct ID spaces: **downstream** and **upstream**. The downstream
 space is what the layer above (client or parent router) sees. The upstream space is what
@@ -139,7 +140,7 @@ This establishes the _topology_ — the multi-cluster namespace as seen by the c
 
 For **leader-directed API keys** in simple topologies (principal-aware routing, single-route
 per connection), the Router's `scatter()` is trivial: the request targets a downstream node ID
-that belongs to a single route, so the Router sends to that route.
+that belongs to a single route, so the Router calls `sendToNode` with that route and node.
 
 For **union topics**, a single PRODUCE or FETCH can contain partitions that span routes.
 This happens because the Router's METADATA scatter-gather merged partition leaders from
@@ -177,7 +178,7 @@ results — generic response composition with no protocol-level partition knowle
 
 The Router never inspects the PRODUCE structure. Its scatter decision is "which routes,"
 not "which partitions go where." The protocol-aware decomposition happens in a
-batteries-included per-route filter that the runtime ships once.
+per-route filter shipped as a reference implementation by the runtime.
 
 This addresses a concern raised in
 [PR #70's review](https://github.com/kroxylicious/design/pull/70#discussion_r3370514842):
@@ -232,8 +233,9 @@ the Router. Different routes can use different naming strategies.
 #### Partition filtering
 
 In multi-route topologies (union topics), a single client request may contain partitions
-spanning multiple routes. A batteries-included `PartitionRoutingFilter` — shipped by the
-runtime, invisible to the user — handles this.
+spanning multiple routes. The runtime ships a reference `PartitionRoutingFilter` that
+handles this. A Router author who needs different decomposition logic can supply their
+own filter instead.
 
 The filter operates wholly in the **downstream** ID space. It receives
 requests in downstream IDs (via the route's filter chain) and consults the runtime's per-route topology
@@ -264,7 +266,7 @@ Router.
 
 Since this filter is already traversing the request structure to strip partitions,
 identifier rewriting (PIDs, fetch session IDs) at the same point is trivial additional
-work. This is where the batteries-included identifier mapping filters
+work. This is where the identifier mapping filters
 (see _Protocol identifier mapping_ below) naturally integrate.
 
 For single-route topologies (principal-aware routing, simple proxy), the filter is a
@@ -280,27 +282,37 @@ during scatter, or as configuration on the route that the Router reads.
 
 Per-route concern, implemented as a per-route filter — same as PR #70.
 
-### What the runtime handles (implicit filters)
+### What per-route filters handle (implicit and Router-provided)
 
-These are invisible to both the Router plugin author and the user.
-They are inserted by the runtime on each route's filter chain, downstream of user filters.
+The existing model establishes a pattern of _implicit filters_: `BrokerAddressFilter` and
+`ApiVersionsIntersectFilter` are inserted by the runtime on every route, invisible to the
+user. They handle protocol-level concerns that every proxy path needs.
 
-The existing model already establishes this pattern: `BrokerAddressFilter` and
-`ApiVersionsIntersectFilter` are batteries-included implicit filters that the runtime
-inserts on every route. No user configures them; no filter author writes them.
-They handle protocol-level concerns that every proxy path needs.
+Multi-cluster routing introduces additional per-route protocol concerns (node ID mapping,
+partition filtering, identifier mapping). Rather than mandating that these are always
+handled by runtime-provided implicit filters, the model supports two approaches:
 
-The same pattern extends to the protocol identifiers that multi-cluster routing introduces.
+- **Runtime defaults.** The runtime ships reference implementations of these filters
+  and inserts them by default. This covers the common cases and means a Router author
+  can get a working Router without writing protocol-level filters.
+- **Router-provided filters.** A Router author can extend or replace the default per-route
+  filter chain via the `RouterFactory`. A Router that needs different decomposition logic,
+  a custom identifier mapping strategy, or a protocol concern the runtime doesn't cover
+  can supply its own filters. This leans into the existing filter machinery — the same
+  `Filter` API, the same processing model — rather than introducing a parallel mechanism.
 
-#### Virtual node ID mapping
+This keeps one processing model (filters on a chain) for all per-route protocol concerns,
+whether they come from the runtime, the Router author, or the user's configuration.
+
+#### Virtual node ID mapping (runtime default)
 
 Same formula as PR #70: `V = id + S × t`, where `V` is the virtual node ID, `t` is the
 target-cluster node ID, `S` is the number of routes, and `id` is the route's identifier.
 
-Implemented as a per-route implicit filter that rewrites node IDs in responses
-(METADATA, PRODUCE, FIND_COORDINATOR, DESCRIBE_CLUSTER) from upstream to downstream,
-and in requests from downstream to upstream. The Router works entirely in downstream
-node IDs — it never translates.
+The runtime's default implementation is a per-route filter that rewrites node IDs in
+responses (METADATA, PRODUCE, FIND_COORDINATOR, DESCRIBE_CLUSTER) from upstream to
+downstream, and in requests from downstream to upstream. The Router works entirely in
+downstream node IDs — it never translates.
 
 For single-route (1:1) configurations, the identity mapping `V = t` applies with zero overhead.
 This is the existing model, confirming that 1:1 is a degenerate case of the general formula.
@@ -324,12 +336,15 @@ client instance IDs. In a multi-cluster topology, each route's upstream cluster
 assigns its own values for these identifiers, creating the same collision problem
 that the node ID mapping solves for broker addressing.
 
-The runtime handles these as batteries-included implicit filters — the same pattern
-as `BrokerAddressFilter`. Each filter operates on a single route's traffic with no
-cross-route knowledge — it maps between the downstream identifier and the upstream
-identifier for its route. Each route has its own
-bidirectional mapping (downstream ↔ upstream); there is no global identifier space
-across routes.
+These are handled as per-route filters — the same pattern as `BrokerAddressFilter`.
+Each filter operates on a single route's traffic with no cross-route knowledge — it maps
+between the downstream identifier and the upstream identifier for its route. Each route
+has its own bidirectional mapping (downstream ↔ upstream); there is no global identifier
+space across routes.
+
+The runtime ships **reference implementations** of these filters that cover the common
+cases. A Router author who needs a different mapping strategy can supply their own via
+the `RouterFactory`.
 
 Like the `PartitionRoutingFilter`, these filters operate wholly in the downstream ID
 space and consult per-route mapping state maintained by the runtime (exposed through
@@ -337,7 +352,7 @@ space and consult per-route mapping state maintained by the runtime (exposed thr
 responses flow through each route's filter chain.
 
 For **establishment RPCs** (`INIT_PRODUCER_ID`, initial FETCH, etc.), the identifier
-appears as a top-level response field. The runtime records the per-route upstream value
+appears as a top-level response field. The filter records the per-route upstream value
 and establishes the downstream ↔ upstream mapping. The Router's scatter-gather selects
 which route's establishment response becomes the downstream value.
 
@@ -349,33 +364,39 @@ additional work — the hard part (the protocol traversal) is already done. This
 directly addresses the
 [concern raised in PR #70's review](https://github.com/kroxylicious/design/pull/70#discussion_r3370514842)
 that identifier rewriting is trivial once you're inside the request structure.
-The difference is that the traversal and the rewriting both live in a filter the
-runtime ships once, not in every Router implementation.
+The difference is that the traversal and the rewriting both live in a filter
+shipped once, not reimplemented in every Router.
 
 This is distinct from the `associate()` API explored in
 [Sam's identifier mapping gist](https://gist.github.com/SamBarker/156030ef86911f82a2fdd3d2ebc4676b).
 That approach had the Router explicitly establishing mappings via an API call.
-Here, the runtime manages the per-route mapping state — the Router never calls an
+Here, the filters manage the per-route mapping state — the Router never calls an
 association method and never knows about identifier translation.
 
-#### Implicit filter declaration and FilterContext
+#### Per-route filter chain composition
 
 The 1:1 model already requires the runtime to decide which implicit filters to insert
 on a route — today it always inserts `BrokerAddressFilter` and
-`ApiVersionsIntersectFilter`. The multi-route model extends this: the runtime inserts
-the appropriate identifier mapping filters based on the topology.
+`ApiVersionsIntersectFilter`. The multi-route model extends this with additional
+protocol-level filters.
 
-A Router may need to influence which implicit filters are active on its routes.
-For example, a principal-routing Router (single route per connection, no identifier
-collision) needs only the baseline implicit filters. A union-cluster Router needs
-PID mapping, fetch session mapping, and potentially topic UUID mapping.
+The per-route filter chain is composed from three sources, in order:
 
-This is a declaration, not an implementation: the Router declares what its routes need,
-and the runtime provides the batteries-included filters. The mechanism is analogous to
-how a virtual cluster's `target` declaration causes the runtime to insert the right
-implicit filters today — no user action required.
+1. **User-configured filters** — declared in the route's `filters` configuration
+   (e.g. `TopicPrefixFilter`).
+2. **Router-provided filters** — supplied by the `RouterFactory` for its routes.
+   This is where a Router author adds protocol-level filters specific to their
+   routing strategy (partition filtering, identifier mapping, etc.).
+3. **Runtime baseline filters** — always present on every route
+   (`BrokerAddressFilter`, `ApiVersionsIntersectFilter`, node ID mapping).
 
-Implicit filters access runtime-maintained state — per-route topology, identifier
+The runtime ships reference implementations of common protocol filters
+(`PartitionRoutingFilter`, PID mapping, fetch session mapping) that a Router
+author can use via their `RouterFactory`. A Router author who needs different
+behaviour supplies their own filters instead — using the same `Filter` API, the
+same processing model, the same chain.
+
+Per-route filters access runtime-maintained state — per-route topology, identifier
 mappings — through a richer `FilterContext`. The runtime owns this state and updates
 it as traffic flows through each route's chain. Filters consume it but do not build
 or cache it independently. This keeps the source of truth in one place and avoids
@@ -403,11 +424,12 @@ responsible for: only the scatter-gather decision, not protocol-level decomposit
 or identifier translation.
 
 **`scatter()`** is invoked for every request. The Router inspects the request, sends
-sub-requests to routes via the `ScatterContext`, and returns a `ScatterGatherResult`
-that describes how to compose the responses. For METADATA, this is a genuine multi-route
-scatter. For a leader-directed PRODUCE, the Router may send to a single route or scatter
-to multiple routes (e.g. union topics) — but in either case the per-route filter chain
-handles decomposition and identifier translation, not the Router.
+sub-requests to routes via the `ScatterContext` (using `sendToRoute` for discovery
+requests or `sendToNode` for broker-targeted requests), and returns a
+`ScatterGatherResult` that describes how to compose the responses. For METADATA, this is
+a genuine multi-route scatter. For a leader-directed PRODUCE, the Router sends to the
+appropriate node. For union-topic scatters, the Router sends to multiple routes and
+per-route filters handle decomposition and identifier translation.
 
 **`close()`** releases per-connection resources, same as PR #70.
 
@@ -422,29 +444,50 @@ interface ScatterContext {
                                                 RequestHeaderData header,
                                                 ApiMessage request);
 
+    CompletionStage<ResponseFrame> sendToNode(String route,
+                                               int nodeId,
+                                               RequestHeaderData header,
+                                               ApiMessage request);
+
     String sessionId();
 
     Subject authenticatedSubject();
 }
 ```
 
-`ScatterContext` is simpler than PR #70's `RouterContext`:
+`ScatterContext` provides two methods for sending requests to routes, depending on
+whether the Router needs to target a specific broker.
 
 **`routes()`** returns the set of route names available to this Router.
 
-**`sendToRoute(route, header, request)`** sends a request to a route. Unlike PR #70's
-`sendRequestToNode()`, this does not require a virtual node ID — the runtime selects
-an appropriate broker on the route (bootstrap for initial requests, or the appropriate
-node once topology is established). The route's filter chain handles all per-route
-transformations before the request reaches the upstream cluster.
+**`sendToRoute(route, header, request)`** sends a request to a route without targeting
+a specific broker. The runtime selects an appropriate broker (bootstrap for initial
+requests, round-robin or random thereafter). Use this for requests that can go to any
+broker on the route — METADATA discovery, scatter-to-all-routes operations.
 
-The Router does not need to address specific brokers because it is not doing the
-protocol-level work that requires broker targeting. When the Router scatters a METADATA
-request, it sends to any broker on each route — the standard Kafka client bootstrap
-behaviour. The responses come back with downstream node IDs (rewritten by implicit filters),
-and the Router merges them. For leader-directed requests (PRODUCE, FETCH), the Router
-sends to the route(s) the request belongs to; the runtime resolves the target broker
-within each route using the downstream node ID.
+**`sendToNode(route, nodeId, header, request)`** sends a request to a specific downstream
+node on a route. The `nodeId` is a downstream node ID that the Router obtained from a
+previous response (e.g. a METADATA or FIND_COORDINATOR response). The runtime resolves it
+to the target broker via the route's downstream ↔ upstream mapping. Use this for requests
+that must target a specific broker — transaction coordinators, group coordinators,
+leader-directed requests where the Router knows the target.
+
+> **Open question:** For leader-directed requests, the destination node ID is already
+> present in the request header. It's unclear whether `sendToNode` adds value over
+> `sendToRoute` with the runtime extracting the target from the request — doing so
+> would avoid two competing sources of truth for the target node. `sendToNode` may
+> still be needed for requests where the Router needs to override the client's target
+> or where the request doesn't carry a destination node. This needs further investigation.
+
+This is the same capability as PR #70's `sendRequestToNode(route, virtualNodeId, ...)`.
+The difference is that `sendToRoute` exists alongside it for the common case where the
+Router doesn't need to pick a broker, avoiding the need for `bootstrapNodeId()` as a
+separate method.
+
+When the Router scatters a METADATA request, it uses `sendToRoute` — any broker on each
+route will do. The responses come back with downstream node IDs (rewritten by per-route
+filters). For subsequent leader-directed or coordinator-targeted requests, the Router uses
+`sendToNode` with the node ID from the cached METADATA or FIND_COORDINATOR response.
 
 **`sessionId()`** and **`authenticatedSubject()`** — same as PR #70.
 
@@ -595,11 +638,11 @@ The central difference: what lives in the Router's hot path.
 |---------|----------------------|-----------------|
 | METADATA composition | Router | Router (`scatter()`) |
 | Topic name rewriting | Router | Per-route user filter |
-| Node ID mapping | Runtime | Runtime implicit filter |
-| Broker address rewriting | Runtime | Runtime implicit filter |
-| API version intersection | Runtime | Runtime implicit filter |
-| PID / fetch session mapping | Router | Runtime implicit filter |
-| PRODUCE/FETCH decomposition | Router | Per-route implicit filter |
+| Node ID mapping | Runtime | Per-route filter (runtime default) |
+| Broker address rewriting | Runtime | Per-route filter (runtime default) |
+| API version intersection | Runtime | Per-route filter (runtime default) |
+| PID / fetch session mapping | Router | Per-route filter (runtime or Router-provided) |
+| PRODUCE/FETCH decomposition | Router | Per-route filter (runtime or Router-provided) |
 | PRODUCE/FETCH routing | Router | Router (`scatter()`) + per-route filter |
 | LIST_GROUPS, etc. merging | Router | Router (`scatter()`) |
 | Predicate evaluation | Router | Per-route filter / Router config |
@@ -607,16 +650,17 @@ The central difference: what lives in the Router's hot path.
 PR #70's `onRequest()` is called for every dynamically-routed API key and is responsible
 for both the routing decision and the protocol-level decomposition of requests. This
 alternative's `scatter()` is also called for every request, but its job is limited to the
-scatter decision ("which routes"). Per-route implicit filters
-handle request decomposition (stripping non-matching partitions) and identifier
-translation — protocol-aware work that is written once by the runtime and reused across
-all Router implementations.
+scatter decision ("which routes"). Per-route filters — either runtime defaults or
+Router-provided — handle request decomposition (stripping non-matching partitions) and
+identifier translation.
 
 ### What this buys
 
-**Smaller plugin surface.** The Router's `scatter()` is called for every request, but the
-Router's job is always the same thin concern: which routes, and how to merge. The Router
-author doesn't write PRODUCE/FETCH decomposition, topic rewriting, or node ID management.
+**Smaller default plugin surface.** The Router's `scatter()` is called for every request,
+but the Router's job is the thin scatter-gather concern: which routes, and how to merge.
+With the runtime's reference filters, a Router author doesn't need to write PRODUCE/FETCH
+decomposition, topic rewriting, or node ID management. When the defaults don't fit, the
+Router author supplies their own per-route filters using the same `Filter` API.
 
 **Consistency with the filter model.** Per-route transformations are filters, same as
 VC-level transformations. The mental model is the same: filters transform traffic within
@@ -632,20 +676,17 @@ the common case.
 
 ### What this costs
 
-**Protocol evolution couples to the runtime.** Batteries-included implicit filters for
-PID mapping, fetch session mapping, etc. mean the runtime must understand the protocol
-fields that carry these identifiers. When a new Kafka RPC introduces a new identifier type,
-or an existing RPC changes how it carries identifiers, the runtime needs updating.
-Today's runtime coupling is relatively shallow (bumping kafka-clients to pick up new Java
-classes). Implicit identifier mapping filters are deeper — they must correctly rewrite
-specific fields in specific RPCs.
+**Protocol evolution affects the reference filters.** The runtime's reference
+implementations of protocol filters (PID mapping, partition filtering, etc.) must
+understand the protocol fields they operate on. When a new Kafka RPC introduces a new
+identifier type or changes how it carries identifiers, the reference filters need updating.
 
-The counterargument: this coupling is paid once, in the runtime, rather than in every
-Router implementation. And the existing implicit filters (`BrokerAddressFilter`,
-`ApiVersionsIntersectFilter`) already accept this trade-off — they are protocol-aware
-runtime code that every path through the proxy needs. Identifier mapping filters are
-the same class of concern. The alternative — having each Router author reimplement PID
-rewriting — trades runtime complexity for plugin-author complexity, which scales worse.
+This coupling is mitigated in two ways. First, a Router author who needs to handle a
+new protocol concern before the runtime catches up can supply their own filter — they
+are not blocked on a runtime release. Second, the existing implicit filters
+(`BrokerAddressFilter`, `ApiVersionsIntersectFilter`) already accept this trade-off —
+they are protocol-aware runtime code that every path through the proxy needs.
+The reference protocol filters are the same class of concern.
 
 **Every request deserialises and invokes `scatter()`.** Since the Router is always in
 the path, every request pays the cost of deserialisation and a `scatter()` call.
