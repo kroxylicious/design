@@ -91,9 +91,11 @@ Client → [VC filters] → Router → Route A: [user filters] → [implicit fil
 ```
 
 Each route gets its own filter chain: user-configured filters (e.g. topic name rewriting,
-SASL initiator for upstream authentication), Router-provided protocol filters (e.g.
-partition filtering, identifier mapping), and runtime baseline filters (node ID mapping,
-broker address rewriting, API version intersection).
+SASL initiator for upstream authentication) followed by Router-declared filters. The
+Router declares its per-route filter chain via `RouterFactory.filtersRequiredForRoute()` — the
+default provides the baseline (node ID mapping, broker address rewriting, API version
+intersection); a Router that needs more (partition filtering, identifier mapping)
+overrides the method and declares the full chain.
 
 Each route has two distinct ID spaces: **downstream** and **upstream**. The downstream
 space is what the layer above (client or parent router) sees. The upstream space is what
@@ -110,6 +112,83 @@ The Router sits at the fork point. Its job is exclusively:
 - **Gather**: how to compose the responses from those routes into a single client response?
 
 Everything else stays where it already is.
+
+#### Routers compose into a DAG
+
+A route's target is either a cluster or another router. Routers and routes together
+form a directed acyclic graph (DAG). Clusters are the leaf nodes; routers are the
+interior nodes. Startup validation rejects cycles and dangling references. This is
+the same structural model as PR #70.
+
+```
+                                              route "a"
+                                      .---[filters...]--→ AzFetchRouter --→ Cluster A
+                                     /                     (single route)
+Client → [VC filters] → UnionRouter
+                                     \
+                                      '---[filters...]--→ AzFetchRouter --→ Cluster B
+                                              route "b"    (single route)
+```
+
+When a route targets another router rather than a cluster, the request passes through
+the route's filter chain before reaching the nested router. Each layer in the DAG gets
+its own filter chain handling its own namespace translation. The downstream/upstream
+ID space model makes this precise: the outer route's upstream IDs are the inner
+router's downstream IDs. Neither layer needs to know about the other's ID space —
+they share a boundary, and per-route filters at that boundary handle the translation.
+
+The nested dispatch composition formula (`V_outer = k + S_outer × V_inner`) is a
+property of the runtime's node ID management and applies unchanged at each layer.
+
+**AZ-aware fetch as a composition example.** The simplest composable router is a
+single-route dispatch router that does nothing but connection hopping. An AZ-aware
+fetch router receives a FETCH targeting virtual node 1 (the partition leader in a
+remote AZ) and redirects it to virtual node 2 (an in-sync replica in the local AZ)
+via `sendToNode`. The message content is unchanged — the IDs are consistent, the
+partition references are correct. The router is purely changing which upstream
+connection carries the request.
+
+The router doesn't need to cache METADATA itself. The runtime caches the current
+METADATA response per route and exposes it via `ScatterContext.currentMetadata()`.
+The router consults this on FETCH to find a local replica:
+
+```java
+class AzAwareFetchRouter implements Router {
+    private final String localAz;
+
+    CompletionStage<ScatterGatherResult> scatter(short apiVersion,
+                                                  ApiKeys apiKey,
+                                                  RequestHeaderData header,
+                                                  ApiMessage request,
+                                                  ScatterContext ctx) {
+        if (apiKey == ApiKeys.FETCH) {
+            MetadataResponseData metadata = ctx.currentMetadata("main");
+            int clientTarget = nodeIdFrom(header);
+            int destination = findLocalReplica(metadata, clientTarget, localAz);
+            return ctx.sendToNode("main", destination, header, request)
+                .thenApply(resp -> new Completed(resp.body()));
+        }
+
+        // Everything else including METADATA: forward to the client's target
+        int target = nodeIdFrom(header);
+        return ctx.sendToNode("main", target, header, request)
+            .thenApply(resp -> new Completed(resp.body()));
+    }
+}
+```
+
+This router needs no custom per-route filters — the runtime's default implicit filters
+handle namespace translation. No special METADATA handling — the runtime caches it, the
+router queries it. The only interesting decision is _which node_ receives the FETCH.
+In the simplest case, `scatter()` reduces to connection selection.
+
+Composed with a union router, the AZ-aware fetch router sits between the union router
+and each cluster. The union router handles scatter-gather (METADATA merging, partition
+routing). The AZ router handles per-cluster connection hopping. Each is a single
+concern, tested and configured independently. Adding AZ-aware fetch to an existing
+union cluster deployment is a configuration change — insert the AZ router between
+the union router's routes and the backing clusters — not a code change to the union
+router.
 
 #### Three layers, three owners
 
@@ -131,7 +210,11 @@ doesn't know whether other routes were also queried.
 #### Scatter-gather coordination
 
 The Router's irreducible contribution is coordinating requests across multiple routes
-and composing their responses.
+and composing their responses. In the general case this is scatter-gather: fan out to
+multiple routes and merge results. In the simple case — single-route topologies,
+AZ-aware redirection, coordinator targeting — scatter reduces to **connection selection**:
+choosing which upstream node receives the request. The gather is trivial (pass through
+the single response).
 
 For **METADATA**, the Router scatters the request to some or all routes, receives per-route
 responses (each already rewritten into the route's namespace by implicit filters), and
@@ -141,6 +224,10 @@ This establishes the _topology_ — the multi-cluster namespace as seen by the c
 For **leader-directed API keys** in simple topologies (principal-aware routing, single-route
 per connection), the Router's `scatter()` is trivial: the request targets a downstream node ID
 that belongs to a single route, so the Router calls `sendToNode` with that route and node.
+For AZ-aware routing, the Router can redirect to a different node — an in-sync replica in
+the client's availability zone — by calling `sendToNode` with the local replica's node ID
+instead of the leader's. This connection hopping is purely a dispatch decision; the message
+content is unchanged.
 
 For **union topics**, a single PRODUCE or FETCH can contain partitions that span routes.
 This happens because the Router's METADATA scatter-gather merged partition leaders from
@@ -282,29 +369,26 @@ during scatter, or as configuration on the route that the Router reads.
 
 Per-route concern, implemented as a per-route filter — same as PR #70.
 
-### What per-route filters handle (implicit and Router-provided)
+### Per-route filter chain composition
 
 The existing model establishes a pattern of _implicit filters_: `BrokerAddressFilter` and
 `ApiVersionsIntersectFilter` are inserted by the runtime on every route, invisible to the
 user. They handle protocol-level concerns that every proxy path needs.
 
 Multi-cluster routing introduces additional per-route protocol concerns (node ID mapping,
-partition filtering, identifier mapping). Rather than mandating that these are always
-handled by runtime-provided implicit filters, the model supports two approaches:
+partition filtering, identifier mapping). Rather than hiding these behind runtime magic,
+the Router explicitly declares the per-route filter chain via `RouterFactory.filtersRequiredForRoute()`.
+The default method returns the baseline filters (broker address rewriting, API version
+intersection, node ID mapping). A Router that needs additional protocol filters overrides
+the method and declares the full chain.
 
-- **Runtime defaults.** The runtime ships reference implementations of these filters
-  and inserts them by default. This covers the common cases and means a Router author
-  can get a working Router without writing protocol-level filters.
-- **Router-provided filters.** A Router author can extend or replace the default per-route
-  filter chain via the `RouterFactory`. A Router that needs different decomposition logic,
-  a custom identifier mapping strategy, or a protocol concern the runtime doesn't cover
-  can supply its own filters. This leans into the existing filter machinery — the same
-  `Filter` API, the same processing model — rather than introducing a parallel mechanism.
+The runtime ships reference implementations of common protocol filters that the Router
+can include in its declared chain. A Router author who needs different behaviour writes
+their own filter using the same `Filter` API. This keeps one processing model (filters
+on a chain) for all per-route protocol concerns, with the Router in explicit control of
+what's on the chain.
 
-This keeps one processing model (filters on a chain) for all per-route protocol concerns,
-whether they come from the runtime, the Router author, or the user's configuration.
-
-#### Virtual node ID mapping (runtime default)
+#### Virtual node ID mapping (baseline default)
 
 Same formula as PR #70: `V = id + S × t`, where `V` is the virtual node ID, `t` is the
 target-cluster node ID, `S` is the number of routes, and `id` is the route's identifier.
@@ -317,8 +401,9 @@ downstream node IDs — it never translates.
 For single-route (1:1) configurations, the identity mapping `V = t` applies with zero overhead.
 This is the existing model, confirming that 1:1 is a degenerate case of the general formula.
 
-The nested dispatch composition (`V_outer = k + S_outer × V_inner`) described in PR #70
-applies unchanged — it is a property of the runtime's node ID management, not of the Router.
+The nested dispatch composition (`V_outer = k + S_outer × V_inner`) described in
+_Routers compose into a DAG_ above applies at each layer of the graph — it is a
+property of the runtime's node ID management, not of the Router.
 
 #### Broker address rewriting
 
@@ -373,28 +458,23 @@ That approach had the Router explicitly establishing mappings via an API call.
 Here, the filters manage the per-route mapping state — the Router never calls an
 association method and never knows about identifier translation.
 
-#### Per-route filter chain composition
+#### Chain assembly
 
-The 1:1 model already requires the runtime to decide which implicit filters to insert
-on a route — today it always inserts `BrokerAddressFilter` and
-`ApiVersionsIntersectFilter`. The multi-route model extends this with additional
-protocol-level filters.
-
-The per-route filter chain is composed from three sources, in order:
+The per-route filter chain is composed from two sources, in order:
 
 1. **User-configured filters** — declared in the route's `filters` configuration
    (e.g. `TopicPrefixFilter`).
-2. **Router-provided filters** — supplied by the `RouterFactory` for its routes.
-   This is where a Router author adds protocol-level filters specific to their
-   routing strategy (partition filtering, identifier mapping, etc.).
-3. **Runtime baseline filters** — always present on every route
-   (`BrokerAddressFilter`, `ApiVersionsIntersectFilter`, node ID mapping).
+2. **Router-declared filters** — returned by `RouterFactory.filtersRequiredForRoute()`.
+   The default returns the baseline (broker address rewriting, API version
+   intersection, node ID mapping). A Router that needs protocol-level filters
+   (partition routing, PID mapping) overrides the method and declares the full
+   chain including the baseline.
 
 The runtime ships reference implementations of common protocol filters
 (`PartitionRoutingFilter`, PID mapping, fetch session mapping) that a Router
-author can use via their `RouterFactory`. A Router author who needs different
-behaviour supplies their own filters instead — using the same `Filter` API, the
-same processing model, the same chain.
+author can include in their `filtersRequiredForRoute()` return value. A Router author who
+needs different behaviour writes their own filter — using the same `Filter` API,
+the same processing model, the same chain position.
 
 Per-route filters access runtime-maintained state — per-route topology, identifier
 mappings — through a richer `FilterContext`. The runtime owns this state and updates
@@ -449,6 +529,8 @@ interface ScatterContext {
                                                RequestHeaderData header,
                                                ApiMessage request);
 
+    MetadataResponseData currentMetadata(String route);
+
     String sessionId();
 
     Subject authenticatedSubject();
@@ -469,15 +551,34 @@ broker on the route — METADATA discovery, scatter-to-all-routes operations.
 node on a route. The `nodeId` is a downstream node ID that the Router obtained from a
 previous response (e.g. a METADATA or FIND_COORDINATOR response). The runtime resolves it
 to the target broker via the route's downstream ↔ upstream mapping. Use this for requests
-that must target a specific broker — transaction coordinators, group coordinators,
-leader-directed requests where the Router knows the target.
+that must target a specific broker.
+
+The clearest motivation for `sendToNode` is **connection hopping** — delivering a request
+to a different upstream node than the one the client's connection targets. Consider an
+AZ-aware proxy: a client in AZ-A connects to the proxy and sends a FETCH to virtual
+node 1 (the partition leader in AZ-B). Without `sendToNode`, the proxy must forward
+the FETCH to virtual node 1's upstream broker — a cross-AZ call. With `sendToNode`,
+the Router can redirect the FETCH to virtual node 2 (an in-sync replica in AZ-A)
+by calling `sendToNode(route, node2, header, request)`. The message content is
+unchanged — the IDs are consistent, the partition references are correct. The proxy
+is purely changing _which connection carries the request_, not rewriting the request.
+
+This is the irreducible thing routing adds over the existing filter model. A filter can
+rewrite message content, but it cannot change which upstream connection the request
+travels on — the connection is determined by which virtual node address the client
+connected to. `sendToNode` decouples the dispatch decision from the connection.
+
+The same mechanism serves transaction and group coordinators (where the Router must
+target a specific broker discovered via FIND_COORDINATOR), but AZ-aware fetch is the
+most concrete example: no protocol decomposition, no scatter-gather, just "send this
+request to a different node than the one the client connected to."
 
 > **Open question:** For leader-directed requests, the destination node ID is already
 > present in the request header. It's unclear whether `sendToNode` adds value over
 > `sendToRoute` with the runtime extracting the target from the request — doing so
-> would avoid two competing sources of truth for the target node. `sendToNode` may
-> still be needed for requests where the Router needs to override the client's target
-> or where the request doesn't carry a destination node. This needs further investigation.
+> would avoid two competing sources of truth for the target node. `sendToNode` is
+> clearly needed when the Router overrides the client's target (AZ-aware fetch) or
+> when the request doesn't carry a destination node. This needs further investigation.
 
 This is the same capability as PR #70's `sendRequestToNode(route, virtualNodeId, ...)`.
 The difference is that `sendToRoute` exists alongside it for the common case where the
@@ -486,8 +587,18 @@ separate method.
 
 When the Router scatters a METADATA request, it uses `sendToRoute` — any broker on each
 route will do. The responses come back with downstream node IDs (rewritten by per-route
-filters). For subsequent leader-directed or coordinator-targeted requests, the Router uses
-`sendToNode` with the node ID from the cached METADATA or FIND_COORDINATOR response.
+filters). For subsequent requests, the Router uses `sendToNode` — whether redirecting
+to a local replica (AZ-aware fetch), targeting a coordinator (transactions), or forwarding
+to the leader the client intended.
+
+**`currentMetadata(route)`** returns the runtime's cached METADATA response for a route,
+in downstream IDs. The runtime caches the most recent METADATA response that flowed
+through each route's filter chain — the same data the runtime uses for its own node ID
+mapping and broker address resolution. The Router can inspect it for topology decisions
+(rack-aware replica selection, leader lookup, partition layout) without maintaining its
+own METADATA cache. This avoids duplicating state the runtime already owns while keeping
+the API surface thin — one method returning a protocol message type, with no
+runtime-defined semantic wrapper around METADATA fields.
 
 **`sessionId()`** and **`authenticatedSubject()`** — same as PR #70.
 
@@ -512,11 +623,49 @@ interface RouterFactory<C, I> {
 
     Router createRouter(RouterFactoryContext context, I initializationData);
 
+    default List<FilterDefinition> filtersRequiredForRoute(String route, I initializationData) {
+        return List.of(BrokerAddressFilter.definition(),
+                       ApiVersionsIntersectFilter.definition(),
+                       NodeIdMappingFilter.definition());
+    }
+
     void close(I initializationData);
 }
 ```
 
-Same as PR #70 — the factory lifecycle is independent of the Router's API surface.
+> **Sketch — exact API shape TBD.** The `filtersRequiredForRoute` method and `FilterDefinition`
+> type are illustrative. The important design point is the default method providing
+> the baseline chain.
+
+The factory lifecycle is the same as PR #70. The addition is `filtersRequiredForRoute()`: the
+Router declares which per-route filters each route needs. The default implementation
+returns the baseline filters that every route requires (broker address rewriting,
+API version intersection, node ID mapping). A Router author who needs additional
+protocol filters — partition routing, PID mapping — overrides the method and
+declares the full chain:
+
+```java
+List<FilterDefinition> filtersRequiredForRoute(String route, I initData) {
+    return List.of(PartitionRoutingFilter.definition(),
+                   PidMappingFilter.definition(),
+                   BrokerAddressFilter.definition(),
+                   ApiVersionsIntersectFilter.definition(),
+                   NodeIdMappingFilter.definition());
+}
+```
+
+There is no "override" or "extend" mechanism — the Router either accepts the default
+or replaces it entirely. The default is visible in the interface; no hidden behaviour.
+If a Router author forgets a baseline filter like `BrokerAddressFilter`, the proxy
+fails obviously.
+
+The per-route filter chain is composed from two sources, in order:
+
+1. **User-configured filters** — declared in the route's `filters` configuration
+   (e.g. `TopicPrefixFilter`).
+2. **Router-declared filters** — returned by `filtersRequiredForRoute()`. Defaults to the
+   baseline; overridden when the Router needs protocol-level filters beyond the
+   baseline.
 
 ### Configuration
 
@@ -567,6 +716,71 @@ The difference from PR #70 is not in the configuration shape but in where the
 responsibilities lie. Topic rewriting is configured as a per-route filter, not as
 logic within the Router's `scatter()`. The Router's `config` property contains
 only scatter-gather strategy (e.g. "scatter METADATA to all routes and merge").
+
+Because a route's target can be a router, not just a cluster, routers compose into
+a DAG. Adding AZ-aware fetch to the union cluster above is a configuration change:
+
+```yaml
+clusterDefinitions:
+  - name: cluster-a
+    bootstrapServers: kafka-a:9092
+  - name: cluster-b
+    bootstrapServers: kafka-b:9092
+
+routerDefinitions:
+  - name: az-fetch-a
+    type: AzAwareFetchRouter
+    config:
+      localAz: "az-a"
+    routes:
+      - name: main
+        id: 0
+        target:
+          cluster: cluster-a
+
+  - name: az-fetch-b
+    type: AzAwareFetchRouter
+    config:
+      localAz: "az-a"
+    routes:
+      - name: main
+        id: 0
+        target:
+          cluster: cluster-b
+
+  - name: union-router
+    type: UnionClusterRouter
+    config: { ... }
+    routes:
+      - name: a
+        id: 0
+        filters:
+          - type: TopicPrefixFilter
+            config:
+              prefix: "a."
+        target:
+          router: az-fetch-a      # route targets a router, not a cluster
+      - name: b
+        id: 1
+        filters:
+          - type: TopicPrefixFilter
+            config:
+              prefix: "b."
+        target:
+          router: az-fetch-b
+
+virtualClusters:
+  - name: my-vc
+    target:
+      router: union-router
+    gateways: [...]
+    filters:
+      - type: AuditFilter
+```
+
+The union router's scatter-gather logic is unchanged — it doesn't know or care that
+its routes target AZ-aware routers rather than clusters. The AZ routers don't know
+they sit behind a union router. Each router is a self-contained concern.
 
 #### Two extension points
 
@@ -638,11 +852,11 @@ The central difference: what lives in the Router's hot path.
 |---------|----------------------|-----------------|
 | METADATA composition | Router | Router (`scatter()`) |
 | Topic name rewriting | Router | Per-route user filter |
-| Node ID mapping | Runtime | Per-route filter (runtime default) |
-| Broker address rewriting | Runtime | Per-route filter (runtime default) |
-| API version intersection | Runtime | Per-route filter (runtime default) |
-| PID / fetch session mapping | Router | Per-route filter (runtime or Router-provided) |
-| PRODUCE/FETCH decomposition | Router | Per-route filter (runtime or Router-provided) |
+| Node ID mapping | Runtime | Per-route filter (Router-declared, baseline default) |
+| Broker address rewriting | Runtime | Per-route filter (Router-declared, baseline default) |
+| API version intersection | Runtime | Per-route filter (Router-declared, baseline default) |
+| PID / fetch session mapping | Router | Per-route filter (Router-declared, reference impl) |
+| PRODUCE/FETCH decomposition | Router | Per-route filter (Router-declared, reference impl) |
 | PRODUCE/FETCH routing | Router | Router (`scatter()`) + per-route filter |
 | LIST_GROUPS, etc. merging | Router | Router (`scatter()`) |
 | Predicate evaluation | Router | Per-route filter / Router config |
@@ -650,17 +864,20 @@ The central difference: what lives in the Router's hot path.
 PR #70's `onRequest()` is called for every dynamically-routed API key and is responsible
 for both the routing decision and the protocol-level decomposition of requests. This
 alternative's `scatter()` is also called for every request, but its job is limited to the
-scatter decision ("which routes"). Per-route filters — either runtime defaults or
-Router-provided — handle request decomposition (stripping non-matching partitions) and
-identifier translation.
+scatter decision ("which routes"). Per-route filters — declared by the Router via
+`filtersRequiredForRoute()` — handle request decomposition (stripping non-matching partitions)
+and identifier translation.
 
 ### What this buys
 
 **Smaller default plugin surface.** The Router's `scatter()` is called for every request,
 but the Router's job is the thin scatter-gather concern: which routes, and how to merge.
-With the runtime's reference filters, a Router author doesn't need to write PRODUCE/FETCH
-decomposition, topic rewriting, or node ID management. When the defaults don't fit, the
-Router author supplies their own per-route filters using the same `Filter` API.
+The baseline `filtersRequiredForRoute()` default handles the common case — a Router author who
+doesn't override it gets broker address rewriting, API version intersection, and node ID
+mapping for free. The runtime ships reference implementations of protocol filters
+(partition routing, PID mapping) that the Router can add to its declared chain. When
+the references don't fit, the Router author writes their own filter using the same
+`Filter` API.
 
 **Consistency with the filter model.** Per-route transformations are filters, same as
 VC-level transformations. The mental model is the same: filters transform traffic within
@@ -728,6 +945,25 @@ responses is no longer meaningfully a filter. The scatter-gather coordination �
 which routes it scattered to, and how to compose their responses — is a fundamentally
 different concern that deserves its own abstraction. A Router is the name for that
 abstraction.
+
+**Runtime-managed implicit filter chain.** We considered a model where the runtime
+decides which protocol filters to insert on each route — the Router declares what
+capabilities it needs (e.g. "partition routing," "PID mapping") and the runtime inserts
+the appropriate filters automatically. The Router could override this by supplying its
+own filters. We rejected this because it introduces hidden behaviour: the Router author
+doesn't see what's on the chain unless they look, and the "override" mechanism (extend?
+replace? merge?) adds API complexity. The `filtersRequiredForRoute()` default method is
+simpler — the baseline is visible in the interface, and replacing it is a straightforward
+method override.
+
+**Typed topology API on `ScatterContext`.** We considered exposing per-route topology
+as a structured API (`RouteTopology` with methods like `leader()`, `rack()`,
+`inSyncReplicas()`). This would simplify Router implementations that need topology
+information but couples the `ScatterContext` to specific METADATA response fields. Each
+new field the Router might need requires an API change. `currentMetadata()` — returning
+the raw `MetadataResponseData` — is thinner: one method, no semantic wrapper, and the
+Router extracts what it needs from the protocol message type directly. If Kafka adds new
+METADATA fields, the Router gets them for free without an API change.
 
 **Multi-mode request dispatch.** We considered a model where the Router declares which
 API keys it wants `scatter()` called for, with the runtime forwarding everything else

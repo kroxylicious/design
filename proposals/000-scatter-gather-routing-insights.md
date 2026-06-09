@@ -100,7 +100,92 @@ custom decomposition or mapping logic writes a filter, not a monolithic
 `onRequest()` method that mixes scatter-gather coordination with protocol
 traversal.
 
-## 6. Scatter-gather can't be a filter
+## 6. Connection hopping is the irreducible addition
+
+A filter can rewrite message content, but it cannot change which upstream connection
+carries the request — the connection is determined by which virtual node address the
+client connected to. Routing adds the ability to decouple the dispatch decision from
+the connection: delivering a request to a different upstream node than the one the
+client's connection targets.
+
+The clearest example is AZ-aware fetch. A client in AZ-A sends a FETCH to virtual
+node 1 (the partition leader in AZ-B). Without routing, the proxy forwards the FETCH
+cross-AZ to node 1's upstream broker. With `sendToNode(route, node2, ...)`, the
+Router redirects the FETCH to virtual node 2 — an in-sync replica in AZ-A. The
+message content is unchanged; the IDs are consistent. The proxy is purely changing
+which connection carries the request.
+
+This is not a message rewrite question. Rewriting the FETCH to reference node 2
+doesn't help if the request still travels on node 1's upstream connection. The
+dispatch decision — "send this to node 2's connection" — is fundamentally a routing
+concern.
+
+The same mechanism serves transaction and group coordinators (where the Router
+targets a specific broker discovered via FIND_COORDINATOR). But AZ-aware fetch is the
+most digestible example: no protocol decomposition, no scatter-gather, just connection
+hopping.
+
+## 7. The per-route filter chain is the architectural bet
+
+The structural difference between the two proposals is not "where does scatter-gather
+live" — both agree it's the Router's job. The difference is what happens on each route
+between the Router and the upstream cluster.
+
+PR #70 has no per-route filter chain. Namespace translation (node ID mapping, broker
+address rewriting, API version intersection) is runtime-internal machinery, not filter
+instances. Protocol concerns (PID mapping, partition decomposition) live inside the
+Router's `onRequest()`. There is no composable per-route processing pipeline.
+
+The alternative places a full filter chain on each route: user-configured filters,
+Router-provided filters, and runtime baseline filters — all using the same `Filter`
+API. Namespace translation that the current model already does with implicit filters
+(`BrokerAddressFilter`, `ApiVersionsIntersectFilter`) stays as filters. New protocol
+concerns (partition filtering, identifier mapping) are filters too.
+
+This matters the moment a Router author needs custom per-route logic that the runtime
+doesn't provide. In the filter-chain model, they write a filter and add it to the
+chain — same API, same testing model, same configuration. In #70, it goes inside
+`onRequest()` alongside the scatter-gather coordination, because there is nowhere
+else for it to live.
+
+The bet is that per-route protocol concerns are the same _kind_ of thing as the
+namespace translation the existing model already handles with filters. If that's
+true, the natural home is the same abstraction. If it's wrong — if per-route
+concerns are fundamentally entangled with the scatter-gather decision — then
+filters are the wrong decomposition and `onRequest()` is more honest about the
+coupling.
+
+## 8. Per-route filter chains compose across DAG layers
+
+A route's target can be another router, forming a DAG. When routers compose,
+per-route filter chains compose with them — each layer in the DAG gets its own
+chain handling its own namespace translation. The downstream/upstream ID space
+model (insight 3) makes this precise: the outer route's upstream IDs are the
+inner router's downstream IDs. Neither layer needs to know about the other's
+ID space.
+
+This is where the per-route filter chain bet (insight 7) pays off. Consider
+an AZ-aware fetch router composed behind a union router:
+
+```
+Client → UnionClusterRouter → route-a → AzAwareFetchRouter → Cluster-A
+                             → route-b → AzAwareFetchRouter → Cluster-B
+```
+
+The AZ router is the simplest composable node: single route, trivial gather,
+no custom filters. It does connection hopping (insight 6) — redirecting a
+FETCH to a local replica. The union router handles scatter-gather. Each is a
+single concern, tested independently. Adding AZ-aware fetch to an existing
+union cluster deployment is a configuration change, not a code change.
+
+With per-route filter chains, composition works because each layer's protocol
+concerns are handled by its own filters. Without per-route filter chains
+(PR #70), each router in the DAG handles protocol concerns inside
+`onRequest()` with no filter chain between layers — composition still works
+structurally, but each router must independently handle the protocol-level
+concerns that filters would otherwise provide.
+
+## 9. Scatter-gather can't be a filter
 
 The scatter decision determines the gather shape. If the Router scatters a
 METADATA request to routes A and B, only the Router knows it needs to merge
@@ -119,8 +204,11 @@ Router coordinates across paths.
 - **`sendToNode` vs request-embedded node IDs.** For leader-directed requests,
   the destination node ID is already in the request header. Does an explicit
   `sendToNode(route, nodeId)` add value over `sendToRoute` with the runtime
-  extracting the target from the request? The answer may depend on APIs like
-  transactions where the Router needs to target a coordinator.
+  extracting the target from the request? `sendToNode` is clearly needed when
+  the Router overrides the client's target (AZ-aware fetch redirecting to a
+  local replica) or targets a coordinator. The open question is whether it
+  should also be the mechanism for simple leader-directed forwarding, or
+  whether the runtime should extract the target from the request in that case.
 
 - **Correctness bar for runtime-shipped vs Router-authored protocol filters.**
   Runtime reference implementations centralise correctness but create a
