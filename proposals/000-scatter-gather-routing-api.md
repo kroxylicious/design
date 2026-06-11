@@ -86,16 +86,25 @@ There is no Router plugin because there is no decision to make.
 The routed pipeline forks at the Router:
 
 ```
-Client → [VC filters] → Router → Route A: [user filters] → [implicit filters] → Cluster A
-                                → Route B: [user filters] → [implicit filters] → Cluster B
+Client → [VC filters] → Router: [entry filters] → scatter() → Route A: [user filters] → [exit filters] → Cluster A
+                                                             → Route B: [user filters] → [exit filters] → Cluster B
 ```
 
-Each route gets its own filter chain: user-configured filters (e.g. topic name rewriting,
-SASL initiator for upstream authentication) followed by Router-declared filters. The
-Router declares its per-route filter chain via `RouterFactory.filtersRequiredForRoute()` — the
-default provides the baseline (node ID mapping, broker address rewriting, API version
-intersection); a Router that needs more (partition filtering, identifier mapping)
-overrides the method and declares the full chain.
+Entry and exit filters are **Router-scoped** — they belong to the Router, not to the
+virtual cluster. Entry filters run before the Router's `scatter()`, handling protocol
+identifier resolution (e.g. topicId → name) so the Router can make routing decisions
+regardless of which protocol version the client uses. Exit filters run per-route after
+scatter: user-configured filters (e.g. topic name rewriting, SASL initiator for upstream
+authentication) followed by implicit exit filters (node ID mapping, broker address
+rewriting, API version intersection).
+
+The runtime provides baseline implicit filters at both positions. A Router that needs to
+take control implements `RouterWithImplicitFilterFactory` — an extension of `RouterFactory`
+that declares both positions. Most Routers don't need this: when the factory is a plain
+`RouterFactory`, the runtime provides identifier resolution at entry and the standard
+exit filters on each route. Only a Router that needs additional protocol filters
+(partition filtering, identifier mapping) or a custom resolution strategy implements
+the extended interface.
 
 Each route has two distinct ID spaces: **downstream** and **upstream**. The downstream
 space is what the layer above (client or parent router) sees. The upstream space is what
@@ -121,21 +130,24 @@ interior nodes. Startup validation rejects cycles and dangling references. This 
 the same structural model as PR #70.
 
 ```
-                                              route "a"
-                                      .---[filters...]--→ AzFetchRouter --→ Cluster A
-                                     /                     (single route)
-Client → [VC filters] → UnionRouter
-                                     \
-                                      '---[filters...]--→ AzFetchRouter --→ Cluster B
-                                              route "b"    (single route)
+                                                  route "a"
+                                          .---[exit]→[filters...]→ AzFetchRouter:[entry]→scatter()→[exit]→ Cluster A
+                                         /
+Client → [VC filters] → UnionRouter:[entry]→scatter()
+                                         \
+                                          '---[exit]→[filters...]→ AzFetchRouter:[entry]→scatter()→[exit]→ Cluster B
+                                                  route "b"
 ```
 
 When a route targets another router rather than a cluster, the request passes through
-the route's filter chain before reaching the nested router. Each layer in the DAG gets
-its own filter chain handling its own namespace translation. The downstream/upstream
-ID space model makes this precise: the outer route's upstream IDs are the inner
-router's downstream IDs. Neither layer needs to know about the other's ID space —
-they share a boundary, and per-route filters at that boundary handle the translation.
+the outer Router's exit filters, then through the route's user-configured filter chain,
+before reaching the inner Router's entry filters. Each Router in the DAG gets its own
+entry and exit filters handling its own namespace. The downstream/upstream ID space
+model makes this precise: the outer route's upstream IDs are the inner router's
+downstream IDs. Neither layer needs to know about the other's ID space — the outer
+Router's exit filters translate to its upstream namespace, which is the inner Router's
+downstream namespace, where the inner Router's entry filters resolve identifiers for
+its own routing decisions.
 
 The nested dispatch composition formula (`V_outer = k + S_outer × V_inner`) is a
 property of the runtime's node ID management and applies unchanged at each layer.
@@ -190,11 +202,159 @@ union cluster deployment is a configuration change — insert the AZ router betw
 the union router's routes and the backing clusters — not a code change to the union
 router.
 
+**Union cluster router.** The union router is the hard case — genuine scatter-gather
+with multi-route METADATA merging and union-topic request handling. Its `scatter()`
+is protocol-aware on the **gather** side (merging responses), but not on the scatter
+side (it never inspects request bodies to decompose them):
+
+```java
+class UnionClusterRouter implements Router {
+
+    CompletionStage<ScatterGatherResult> scatter(short apiVersion,
+                                                  ApiKeys apiKey,
+                                                  RequestHeaderData header,
+                                                  ApiMessage request,
+                                                  ScatterContext ctx) {
+        return switch (apiKey) {
+            case METADATA -> scatterMetadata(header, request, ctx);
+            case PRODUCE, FETCH -> scatterByNode(header, request, ctx);
+            case LIST_GROUPS -> scatterToAll(header, request, ctx);
+            default -> forwardToNode(header, request, ctx);
+        };
+    }
+
+    private CompletionStage<ScatterGatherResult> scatterMetadata(
+            RequestHeaderData header, ApiMessage request, ScatterContext ctx) {
+        var futures = ctx.routes().stream()
+            .map(route -> ctx.sendToRoute(route, header, request))
+            .toList();
+        return allOf(futures).thenApply(responses -> {
+            // Gather: merge broker lists, combine topic partitions, deduplicate.
+            // Each route's response is already in downstream IDs (exit filters
+            // handled the translation). The merge is the Router's irreducible job.
+            return new Completed(mergeMetadataResponses(responses));
+        });
+    }
+
+    private CompletionStage<ScatterGatherResult> scatterByNode(
+            RequestHeaderData header, ApiMessage request, ScatterContext ctx) {
+        int targetNode = nodeIdFrom(header);
+        // Which routes have this downstream node in their topology?
+        var routes = ctx.routes().stream()
+            .filter(r -> hasNode(ctx.currentMetadata(r), targetNode))
+            .toList();
+
+        if (routes.size() == 1) {
+            // Common case: one route owns this node, forward directly.
+            return ctx.sendToNode(routes.get(0), targetNode, header, request)
+                .thenApply(resp -> new Completed(resp.body()));
+        }
+
+        // Union-topic case: multiple routes have leaders on this virtual node.
+        // Send the FULL request to each route — the PartitionRoutingFilter
+        // (an exit filter) strips partitions that don't belong to its route.
+        var futures = routes.stream()
+            .map(r -> ctx.sendToNode(r, targetNode, header, request))
+            .toList();
+        return allOf(futures).thenApply(responses -> {
+            // Gather: merge per-partition results from each route.
+            return new Completed(mergePartitionResponses(responses));
+        });
+    }
+
+    private CompletionStage<ScatterGatherResult> scatterToAll(
+            RequestHeaderData header, ApiMessage request, ScatterContext ctx) {
+        var futures = ctx.routes().stream()
+            .map(route -> ctx.sendToRoute(route, header, request))
+            .toList();
+        return allOf(futures)
+            .thenApply(responses -> new Completed(mergeResponses(responses)));
+    }
+
+    private CompletionStage<ScatterGatherResult> forwardToNode(
+            RequestHeaderData header, ApiMessage request, ScatterContext ctx) {
+        int targetNode = nodeIdFrom(header);
+        String route = routeForNode(ctx, targetNode);
+        return ctx.sendToNode(route, targetNode, header, request)
+            .thenApply(resp -> new Completed(resp.body()));
+    }
+}
+```
+
+The Router's scatter decisions are topology-based, not content-based. `scatterByNode`
+doesn't inspect the PRODUCE body to see which partitions go where — it checks
+`currentMetadata()` to see which routes have the target virtual node, and sends the
+**full request** to each. The `PartitionRoutingFilter` on each route (an exit filter)
+handles the decomposition: stripping partitions that don't belong to its route,
+forwarding the rest. The Router never touches partition data.
+
+The gather side IS protocol-aware — merging METADATA responses, combining per-partition
+acks from a PRODUCE, concatenating FETCH partition data. This is the Router's
+irreducible job: only the Router knows which routes it scattered to, so only it can
+compose the responses. But the protocol awareness is confined to response composition.
+The request path is topology decisions only.
+
+Because the union router needs partition filtering and identifier mapping on each route,
+its factory implements `RouterWithImplicitFilterFactory`:
+
+```java
+class UnionClusterRouterFactory
+        implements RouterWithImplicitFilterFactory<UnionConfig, UnionInit> {
+
+    // ... initialize(), createRouter(), close() ...
+
+    List<FilterDefinition> entryFilters(UnionInit initData) {
+        return List.of(IdentifierResolutionFilter.definition());
+    }
+
+    List<FilterDefinition> exitFilters(String route, UnionInit initData) {
+        return List.of(PartitionRoutingFilter.definition(),
+                       PidMappingFilter.definition(),
+                       BrokerAddressFilter.definition(),
+                       ApiVersionsIntersectFilter.definition(),
+                       NodeIdMappingFilter.definition());
+    }
+}
+```
+
+The AZ-aware fetch router's factory is a plain `RouterFactory` — it needs no custom
+filters. The union router's factory declares both entry and exit filters because it
+needs partition routing and PID mapping that the baseline doesn't include.
+
+#### Design principle: one component, one namespace, one concern
+
+The guiding principle is that **each component operates in exactly one namespace
+and knows only its own concern**. The Router is the unit of encapsulation — a
+self-contained scope boundary with its own entry filters, scatter/gather logic,
+and exit filters. In a DAG, the boundary between Routers is a namespace boundary:
+neither Router knows the other exists.
+
+Each component keeps a secret from the others:
+
+| Component | Knows | Doesn't know |
+|-----------|-------|--------------|
+| Entry filters | Identifier resolution in this Router's downstream namespace | Routes, scatter decisions, upstream namespaces |
+| `scatter()` | Which routes receive the request, how to compose responses | Protocol-level decomposition, identifier translation, upstream namespaces |
+| Exit filters | One route's downstream ↔ upstream translation | Other routes, the scatter decision, Routers above or below |
+| User filters | Their per-route transformation (e.g. topic prefix) | The routing infrastructure around them |
+
+The entry/exit positions exist at exactly the points where namespace concerns
+arise — entry resolves identifiers _before_ the routing decision needs them,
+exit translates namespaces _after_ the routing decision has been made. No
+component crosses a namespace boundary.
+
+A monolithic Router that handles scatter-gather, protocol decomposition, and
+identifier translation in a single method holds all of these secrets at once.
+The total complexity is the same — the difference is whether one component pays
+for all of it (and every Router author reimplements it), or whether each concern
+lives behind its own boundary, written once as a filter and composed by the
+runtime.
+
 #### Three layers, three owners
 
 | Layer | Owner | Cross-route knowledge? |
 |-------|-------|----------------------|
-| Per-route namespace translation | Per-route implicit filters (runtime) | No |
+| Per-route namespace translation | Exit filters (runtime) | No |
 | Scatter-gather composition | Router plugin | Yes |
 | Per-route predicates / transformation | Per-route user filters or Router config | No |
 
@@ -369,24 +529,42 @@ during scatter, or as configuration on the route that the Router reads.
 
 Per-route concern, implemented as a per-route filter — same as PR #70.
 
-### Per-route filter chain composition
+### Implicit filter composition — entry and exit
 
 The existing model establishes a pattern of _implicit filters_: `BrokerAddressFilter` and
 `ApiVersionsIntersectFilter` are inserted by the runtime on every route, invisible to the
 user. They handle protocol-level concerns that every proxy path needs.
 
-Multi-cluster routing introduces additional per-route protocol concerns (node ID mapping,
-partition filtering, identifier mapping). Rather than hiding these behind runtime magic,
-the Router explicitly declares the per-route filter chain via `RouterFactory.filtersRequiredForRoute()`.
-The default method returns the baseline filters (broker address rewriting, API version
-intersection, node ID mapping). A Router that needs additional protocol filters overrides
-the method and declares the full chain.
+Multi-cluster routing introduces implicit filters at two Router-scoped positions:
 
-The runtime ships reference implementations of common protocol filters that the Router
-can include in its declared chain. A Router author who needs different behaviour writes
-their own filter using the same `Filter` API. This keeps one processing model (filters
-on a chain) for all per-route protocol concerns, with the Router in explicit control of
-what's on the chain.
+1. **Entry** — filters that run before the Router's `scatter()`. These handle protocol
+   identifier resolution that the Router needs for routing decisions. The Router's routing
+   table maps topic names to routes, but the Kafka protocol is evolving toward topicId-only
+   addressing (PRODUCE v13+, FETCH v13+, SHARE_FETCH). Entry filters resolve identifiers
+   so the Router can make routing decisions regardless of which protocol version the client
+   uses.
+2. **Exit** — filters that run per-route after scatter. Node ID mapping, broker address
+   rewriting, API version intersection, and optionally partition filtering and identifier
+   mapping.
+
+These positions are **Router-scoped**, not VC-scoped. In a DAG where routers compose,
+each Router gets its own entry and exit filters. The outer Router's exit filters handle
+its namespace translation; the inner Router's entry filters resolve identifiers in its
+own namespace. This keeps everything router-local — no filter needs to reason about
+namespaces beyond its own Router's boundary.
+
+For the baseline case, the runtime handles both positions automatically — when the
+`RouterFactory` is a plain `RouterFactory`, the runtime installs identifier resolution
+at entry and the standard exit filters on every route. A Router that needs to take
+control — adding partition routing, PID mapping, or replacing the identifier resolution
+strategy — implements `RouterWithImplicitFilterFactory` and declares both positions via
+`entryFilters()` and `exitFilters()`.
+
+The runtime ships reference implementations of common protocol filters that a
+`RouterWithImplicitFilterFactory` can include in its declared chains. A Router author who
+needs different behaviour writes their own filter using the same `Filter` API. This keeps
+one processing model (filters on a chain) for all protocol concerns, with the Router in
+explicit control of what's on the chain when it needs to be.
 
 #### Virtual node ID mapping (baseline default)
 
@@ -421,20 +599,40 @@ client instance IDs. In a multi-cluster topology, each route's upstream cluster
 assigns its own values for these identifiers, creating the same collision problem
 that the node ID mapping solves for broker addressing.
 
-These are handled as per-route filters — the same pattern as `BrokerAddressFilter`.
-Each filter operates on a single route's traffic with no cross-route knowledge — it maps
-between the downstream identifier and the upstream identifier for its route. Each route
-has its own bidirectional mapping (downstream ↔ upstream); there is no global identifier
-space across routes.
+All identifier mappings are route-local: each route maintains its own bidirectional
+downstream ↔ upstream mapping with no global identifier space across routes. The
+mappings are handled as implicit filters — the same pattern as `BrokerAddressFilter`.
+Each filter operates on a single route's traffic with no cross-route knowledge.
+
+Some mappings are also needed for **routing decisions**. The Router's routing table
+maps topic names to routes, but the Kafka protocol is evolving toward topicId-only
+addressing — newer API versions (PRODUCE v13+, FETCH v13+) carry topicIds alongside
+names, and future APIs (SHARE_FETCH, SHARE_ACKNOWLEDGE) carry _only_ topicIds with
+no name field on the wire. The Router needs these identifiers resolved before it can
+make scatter decisions. This is why the Router has an **entry filter position**:
+identifier resolution filters run before `scatter()`, ensuring that the Router always
+has the information it needs. The entry filter learns mappings from responses flowing
+back to the client and, on cache miss, sends an internal METADATA request through
+the pipeline — re-entering the Router's METADATA scatter to query all routes. The
+existing async filter model handles this pipeline re-entrancy naturally via
+`CompletionStage` chaining.
+
+Because entry filters are **Router-scoped**, each Router in a DAG resolves identifiers
+in its own namespace. The outer Router's exit filters may transform topic names
+(e.g. stripping a prefix) before traffic reaches the inner Router. The inner Router's
+entry filters then resolve identifiers in the already-translated namespace — each
+Router's entry filter works in the namespace its routing table uses. No filter crosses
+namespace boundaries, so identifier caches cannot be poisoned by translations happening
+at a different layer of the DAG.
 
 The runtime ships **reference implementations** of these filters that cover the common
 cases. A Router author who needs a different mapping strategy can supply their own via
-the `RouterFactory`.
+`RouterWithImplicitFilterFactory`.
 
-Like the `PartitionRoutingFilter`, these filters operate wholly in the downstream ID
-space and consult per-route mapping state maintained by the runtime (exposed through
-`FilterContext`). The runtime builds and updates these mappings as identifier-carrying
-responses flow through each route's filter chain.
+Like the `PartitionRoutingFilter`, per-route identifier mapping filters operate wholly
+in the downstream ID space and consult per-route mapping state maintained by the runtime
+(exposed through `FilterContext`). The runtime builds and updates these mappings as
+identifier-carrying responses flow through each route's filter chain.
 
 For **establishment RPCs** (`INIT_PRODUCER_ID`, initial FETCH, etc.), the identifier
 appears as a top-level response field. The filter records the per-route upstream value
@@ -460,27 +658,30 @@ association method and never knows about identifier translation.
 
 #### Chain assembly
 
-The per-route filter chain is composed from two sources, in order:
+The full pipeline has three segments per Router:
 
-1. **User-configured filters** — declared in the route's `filters` configuration
+1. **Entry filters** — identifier resolution (topicId → name, etc.), ensuring the
+   Router can make routing decisions regardless of protocol version. Provided by the
+   runtime (baseline) or declared by
+   `RouterWithImplicitFilterFactory.entryFilters()`.
+2. **User-configured filters** — declared in the route's `filters` configuration
    (e.g. `TopicPrefixFilter`).
-2. **Router-declared filters** — returned by `RouterFactory.filtersRequiredForRoute()`.
-   The default returns the baseline (broker address rewriting, API version
-   intersection, node ID mapping). A Router that needs protocol-level filters
-   (partition routing, PID mapping) overrides the method and declares the full
-   chain including the baseline.
+3. **Exit filters** — broker address rewriting, API version intersection, node ID
+   mapping, and optionally partition routing and identifier mapping. Provided by the
+   runtime (baseline) or declared by
+   `RouterWithImplicitFilterFactory.exitFilters()`.
 
 The runtime ships reference implementations of common protocol filters
-(`PartitionRoutingFilter`, PID mapping, fetch session mapping) that a Router
-author can include in their `filtersRequiredForRoute()` return value. A Router author who
-needs different behaviour writes their own filter — using the same `Filter` API,
-the same processing model, the same chain position.
+(`PartitionRoutingFilter`, PID mapping, fetch session mapping, topicId resolution)
+that a `RouterWithImplicitFilterFactory` can include in its declared chains. A Router
+author who needs different behaviour writes their own filter — using the same
+`Filter` API, the same processing model, the same chain position.
 
-Per-route filters access runtime-maintained state — per-route topology, identifier
-mappings — through a richer `FilterContext`. The runtime owns this state and updates
-it as traffic flows through each route's chain. Filters consume it but do not build
-or cache it independently. This keeps the source of truth in one place and avoids
-filters diverging from the topology the Router's scatter-gather established.
+Both entry and exit filters access runtime-maintained state — per-route topology,
+identifier mappings — through `FilterContext`. The runtime owns this state and
+updates it as traffic flows through the pipeline. Filters consume it but do not
+build or cache it independently. This keeps the source of truth in one place and
+avoids filters diverging from the topology the Router's scatter-gather established.
 
 ### Plugin API
 
@@ -623,29 +824,48 @@ interface RouterFactory<C, I> {
 
     Router createRouter(RouterFactoryContext context, I initializationData);
 
-    default List<FilterDefinition> filtersRequiredForRoute(String route, I initializationData) {
-        return List.of(BrokerAddressFilter.definition(),
-                       ApiVersionsIntersectFilter.definition(),
-                       NodeIdMappingFilter.definition());
-    }
-
     void close(I initializationData);
 }
 ```
 
-> **Sketch — exact API shape TBD.** The `filtersRequiredForRoute` method and `FilterDefinition`
-> type are illustrative. The important design point is the default method providing
-> the baseline chain.
+The factory lifecycle is the same as PR #70. When a `RouterFactory` is a plain
+`RouterFactory`, the runtime provides the baseline implicit filters at both
+positions — identifier resolution at entry and broker address rewriting / API version
+intersection / node ID mapping at exit. Most Router authors never need to think about
+the implicit filter chain.
 
-The factory lifecycle is the same as PR #70. The addition is `filtersRequiredForRoute()`: the
-Router declares which per-route filters each route needs. The default implementation
-returns the baseline filters that every route requires (broker address rewriting,
-API version intersection, node ID mapping). A Router author who needs additional
-protocol filters — partition routing, PID mapping — overrides the method and
-declares the full chain:
+#### `RouterWithImplicitFilterFactory`
 
 ```java
-List<FilterDefinition> filtersRequiredForRoute(String route, I initData) {
+interface RouterWithImplicitFilterFactory<C, I> extends RouterFactory<C, I> {
+
+    List<FilterDefinition> entryFilters(I initializationData);
+
+    List<FilterDefinition> exitFilters(String route, I initializationData);
+}
+```
+
+> **Sketch — exact API shape TBD.** The methods and `FilterDefinition` type are
+> illustrative. The important design point is the separation: plain `RouterFactory`
+> gets the baseline for free; `RouterWithImplicitFilterFactory` takes full control
+> of both positions — entry filters (before the Router's scatter) and exit filters
+> (per-route, after scatter).
+
+This is the escape hatch. A plain `RouterFactory` gets the runtime's baseline
+implicit filters at both positions — identifier resolution at entry and broker
+address rewriting / API version intersection / node ID mapping at exit. Most
+Router authors never implement this interface.
+
+A Router that needs to take control — adding partition routing, PID mapping,
+or replacing the identifier resolution strategy — implements
+`RouterWithImplicitFilterFactory` and declares both positions:
+
+```java
+List<FilterDefinition> entryFilters(I initData) {
+    return List.of(IdentifierResolutionFilter.definition());
+}
+
+List<FilterDefinition> exitFilters(String route, I initData) {
     return List.of(PartitionRoutingFilter.definition(),
                    PidMappingFilter.definition(),
                    BrokerAddressFilter.definition(),
@@ -654,18 +874,22 @@ List<FilterDefinition> filtersRequiredForRoute(String route, I initData) {
 }
 ```
 
-There is no "override" or "extend" mechanism — the Router either accepts the default
-or replaces it entirely. The default is visible in the interface; no hidden behaviour.
-If a Router author forgets a baseline filter like `BrokerAddressFilter`, the proxy
-fails obviously.
+There is no "override" or "extend" mechanism — the factory either leaves both
+positions to the runtime (plain `RouterFactory`) or declares them entirely
+(`RouterWithImplicitFilterFactory`). The type system makes the choice explicit:
+implementing the extended interface is an opt-in to full control. If a Router
+author forgets a baseline filter like `BrokerAddressFilter`, the proxy fails
+obviously.
 
-The per-route filter chain is composed from two sources, in order:
+The full pipeline with implicit filters has three segments:
 
-1. **User-configured filters** — declared in the route's `filters` configuration
+1. **Entry filters** — identifier resolution, ensuring the Router can make
+   routing decisions regardless of protocol version. Provided by the runtime
+   (baseline) or declared by `entryFilters()`.
+2. **User-configured filters** — declared in the route's `filters` configuration
    (e.g. `TopicPrefixFilter`).
-2. **Router-declared filters** — returned by `filtersRequiredForRoute()`. Defaults to the
-   baseline; overridden when the Router needs protocol-level filters beyond the
-   baseline.
+3. **Exit filters** — provided by the runtime (baseline) or declared by
+   `exitFilters()`.
 
 ### Configuration
 
@@ -852,11 +1076,11 @@ The central difference: what lives in the Router's hot path.
 |---------|----------------------|-----------------|
 | METADATA composition | Router | Router (`scatter()`) |
 | Topic name rewriting | Router | Per-route user filter |
-| Node ID mapping | Runtime | Per-route filter (Router-declared, baseline default) |
-| Broker address rewriting | Runtime | Per-route filter (Router-declared, baseline default) |
-| API version intersection | Runtime | Per-route filter (Router-declared, baseline default) |
-| PID / fetch session mapping | Router | Per-route filter (Router-declared, reference impl) |
-| PRODUCE/FETCH decomposition | Router | Per-route filter (Router-declared, reference impl) |
+| Node ID mapping | Runtime | Exit filter (runtime baseline) |
+| Broker address rewriting | Runtime | Exit filter (runtime baseline) |
+| API version intersection | Runtime | Exit filter (runtime baseline) |
+| PID / fetch session mapping | Router | Exit filter (via `RouterWithImplicitFilterFactory`) |
+| PRODUCE/FETCH decomposition | Router | Exit filter (via `RouterWithImplicitFilterFactory`) |
 | PRODUCE/FETCH routing | Router | Router (`scatter()`) + per-route filter |
 | LIST_GROUPS, etc. merging | Router | Router (`scatter()`) |
 | Predicate evaluation | Router | Per-route filter / Router config |
@@ -864,19 +1088,21 @@ The central difference: what lives in the Router's hot path.
 PR #70's `onRequest()` is called for every dynamically-routed API key and is responsible
 for both the routing decision and the protocol-level decomposition of requests. This
 alternative's `scatter()` is also called for every request, but its job is limited to the
-scatter decision ("which routes"). Per-route filters — declared by the Router via
-`filtersRequiredForRoute()` — handle request decomposition (stripping non-matching partitions)
-and identifier translation.
+scatter decision ("which routes"). Exit filters — provided by the runtime or declared
+via `RouterWithImplicitFilterFactory` — handle request decomposition (stripping
+non-matching partitions) and identifier translation.
 
 ### What this buys
 
 **Smaller default plugin surface.** The Router's `scatter()` is called for every request,
 but the Router's job is the thin scatter-gather concern: which routes, and how to merge.
-The baseline `filtersRequiredForRoute()` default handles the common case — a Router author who
-doesn't override it gets broker address rewriting, API version intersection, and node ID
-mapping for free. The runtime ships reference implementations of protocol filters
-(partition routing, PID mapping) that the Router can add to its declared chain. When
-the references don't fit, the Router author writes their own filter using the same
+A plain `RouterFactory` gets the baseline implicit filters for free at both
+positions — identifier resolution at entry and broker address rewriting / API version
+intersection / node ID mapping at exit — without implementing any filter-related
+methods. A Router that needs protocol-level filters (partition routing,
+PID mapping) or a custom resolution strategy implements `RouterWithImplicitFilterFactory`
+and includes the runtime's reference implementations in its declared chains. When the
+references don't fit, the Router author writes their own filter using the same
 `Filter` API.
 
 **Consistency with the filter model.** Per-route transformations are filters, same as
@@ -914,7 +1140,7 @@ profiling provides evidence. See _Rejected alternatives_ below.
 ## Affected/not affected projects
 
 Same as PR #70, with the `Router` interface in `kroxylicious-api` being smaller:
-- `kroxylicious-api` — `Router`, `RouterFactory`, `RouterFactoryContext`, `ScatterContext`, `ScatterGatherResult`.
+- `kroxylicious-api` — `Router`, `RouterFactory`, `RouterWithImplicitFilterFactory`, `RouterFactoryContext`, `ScatterContext`, `ScatterGatherResult`.
 - `kroxylicious-runtime` — routing engine, configuration model, graph validation, node ID mapping, response sequencing, implicit filters, metrics.
 - `kroxylicious-bom` — version management.
 - Not affected: existing filters, KMS, authoriser API.
@@ -952,9 +1178,9 @@ capabilities it needs (e.g. "partition routing," "PID mapping") and the runtime 
 the appropriate filters automatically. The Router could override this by supplying its
 own filters. We rejected this because it introduces hidden behaviour: the Router author
 doesn't see what's on the chain unless they look, and the "override" mechanism (extend?
-replace? merge?) adds API complexity. The `filtersRequiredForRoute()` default method is
-simpler — the baseline is visible in the interface, and replacing it is a straightforward
-method override.
+replace? merge?) adds API complexity. The `RouterWithImplicitFilterFactory` approach is
+simpler — implementing the extended interface is an explicit opt-in, and the baseline
+case (plain `RouterFactory`) requires no filter-related code at all.
 
 **Typed topology API on `ScatterContext`.** We considered exposing per-route topology
 as a structured API (`RouteTopology` with methods like `leader()`, `rack()`,
