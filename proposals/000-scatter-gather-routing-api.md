@@ -98,13 +98,13 @@ scatter: user-configured filters (e.g. topic name rewriting, SASL initiator for 
 authentication) followed by implicit exit filters (node ID mapping, broker address
 rewriting, API version intersection).
 
-The runtime provides baseline implicit filters at both positions. A Router that needs to
-take control implements `RouterWithImplicitFilterFactory` — an extension of `RouterFactory`
-that declares both positions. Most Routers don't need this: when the factory is a plain
-`RouterFactory`, the runtime provides identifier resolution at entry and the standard
-exit filters on each route. Only a Router that needs additional protocol filters
-(partition filtering, identifier mapping) or a custom resolution strategy implements
-the extended interface.
+The runtime provides baseline implicit filters at both positions. A Router that needs
+explicit control over its namespace boundaries implements `BoundaryAwareRouterFactory`
+— an extension of `RouterFactory` that declares both positions. Most Routers don't
+need this: when the factory is a plain `RouterFactory`, the runtime provides identifier
+resolution at entry and the standard exit filters on each route. Only a Router that
+needs to replace a baseline filter (e.g. a custom partition assignment strategy driven
+by an external control plane) implements the extended interface.
 
 Each route has two distinct ID spaces: **downstream** and **upstream**. The downstream
 space is what the layer above (client or parent router) sees. The upstream space is what
@@ -294,32 +294,17 @@ irreducible job: only the Router knows which routes it scattered to, so only it 
 compose the responses. But the protocol awareness is confined to response composition.
 The request path is topology decisions only.
 
-Because the union router needs partition filtering and identifier mapping on each route,
-its factory implements `RouterWithImplicitFilterFactory`:
+The union router's factory is a plain `RouterFactory` — no `BoundaryAwareRouterFactory`
+needed. The runtime provides the baseline entry filters (identifier resolution) and
+exit filters (partition routing, PID mapping, broker address rewriting, API version
+intersection, node ID mapping) automatically. The union router doesn't need custom
+protocol filters; it just needs the standard ones the runtime already provides for
+multi-route topologies.
 
-```java
-class UnionClusterRouterFactory
-        implements RouterWithImplicitFilterFactory<UnionConfig, UnionInit> {
-
-    // ... initialize(), createRouter(), close() ...
-
-    List<FilterDefinition> entryFilters(UnionInit initData) {
-        return List.of(IdentifierResolutionFilter.definition());
-    }
-
-    List<FilterDefinition> exitFilters(String route, UnionInit initData) {
-        return List.of(PartitionRoutingFilter.definition(),
-                       PidMappingFilter.definition(),
-                       BrokerAddressFilter.definition(),
-                       ApiVersionsIntersectFilter.definition(),
-                       NodeIdMappingFilter.definition());
-    }
-}
-```
-
-The AZ-aware fetch router's factory is a plain `RouterFactory` — it needs no custom
-filters. The union router's factory declares both entry and exit filters because it
-needs partition routing and PID mapping that the baseline doesn't include.
+`BoundaryAwareRouterFactory` is for routers that need to _replace_ the baseline —
+a custom partition filtering strategy, a different identifier resolution approach, or
+additional protocol filters the runtime doesn't ship. The common case (union router,
+AZ-aware router) is a plain `RouterFactory`.
 
 #### Design principle: one component, one namespace, one concern
 
@@ -555,16 +540,15 @@ namespaces beyond its own Router's boundary.
 
 For the baseline case, the runtime handles both positions automatically — when the
 `RouterFactory` is a plain `RouterFactory`, the runtime installs identifier resolution
-at entry and the standard exit filters on every route. A Router that needs to take
-control — adding partition routing, PID mapping, or replacing the identifier resolution
-strategy — implements `RouterWithImplicitFilterFactory` and declares both positions via
-`entryFilters()` and `exitFilters()`.
+at entry and the standard exit filters on every route. A Router that needs explicit
+control over its namespace boundaries — replacing a baseline filter with a custom
+implementation — implements `BoundaryAwareRouterFactory` and declares both positions
+via `entryFilters()` and `exitFilters()`.
 
 The runtime ships reference implementations of common protocol filters that a
-`RouterWithImplicitFilterFactory` can include in its declared chains. A Router author who
-needs different behaviour writes their own filter using the same `Filter` API. This keeps
-one processing model (filters on a chain) for all protocol concerns, with the Router in
-explicit control of what's on the chain when it needs to be.
+`BoundaryAwareRouterFactory` can include in its declared chains. A Router author who
+needs different behaviour writes their own filter using the same `Filter` API and
+composes it with the runtime's reference implementations on the same chain.
 
 #### Virtual node ID mapping (baseline default)
 
@@ -627,7 +611,7 @@ at a different layer of the DAG.
 
 The runtime ships **reference implementations** of these filters that cover the common
 cases. A Router author who needs a different mapping strategy can supply their own via
-`RouterWithImplicitFilterFactory`.
+`BoundaryAwareRouterFactory`.
 
 Like the `PartitionRoutingFilter`, per-route identifier mapping filters operate wholly
 in the downstream ID space and consult per-route mapping state maintained by the runtime
@@ -663,17 +647,17 @@ The full pipeline has three segments per Router:
 1. **Entry filters** — identifier resolution (topicId → name, etc.), ensuring the
    Router can make routing decisions regardless of protocol version. Provided by the
    runtime (baseline) or declared by
-   `RouterWithImplicitFilterFactory.entryFilters()`.
+   `BoundaryAwareRouterFactory.entryFilters()`.
 2. **User-configured filters** — declared in the route's `filters` configuration
    (e.g. `TopicPrefixFilter`).
 3. **Exit filters** — broker address rewriting, API version intersection, node ID
    mapping, and optionally partition routing and identifier mapping. Provided by the
    runtime (baseline) or declared by
-   `RouterWithImplicitFilterFactory.exitFilters()`.
+   `BoundaryAwareRouterFactory.exitFilters()`.
 
 The runtime ships reference implementations of common protocol filters
 (`PartitionRoutingFilter`, PID mapping, fetch session mapping, topicId resolution)
-that a `RouterWithImplicitFilterFactory` can include in its declared chains. A Router
+that a `BoundaryAwareRouterFactory` can include in its declared chains. A Router
 author who needs different behaviour writes their own filter — using the same
 `Filter` API, the same processing model, the same chain position.
 
@@ -834,10 +818,10 @@ positions — identifier resolution at entry and broker address rewriting / API 
 intersection / node ID mapping at exit. Most Router authors never need to think about
 the implicit filter chain.
 
-#### `RouterWithImplicitFilterFactory`
+#### `BoundaryAwareRouterFactory`
 
 ```java
-interface RouterWithImplicitFilterFactory<C, I> extends RouterFactory<C, I> {
+interface BoundaryAwareRouterFactory<C, I> extends RouterFactory<C, I> {
 
     List<FilterDefinition> entryFilters(I initializationData);
 
@@ -847,39 +831,58 @@ interface RouterWithImplicitFilterFactory<C, I> extends RouterFactory<C, I> {
 
 > **Sketch — exact API shape TBD.** The methods and `FilterDefinition` type are
 > illustrative. The important design point is the separation: plain `RouterFactory`
-> gets the baseline for free; `RouterWithImplicitFilterFactory` takes full control
+> gets the baseline for free; `BoundaryAwareRouterFactory` takes full control
 > of both positions — entry filters (before the Router's scatter) and exit filters
 > (per-route, after scatter).
 
-This is the escape hatch. A plain `RouterFactory` gets the runtime's baseline
-implicit filters at both positions — identifier resolution at entry and broker
-address rewriting / API version intersection / node ID mapping at exit. Most
-Router authors never implement this interface.
+This is the escape hatch for routers that are aware of their namespace boundaries
+and need explicit control over what happens at entry and exit. A plain
+`RouterFactory` gets the runtime's baseline implicit filters at both positions —
+the common routers (union cluster, AZ-aware fetch) never implement this interface.
 
-A Router that needs to take control — adding partition routing, PID mapping,
-or replacing the identifier resolution strategy — implements
-`RouterWithImplicitFilterFactory` and declares both positions:
-
-```java
-List<FilterDefinition> entryFilters(I initData) {
-    return List.of(IdentifierResolutionFilter.definition());
-}
-
-List<FilterDefinition> exitFilters(String route, I initData) {
-    return List.of(PartitionRoutingFilter.definition(),
-                   PidMappingFilter.definition(),
-                   BrokerAddressFilter.definition(),
-                   ApiVersionsIntersectFilter.definition(),
-                   NodeIdMappingFilter.definition());
-}
-```
-
-There is no "override" or "extend" mechanism — the factory either leaves both
-positions to the runtime (plain `RouterFactory`) or declares them entirely
-(`RouterWithImplicitFilterFactory`). The type system makes the choice explicit:
+A `BoundaryAwareRouterFactory` declares both positions explicitly. There is no
+"override" or "extend" mechanism — the factory either leaves both positions to
+the runtime (plain `RouterFactory`) or declares them entirely
+(`BoundaryAwareRouterFactory`). The type system makes the choice explicit:
 implementing the extended interface is an opt-in to full control. If a Router
 author forgets a baseline filter like `BrokerAddressFilter`, the proxy fails
 obviously.
+
+**Example: control-plane-driven partition assignment.** Consider a router whose
+partition-to-route assignments come from an external control plane rather than
+from METADATA topology. The runtime's default `PartitionRoutingFilter` derives
+assignments from the per-route topology cache — it checks which downstream
+partitions belong to each route based on METADATA. But a control-plane-driven
+router receives explicit assignments (e.g. "partition 7 → route B") from an
+external system, and its exit filter must consult that assignment state instead:
+
+```java
+class ControlPlaneRouterFactory
+        implements BoundaryAwareRouterFactory<CpConfig, CpInit> {
+
+    // ... initialize(), createRouter(), close() ...
+
+    List<FilterDefinition> entryFilters(CpInit initData) {
+        return List.of(IdentifierResolutionFilter.definition());
+    }
+
+    List<FilterDefinition> exitFilters(String route, CpInit initData) {
+        return List.of(
+            ControlPlanePartitionFilter.definition(initData.assignmentClient()),
+            PidMappingFilter.definition(),
+            BrokerAddressFilter.definition(),
+            ApiVersionsIntersectFilter.definition(),
+            NodeIdMappingFilter.definition());
+    }
+}
+```
+
+The entry filters are unchanged — identifier resolution is still needed. The exit
+chain replaces `PartitionRoutingFilter` with `ControlPlanePartitionFilter`, which
+consults the external assignment service instead of the topology cache. Everything
+else (PID mapping, broker address rewriting, etc.) uses the runtime's reference
+implementations. The router author writes one custom filter and composes it with
+the runtime's existing filters on the same chain.
 
 The full pipeline with implicit filters has three segments:
 
@@ -1079,8 +1082,8 @@ The central difference: what lives in the Router's hot path.
 | Node ID mapping | Runtime | Exit filter (runtime baseline) |
 | Broker address rewriting | Runtime | Exit filter (runtime baseline) |
 | API version intersection | Runtime | Exit filter (runtime baseline) |
-| PID / fetch session mapping | Router | Exit filter (via `RouterWithImplicitFilterFactory`) |
-| PRODUCE/FETCH decomposition | Router | Exit filter (via `RouterWithImplicitFilterFactory`) |
+| PID / fetch session mapping | Router | Exit filter (runtime baseline) |
+| PRODUCE/FETCH decomposition | Router | Exit filter (runtime baseline) |
 | PRODUCE/FETCH routing | Router | Router (`scatter()`) + per-route filter |
 | LIST_GROUPS, etc. merging | Router | Router (`scatter()`) |
 | Predicate evaluation | Router | Per-route filter / Router config |
@@ -1089,7 +1092,7 @@ PR #70's `onRequest()` is called for every dynamically-routed API key and is res
 for both the routing decision and the protocol-level decomposition of requests. This
 alternative's `scatter()` is also called for every request, but its job is limited to the
 scatter decision ("which routes"). Exit filters — provided by the runtime or declared
-via `RouterWithImplicitFilterFactory` — handle request decomposition (stripping
+via `BoundaryAwareRouterFactory` — handle request decomposition (stripping
 non-matching partitions) and identifier translation.
 
 ### What this buys
@@ -1097,13 +1100,13 @@ non-matching partitions) and identifier translation.
 **Smaller default plugin surface.** The Router's `scatter()` is called for every request,
 but the Router's job is the thin scatter-gather concern: which routes, and how to merge.
 A plain `RouterFactory` gets the baseline implicit filters for free at both
-positions — identifier resolution at entry and broker address rewriting / API version
-intersection / node ID mapping at exit — without implementing any filter-related
-methods. A Router that needs protocol-level filters (partition routing,
-PID mapping) or a custom resolution strategy implements `RouterWithImplicitFilterFactory`
-and includes the runtime's reference implementations in its declared chains. When the
-references don't fit, the Router author writes their own filter using the same
-`Filter` API.
+positions — identifier resolution at entry and partition routing / PID mapping / broker
+address rewriting / API version intersection / node ID mapping at exit — without
+implementing any filter-related methods. The common routers (union cluster, AZ-aware
+fetch) are plain `RouterFactory` implementations. Only a router that needs to replace
+a baseline filter — e.g. a control-plane-driven partition assignment strategy —
+implements `BoundaryAwareRouterFactory` and composes its custom filter with the
+runtime's reference implementations on the same chain.
 
 **Consistency with the filter model.** Per-route transformations are filters, same as
 VC-level transformations. The mental model is the same: filters transform traffic within
@@ -1140,7 +1143,7 @@ profiling provides evidence. See _Rejected alternatives_ below.
 ## Affected/not affected projects
 
 Same as PR #70, with the `Router` interface in `kroxylicious-api` being smaller:
-- `kroxylicious-api` — `Router`, `RouterFactory`, `RouterWithImplicitFilterFactory`, `RouterFactoryContext`, `ScatterContext`, `ScatterGatherResult`.
+- `kroxylicious-api` — `Router`, `RouterFactory`, `BoundaryAwareRouterFactory`, `RouterFactoryContext`, `ScatterContext`, `ScatterGatherResult`.
 - `kroxylicious-runtime` — routing engine, configuration model, graph validation, node ID mapping, response sequencing, implicit filters, metrics.
 - `kroxylicious-bom` — version management.
 - Not affected: existing filters, KMS, authoriser API.
@@ -1178,7 +1181,7 @@ capabilities it needs (e.g. "partition routing," "PID mapping") and the runtime 
 the appropriate filters automatically. The Router could override this by supplying its
 own filters. We rejected this because it introduces hidden behaviour: the Router author
 doesn't see what's on the chain unless they look, and the "override" mechanism (extend?
-replace? merge?) adds API complexity. The `RouterWithImplicitFilterFactory` approach is
+replace? merge?) adds API complexity. The `BoundaryAwareRouterFactory` approach is
 simpler — implementing the extended interface is an explicit opt-in, and the baseline
 case (plain `RouterFactory`) requires no filter-related code at all.
 
