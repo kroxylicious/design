@@ -112,11 +112,11 @@ In contrast, a `Router` implementing the 'topic splicing' use case might require
 
 ```java
 interface Router {
-    CompletionStage<RouterResult> onRequest(short apiVersion,
-                                            ApiKeys apiKey,
-                                            RequestHeaderData header,
-                                            ApiMessage request,
-                                            RouterContext context);
+    CompletionStage<RouterResponse> onRequest(short apiVersion,
+                                              ApiKeys apiKey,
+                                              RequestHeaderData header,
+                                              ApiMessage request,
+                                              RouterContext context);
 
     default Map<ApiKeys, String> staticRoutes() {
         return Map.of();
@@ -131,8 +131,8 @@ This means per-connection state (caches, session state) can live directly in the
 State shared across connections belongs in the `RouterFactory`'s initialisation data (see below).
 
 **`onRequest()`** is invoked for each incoming client request that is _dynamically routed_.
-The router inspects the request, decides which route(s) to use, sends one or more requests via the `RouterContext`, and eventually delivers a response to the client.
-The returned `CompletionStage<RouterResult>` completes when the router has finished processing the request.
+The router inspects the request, decides which route(s) to use, sends one or more requests via the `RouterContext`, and eventually delivers a response to the client using the builder pattern.
+The returned `CompletionStage<RouterResponse>` completes when the router has finished processing the request.
 
 **`staticRoutes()`** returns a map of `ApiKeys` to route names for requests that should always be forwarded to a fixed route without `onRequest()` being called.
 This allows a potential performance optimisation: if no filters express an interest either the runtime can forward these requests as opaque frames, bypassing the cost of deserialisation.
@@ -189,6 +189,18 @@ interface RouterContext {
     String sessionId();
 
     Subject authenticatedSubject();
+
+    String topicName(Uuid topicId);
+
+    CloseOrTerminalStage respondWith(ApiMessage body);
+
+    CloseOrTerminalStage respondWith(ResponseHeaderData header, ApiMessage body);
+
+    CloseOrTerminalStage respondWithError(RequestHeaderData header,
+                                          ApiMessage request,
+                                          ApiException exception);
+
+    CloseOrTerminalStage respondWithoutReply();
 }
 ```
 
@@ -231,38 +243,75 @@ If no authentication has occurred, the subject will be anonymous.
 Correct placement of SASL plugins in the topology is the operator's responsibility;
 a future proposal may add runtime validation of SASL plugin placement.
 
+**`topicName(topicId)`** resolves a topic ID to its topic name synchronously.
+The runtime guarantees that all topic IDs present in the current request have been resolved before `Router.onRequest()` is called, so this method returns immediately from a per-connection cache.
+The cache is populated by an internal filter that sends `METADATA` requests on cache miss.
+This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field with no topic name property.
+Returns `null` if the topic ID could not be resolved (e.g. the topic was deleted).
+
+**Response builder methods** — `respondWith()`, `respondWithError()`, and `respondWithoutReply()` — follow a fluent builder pattern consistent with the `Filter` API.
+Rather than constructing `RouterResult` subtypes directly, routers use the builder to construct responses:
+* `context.respondWith(body).build()` — delivers a response to the client
+* `context.respondWith(header, body).build()` — delivers a synthesised response with a custom header
+* `context.respondWithError(header, request, exception).build()` — generates an API-specific error response
+* `context.respondWithoutReply().build()` — completes with no response (fire-and-forget)
+
+Each builder method returns a `CloseOrTerminalStage`, which supports optional connection closure via `.andCloseConnection()` before calling `.build()`:
+* `context.respondWith(body).andCloseConnection().build()` — delivers a response then closes the connection
+
 All `RouterContext` methods are called on the same Netty event loop thread as `onRequest()`.
 No synchronisation is needed within a single `Router` instance.
 
-#### `RouterResult`
+#### `RouterResponse` and builder pattern
 
-`RouterResult` is the return type from `onRequest()`.
-It is a sealed type that encodes the outcome of request processing:
+`RouterResponse` is the return type from `onRequest()`.
+It is an opaque interface constructed via the builder pattern on `RouterContext`:
 
 ```java
-sealed interface RouterResult {
-    record Completed(Response response) implements RouterResult {}
-    record CompletedNoResponse() implements RouterResult {}
-    record Disconnect() implements RouterResult {}
+interface RouterResponse {}
+
+interface CloseOrTerminalStage {
+    TerminalStage andCloseConnection();
+    RouterResponse build();
+}
+
+interface TerminalStage {
+    RouterResponse build();
 }
 ```
 
-**`Completed(response)`** — the router has produced a response for the client.
-The runtime delivers the response, automatically rewriting the correlation ID to match the client's original request.
+Routers construct responses using the builder methods on `RouterContext`:
 
-**`CompletedNoResponse()`** — the router has finished processing but there is no response to deliver.
-This is the correct result for fire-and-forget requests (e.g. `PRODUCE` with `acks=0`).
-Having a dedicated type rather than a nullable response field makes the `acks=0` case explicit.
-The runtime can log a warning if a router returns `Completed` for a request that has no response, or `CompletedNoResponse` for a request that expects one.
+```java
+// Deliver a response to the client
+return context.respondWith(responseBody).build();
 
-**`Disconnect()`** — the router requests that the client connection be closed.
+// Deliver a response with a custom header
+return context.respondWith(responseHeader, responseBody).build();
 
-This follows the pattern established by `FilterResult`, where the outcome is a value returned to the runtime rather than an imperative side-effect on the context.
-The sealed hierarchy can be extended with new variants (e.g. `CompletedThenDisconnect(Response)`) in future without breaking existing implementations.
+// Generate an error response
+return context.respondWithError(requestHeader, request, exception).build();
 
-If the `CompletionStage<RouterResult>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
-In other words, Routers should generally handle errors with the terms of the Kafka protocol, by returning a response to the client which uses appropriate Kafka error codes. 
-Throwing an exception or returning an exceptionally-completed completion stage is to be avoided where possible.
+// Complete without sending a response (fire-and-forget)
+return context.respondWithoutReply().build();
+
+// Deliver a response and close the connection
+return context.respondWith(responseBody).andCloseConnection().build();
+```
+
+The builder pattern is consistent with the `Filter` API, where outcomes are constructed via a fluent interface rather than by directly instantiating result types.
+This allows the API to evolve (e.g. adding new builder stages for metrics or tracing) without breaking existing router implementations.
+
+**Response delivery.** When a router returns a response via `respondWith()`, the runtime automatically rewrites the correlation ID to match the client's original request.
+Routers never need to manage correlation IDs themselves.
+
+**Fire-and-forget.** For requests that expect no response (e.g. `PRODUCE` with `acks=0`), routers use `respondWithoutReply()`.
+Having a dedicated builder method rather than a nullable response makes the fire-and-forget case explicit.
+The runtime can log a warning if a router uses `respondWith()` for a request that has no response, or `respondWithoutReply()` for a request that expects one.
+
+**Error handling.** If the `CompletionStage<RouterResponse>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
+Routers should generally handle errors within the terms of the Kafka protocol, using `respondWithError()` to generate error responses with appropriate Kafka error codes.
+Throwing an exception or returning an exceptionally-completed stage should be avoided where possible.
 
 
 ### Configuration
@@ -413,10 +462,10 @@ The dispatch works as follows:
    The nested context shares the same Netty client channel, response sequencer, correlation ID allocator, and metrics as the outer context.
    Its forwarder callbacks wrap the outer forwarders to translate virtual node IDs from the nested space to the outermost space (see _Per-router scoping and nested dispatch_ above).
 3. The runtime invokes `nestedRouter.onRequest()` with the nested context.
-4. The `RouterResult` is mapped to a `CompletionStage<Response>`:
-   * `Completed(r)` → the response is returned to the outer router.
-   * `CompletedNoResponse` → null is returned (fire-and-forget).
-   * `Disconnect` → the future completes exceptionally (a nested router should not disconnect the client).
+4. The `RouterResponse` is unwrapped to a `CompletionStage<ApiMessage>`:
+   * Response built via `respondWith()` → the response body is returned to the outer router.
+   * Response built via `respondWithoutReply()` → null is returned (fire-and-forget).
+   * Response built via `andCloseConnection()` → the future completes exceptionally (a nested router should not disconnect the client).
 
 Nested `Router` instances are cached per connection, keyed by the `(outerRoute, routerName)` pair.
 They are closed when the client connection closes, in `RouterDispatchHandler.handlerRemoved()`, before the outer router is closed.
@@ -535,7 +584,7 @@ Version capping is the router's responsibility, not the runtime's.
 #### Flow control
 
 The runtime uses Netty's auto-read mechanism to apply TCP-level backpressure to the client connection.
-Auto-read is disabled while the router is processing a request and re-enabled when the `CompletionStage<RouterResult>` completes.
+Auto-read is disabled while the router is processing a request and re-enabled when the `CompletionStage<RouterResponse>` completes.
 This means the router's processing strategy directly determines the proxy's response latency and backpressure behaviour:
 
 * A router that forwards a request to a single backend and returns the response has latency equal to the backend's latency.
@@ -584,7 +633,7 @@ This cardinality is comparable to the existing per-filter metrics and should not
 
 ## Affected/not affected projects
 
-* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResult`, `Response`.
+* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`.
 * `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping, response sequencing, metrics.
 * `kroxylicious-bom` — version management for any new modules.
 * Not affected: existing filters, KMS, authoriser API. The Kubernetes operator will need a separate update to support router configuration in CRDs.
@@ -624,8 +673,9 @@ This section summarises the key design choices made in this proposal, for ease o
 * **Separate `virtualNodeId()` and `anyNodeId(route)` methods** distinguish between broker-specific connections (where the client connected to a specific broker endpoint) and bootstrap connections (where the client connected to a generic bootstrap address). This allows routers to correctly handle `API_VERSIONS` requests by forwarding them to the specific broker the client connected to, which is important during rolling upgrades where different brokers may run different Kafka versions.
 * **Route derived from virtual node ID** — `sendRequestToNode()` takes only a virtual node ID, and the runtime derives the route via `NodeIdMapping.fromVirtual()`. This works for dedicated (one-to-one) mappings where each virtual node belongs to exactly one route. Shared (many-to-one) mappings would require the mapping to maintain additional state to recover the route, or be restricted such that each virtual node still maps to exactly one route.
 * **Per-connection `Router` instances** allow per-connection state (caches, sessions) without synchronisation. Shared state lives in the `RouterFactory`'s initialisation data, which must be thread-safe.
-* **`RouterResult` as a sealed type** encodes request outcomes (response, no-response, disconnect) as values rather than side-effects, following the pattern established by `FilterResult`. The sealed hierarchy is extensible without breaking existing implementations.
+* **Builder pattern for response construction** follows the same fluent interface pattern as `FilterResult`, where outcomes are constructed via `RouterContext` builder methods rather than by directly instantiating result types. This allows the API to evolve (e.g. adding new builder stages) without breaking existing implementations.
 * **All requests addressed by virtual node ID.** Routers must explicitly obtain a virtual node ID (via `virtualNodeId()`, `anyNodeId(route)`, or from a previous response) before sending a request. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
+* **`topicName(Uuid)` for synchronous topic ID resolution** allows routers to resolve topic IDs to names without relying on wire-object enrichment. This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field. The runtime guarantees the cache is warm before `onRequest()` is called.
 * **`routeNames()` in `RouterFactoryContext`** allows router factories to validate at initialization time that route names referenced in their plugin configuration actually exist, providing early feedback on configuration errors.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
