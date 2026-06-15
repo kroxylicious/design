@@ -374,9 +374,9 @@ When any request sent via `RouterContext.sendRequest()` produces a METADATA resp
 This means: after a METADATA request's future completes, the cache is guaranteed to reflect that response.
 Routers that need to warm the cache for uncached topics send METADATA requests themselves (or via `ensureLeadersCached()`), and the cache is populated as a side effect of the response flow.
 
-Coordinator caching works differently: the FIND_COORDINATOR response lacks `keyType`, and pre-v4 responses lack the `key` field entirely.
-So coordinators cannot be cached from the response alone.
-The `TopologyServiceImpl.discoverCoordinator()` method caches them explicitly using request-side context (the key type and key from the original request).
+Coordinator caching uses the same side-effect model, with one twist: the FIND_COORDINATOR response lacks `keyType`, and pre-v4 responses lack the `key` field entirely.
+To solve this, `PendingResponse` carries a `CoordinatorRequestContext(keyType, key)` extracted from the FIND_COORDINATOR request.
+When the response arrives in `RoutingDecisionHandler.write()`, the runtime uses this request-side context alongside the response to populate the cache — `TopologyCache.updateFromFindCoordinator()` matches coordinator keys from the request with node IDs from the response.
 Coordinators are keyed by `(route, keyType, key)` — not by route alone, fixing a limitation where different consumer groups on the same route could collide.
 
 Only METADATA responses populate partition and broker data.
@@ -578,7 +578,9 @@ In `RoutingDecisionHandler.write()`, the processing order for each backend respo
 
 1. `MetadataAddressCacher` extracts broker addresses (before node ID translation, using the route's `NodeIdMapping` to store addresses keyed by the outermost virtual ID).
 2. `NodeIdResponseTranslator` translates all node IDs in-place from target-cluster IDs to virtual IDs.
-3. `TopologyCache.updateFromMetadata()` updates the cache with translated (virtual) node IDs — partition leaders, replicas, ISR, broker info, and topicId→name mappings (if the cache exists for this router level).
+3. Topology cache update (if the cache exists for this router level):
+   - For METADATA responses: `TopologyCache.updateFromMetadata()` updates partition leaders, replicas, ISR, broker info, and topicId→name mappings.
+   - For FIND_COORDINATOR responses: `TopologyCache.updateFromFindCoordinator()` uses the `CoordinatorRequestContext` (keyType, key) carried by `PendingResponse` from the original request.
 4. The router's `CompletionStage` future is completed.
 
 This ordering guarantees that the topology cache reflects the response by the time the router's callback fires.
