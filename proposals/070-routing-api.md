@@ -202,8 +202,6 @@ interface RouterContext {
 
     Subject authenticatedSubject();
 
-    String topicName(Uuid topicId);
-
     CloseOrTerminalStage respondWith(ApiMessage body);
 
     CloseOrTerminalStage respondWith(ResponseHeaderData header, ApiMessage body);
@@ -258,12 +256,6 @@ For shared (many-to-one) mappings — where a single virtual node may serve brok
 If no authentication has occurred, the subject will be anonymous.
 Correct placement of SASL plugins in the topology is the operator's responsibility;
 a future proposal may add runtime validation of SASL plugin placement.
-
-**`topicName(topicId)`** resolves a topic ID to its topic name synchronously.
-The runtime guarantees that all topic IDs present in the current request have been resolved before `Router.onRequest()` is called, so this method returns immediately from a per-connection cache.
-The cache is populated by an internal filter that sends `METADATA` requests on cache miss.
-This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field with no topic name property.
-Returns `null` if the topic ID could not be resolved (e.g. the topic was deleted).
 
 **Response builder methods** — `respondWith()`, `respondWithError()`, and `respondWithoutReply()` — follow a fluent builder pattern consistent with the `Filter` API.
 Rather than constructing `RouterResult` subtypes directly, routers use the builder to construct responses:
@@ -819,7 +811,7 @@ This section summarises the key design choices made in this proposal, for ease o
 * **Coarse invalidation** via `invalidateRoute(route)` rather than fine-grained `invalidateLeader()`, `invalidateCoordinator()`, `invalidateNode()`. A single method clears partition info, coordinators, and broker info for a route (but not topic ID→name mappings, which are stable within a cluster). Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request. This avoids an ever-growing set of invalidation methods as more cached entity types are added.
 * **Router-driven invalidation** rather than runtime-driven. The runtime would need to deserialise an open-ended and growing set of response types to scan for staleness error codes. Different error codes have different semantics. Routers that don't use the topology cache shouldn't pay the deserialisation cost.
 * **Shared node address map** — broker address resolution is per-router-level (`ConcurrentHashMap`), not per-connection. Required because the shared topology cache means a leader virtual node ID cached from one connection's METADATA must be resolvable to a broker address on another connection.
-* **`topicName(Uuid)` for synchronous topic ID resolution** allows routers to resolve topic IDs to names without relying on wire-object enrichment. This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field. The runtime guarantees the cache is warm before `onRequest()` is called. `TopologyService` also offers `topicNames(Set<Uuid>)` as an async batched alternative.
+* **Topic ID resolution via `TopologyService.topicNames(Set<Uuid>)`** is async and batched, consistent with `leaders()` and `coordinators()`. An earlier design had a synchronous `topicName(Uuid)` on `RouterContext`, preloaded by an internal filter before `onRequest()`. This was removed because it silently swallowed resolution errors (returning null for both "not yet resolved" and "topic deleted") and was inconsistent with the async discovery pattern. Routers that need topic names collect IDs from the request, call `topicNames()`, and pass the resolved map to decomposers.
 * **`routeNames()` in `RouterFactoryContext`** allows router factories to validate at initialization time that route names referenced in their plugin configuration actually exist, providing early feedback on configuration errors.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
