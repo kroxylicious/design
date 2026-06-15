@@ -76,26 +76,35 @@ The _router_ decides which _route_ each request should traverse.
 Each _route_ may carry its own filter chain, and terminates at a _cluster_ (or another router).
 Clusters are the leaf nodes of the graph.
 
-#### Virtual node IDs
+#### VirtualNode
 
 Kafka's protocol identifies brokers by integer _node IDs_.
 These node IDs are scoped to a single cluster — broker 0 in cluster-a is a completely different machine from broker 0 in cluster-b.
 When a router presents multiple clusters to the client as a single virtual cluster, there is a collision problem: the client might receive node ID 0 in a `METADATA` response from one route and node ID 0 from another, with no way to distinguish them.
 
-The solution is _virtual node IDs_.
-The runtime assigns each `(route, target-cluster node ID)` pair a unique virtual node ID.
-Virtual node IDs are `int32`, matching Kafka's wire format for node IDs. We believe this is large enough not to be a practical limit.
-All responses delivered to the router (and onward to the client) use virtual node IDs.
-All requests from the router use virtual node IDs.
-The runtime transparently translates between virtual and real node IDs at the boundary.
+The solution is `VirtualNode` — an opaque reference type for node identity in the routing API.
+The runtime assigns each `(route, target-cluster node ID)` pair a unique `VirtualNode`.
+Routers obtain `VirtualNode` instances from `RouterContext` methods and pass them back to `sendRequest()`.
+The type is intentionally opaque — routers must not inspect or construct instances; the runtime provides the implementation, which includes correct `equals()` and `hashCode()` so that `VirtualNode` instances can be used as map keys.
 
-This means a router author works entirely in terms of virtual node IDs and never needs to translate.
-When a `METADATA` response arrives with a list of brokers, the node IDs in that response are already virtual.
-When the router wants to send a request to one of those brokers, it simply passes the virtual node ID back.
-The runtime handles the mapping.
+All responses delivered to the router (and onward to the client) use integer node IDs on the Kafka wire protocol.
+The router converts these to `VirtualNode` via `nodeForId(int)` when it needs to use them as routing handles.
+All requests from the router use `VirtualNode` via `sendRequest()`.
+The runtime transparently translates between `VirtualNode` and real node IDs at the boundary.
 
-The details of how the mapping works (the formula, the implementation) are described in the _Runtime_ section below.
-The key point here is that virtual node IDs are the universal addressing scheme within the routing API.
+**Why opaque, not `int`?**
+The integer-based port-per-broker networking model encodes both route and target broker into a single `int` via a bijective formula.
+An alternative networking model — where proxy instances act as brokers with their own identities and shard-based ownership — needs richer routing information that cannot be encoded in a single integer.
+`VirtualNode` hides this difference: the same router code works with either networking model.
+The runtime implementation (`VirtualNodeImpl`) wraps the encoded integer for the current model; a future implementation could carry proxy instance identity, shard keys, or other routing metadata.
+
+**`nodeForId(int)` — the wire-protocol bridge.**
+Kafka protocol messages (METADATA responses, FIND_COORDINATOR responses, etc.) carry node IDs as integers.
+When a router reads these integers — for example, broker node IDs in a METADATA response during fan-out merge, or a coordinator node ID from FIND_COORDINATOR — it converts them to `VirtualNode` via `nodeForId(int)`.
+This method is permanent, not transitional: routers will always need to interpret integers from protocol messages.
+
+The details of how the internal mapping works (the formula, the implementation) are described in the _Runtime_ section below.
+The key point here is that `VirtualNode` is the universal addressing scheme within the routing API, and `nodeForId(int)` is the bridge from the Kafka wire protocol to that scheme.
 
 
 ### Plugin API
@@ -170,6 +179,7 @@ Because `Router` instances may be created on different event loop threads, the i
 * `routerName()` — the name of this router within the configuration.
 * `routeNames()` — the set of route names declared in the router definition. This allows router factories to validate that route names referenced in their plugin configuration actually exist.
 * `pluginInstance()` / `pluginImplementationNames()` — access to the plugin registry.
+* `topologyService()` — returns a `TopologyService` for opt-in topology caching (see _TopologyService_ below). The runtime creates the underlying cache lazily on first call. Routers that never call this method pay no cost. The returned service should be stored in the factory's initialisation data so it survives connection reconnects.
 
 #### `RouterContext`
 
@@ -178,13 +188,15 @@ Because `Router` instances may be created on different event loop threads, the i
 ```java
 interface RouterContext {
 
-    OptionalInt virtualNodeId();
+    Optional<VirtualNode> virtualNode();
 
-    int anyNodeId(String route);
+    VirtualNode anyNode(String route);
 
-    CompletionStage<ApiMessage> sendRequestToNode(int virtualNodeId,
-                                                   RequestHeaderData header,
-                                                   ApiMessage request);
+    VirtualNode nodeForId(int virtualNodeId);
+
+    CompletionStage<ApiMessage> sendRequest(VirtualNode node,
+                                             RequestHeaderData header,
+                                             ApiMessage request);
 
     String sessionId();
 
@@ -208,33 +220,37 @@ We want to allow (but not require) a router to potentially make multiple request
 For this reason `RouterContext` does not follow the builder pattern used in the `FilterContext`, but simply exposes methods to asynchronously send requests.
 This allows the `Router` author to make use of the `CompletionStage` API when issuing multiple requests.
 
-**`virtualNodeId()`** returns the virtual node ID of the broker that the client connected to, or empty if the client connected to a bootstrap address.
-When the client connects to a broker-specific endpoint (i.e. an address that corresponds to a particular broker in the cluster topology), this returns that broker's virtual node ID.
+**`virtualNode()`** returns the `VirtualNode` of the broker that the client connected to, or empty if the client connected to a bootstrap address.
+When the client connects to a broker-specific endpoint (i.e. an address that corresponds to a particular broker in the cluster topology), this returns that broker's `VirtualNode`.
 The router can use this to send requests — such as `API_VERSIONS` — to the specific broker the client believes it is talking to, rather than an arbitrary broker.
 This is important during rolling upgrades where different brokers may run different Kafka versions.
 
 When the client connected to a bootstrap address, this returns empty, because the proxy does not know which broker the client intended.
-In that case the router should use `anyNodeId(String)` to obtain a node ID for sending requests.
+In that case the router should use `anyNode(String)` to obtain a node for sending requests.
 
-**`anyNodeId(route)`** returns a virtual node ID that, when passed to `sendRequestToNode()`, causes the runtime to send the request to an arbitrary broker on the named route's cluster.
+**`anyNode(route)`** returns a `VirtualNode` that, when passed to `sendRequest()`, causes the runtime to send the request to an arbitrary broker on the named route's cluster.
 This is used for initial discovery requests (e.g. `METADATA`, `FIND_COORDINATOR`) before the router has learned the cluster topology, and for requests that are not broker-specific.
 The runtime is responsible for selecting which broker to use.
 A route's cluster may be configured with multiple bootstrap servers, and the runtime should randomise selection and round-robin on subsequent calls, mirroring how Kafka clients handle bootstrap addresses.
 This keeps the selection policy in the runtime, where it can be applied consistently, rather than requiring each router to implement its own strategy.
 
-**`sendRequestToNode(virtualNodeId, ...)`** sends a request to a specific broker, identified by a virtual node ID.
-The runtime derives the route from the virtual node ID (via the `NodeIdMapping`) and resolves it to a specific upstream broker address, opening a new connection if necessary.
+**`nodeForId(int)`** converts an integer node ID from a Kafka protocol response body into a `VirtualNode`.
+This is the bridge between the Kafka wire protocol (which uses integer node IDs) and the opaque `VirtualNode` API.
+Routers need this when interpreting node IDs in protocol messages — for example, broker node IDs when merging `METADATA` responses from multiple routes, coordinator node IDs from `FIND_COORDINATOR` responses, or leader IDs in partition metadata.
 
-The virtual node ID can be:
-* A value obtained from `virtualNodeId()` — sends to the broker the client connected to
-* A value obtained from `anyNodeId(String)` — sends to an arbitrary broker on a route
-* A virtual node ID learned from a previous response (e.g. a partition leader from a `METADATA` response)
+**`sendRequest(node, ...)`** sends a request to a specific broker, identified by a `VirtualNode`.
+The runtime derives the route from the `VirtualNode` (via the internal `NodeIdMapping`) and resolves it to a specific upstream broker address, opening a new connection if necessary.
 
-Once `METADATA` responses arrive, the router uses the virtual node IDs from those responses to address specific brokers — no translation is needed, since the node IDs in responses are already virtual (see _Virtual node IDs_ above).
+The `VirtualNode` can be:
+* A value obtained from `virtualNode()` — sends to the broker the client connected to
+* A value obtained from `anyNode(String)` — sends to an arbitrary broker on a route
+* A value obtained from `nodeForId(int)` — sends to a broker whose ID was learned from a protocol response
 
-The removal of the route parameter from `sendRequestToNode()` compared to earlier drafts is deliberate: the runtime can derive the route from the virtual node ID via `NodeIdMapping.fromVirtual()`.
+Once `METADATA` responses arrive, the router converts the integer node IDs from those responses to `VirtualNode` via `nodeForId(int)`, then uses those nodes to address specific brokers via `sendRequest()`.
+
+The absence of a route parameter on `sendRequest()` is deliberate: the runtime can derive the route from the `VirtualNode` via the internal `NodeIdMapping.fromVirtual()`.
 This works for dedicated (one-to-one) mappings where each virtual node belongs to exactly one route.
-For shared (many-to-one) mappings — where a single virtual node may serve brokers from multiple routes — the mapping implementation would need to maintain additional state to recover the route from the virtual node ID, or router implementations would need to be restricted to dedicated mappings only.
+For shared (many-to-one) mappings — where a single virtual node may serve brokers from multiple routes — the `VirtualNode` implementation can encode the necessary routing metadata (proxy instance identity, shard assignments, etc.) without changing the `sendRequest()` API.
 
 **`sessionId()`** and **`authenticatedSubject()`** provide observability and identity context.
 `sessionId()` returns a string that uniquely identifies the connection with the Kafka client. It will have the same value for all invocations of `onRequest()` which happen for that client connection, both for the same router over time, and different routers in a topology.
@@ -312,6 +328,77 @@ The runtime can log a warning if a router uses `respondWith()` for a request tha
 **Error handling.** If the `CompletionStage<RouterResponse>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
 Routers should generally handle errors within the terms of the Kafka protocol, using `respondWithError()` to generate error responses with appropriate Kafka error codes.
 Throwing an exception or returning an exceptionally-completed stage should be avoided where possible.
+
+#### `TopologyService`
+
+`TopologyService` is an opt-in topology cache for routers that need leader, coordinator, broker, or topic ID information.
+Routers obtain it from `RouterFactoryContext.topologyService()` during `RouterFactory.initialize()`.
+Routers that never call `topologyService()` pay no cost — no cache is created, and the runtime skips topology-related work for that router level.
+
+```java
+interface TopologyService {
+    CompletionStage<Map<Uuid, String>> topicNames(Set<Uuid> topicIds);
+
+    Optional<VirtualNode> leaderOf(String topicName, int partitionIndex);
+    CompletionStage<Void> ensureLeadersCached(Map<String, Set<String>> topicsByRoute);
+
+    Optional<VirtualNode> coordinatorOf(String route, byte keyType, String key);
+    CompletionStage<VirtualNode> discoverCoordinator(String route, byte keyType, String key);
+
+    Optional<PartitionInfo> partitionInfoFor(String topicName, int partitionIndex);
+    Optional<BrokerInfo> brokerInfo(VirtualNode node);
+
+    void invalidateRoute(String route);
+}
+```
+
+The service provides three categories of methods:
+
+**Synchronous reads** — `leaderOf()`, `coordinatorOf()`, `partitionInfoFor()`, `brokerInfo()` — query the cache and return immediately.
+If the data is not cached, they return empty.
+Callers should warm the cache first (via `ensureLeadersCached()`, `discoverCoordinator()`, or by sending METADATA directly).
+
+**Asynchronous operations** — `ensureLeadersCached()`, `discoverCoordinator()`, `topicNames()` — may send requests internally to warm the cache.
+`ensureLeadersCached()` batches all uncached topics into one METADATA request per route.
+`discoverCoordinator()` sends METADATA (if needed) then FIND_COORDINATOR.
+`topicNames()` resolves topic IDs to names, batching cache misses into a single METADATA request.
+These methods use a `RequestSender` bound per-connection by the runtime (see _Runtime_ below).
+
+**Invalidation** — `invalidateRoute(route)` performs coarse invalidation: clears all partition info (leaders, replicas, ISR), coordinators, and broker info for a route.
+Topic ID→name mappings are _not_ cleared (they are stable within a cluster — a topic ID always maps to the same name).
+Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request.
+
+**Cache population model.**
+The cache is populated as a _side effect_ of METADATA responses flowing through the routing pipeline.
+When any request sent via `RouterContext.sendRequest()` produces a METADATA response, the runtime intercepts the response in `RoutingDecisionHandler.write()` (after node ID translation) and updates the topology cache _before_ completing the router's `CompletionStage`.
+This means: after a METADATA request's future completes, the cache is guaranteed to reflect that response.
+Routers that need to warm the cache for uncached topics send METADATA requests themselves (or via `ensureLeadersCached()`), and the cache is populated as a side effect of the response flow.
+
+Coordinator caching works differently: the FIND_COORDINATOR response lacks `keyType`, and pre-v4 responses lack the `key` field entirely.
+So coordinators cannot be cached from the response alone.
+The `TopologyServiceImpl.discoverCoordinator()` method caches them explicitly using request-side context (the key type and key from the original request).
+Coordinators are keyed by `(route, keyType, key)` — not by route alone, fixing a limitation where different consumer groups on the same route could collide.
+
+Only METADATA responses populate partition and broker data.
+DESCRIBE_CLUSTER is intentionally excluded: it contains brokers and racks but no topic/partition/leader information, and mixing data from different response types risks inconsistency.
+
+**Cache scope.**
+The cache is shared per router level (not per connection), backed by `ConcurrentHashMap`.
+All connections through the same router level share the same topology view.
+This is efficient (no per-connection duplication) and necessary for correctness: a leader discovered by connection A must be usable by connection B (see _Shared node address map_ in the Runtime section).
+
+**Invalidation responsibility.**
+Staleness invalidation is the _router's_ responsibility, not the runtime's.
+The router calls `invalidateRoute(route)` when it observes staleness indicators (e.g. `NOT_LEADER_OR_FOLLOWER`, `NOT_COORDINATOR`) in responses.
+No background METADATA refresh is fired — the stale error is returned to the client unchanged, and the client sends its own METADATA request (standard Kafka behaviour), which repopulates the cache via the side-effect path.
+
+The alternative — having the runtime scan responses for staleness errors automatically — was rejected because it would require the runtime to deserialise an open-ended and growing set of response types.
+Different error codes have different semantics (`NOT_LEADER_OR_FOLLOWER` vs `NOT_COORDINATOR` vs `FENCED_LEADER_EPOCH`).
+Routers that don't use the topology cache shouldn't pay the deserialization cost.
+
+**Supporting types:**
+* `PartitionInfo(VirtualNode leader, List<VirtualNode> replicas, List<VirtualNode> isr)` — full partition topology for follower-fetch / AZ-aware routing.
+* `BrokerInfo(String host, int port, @Nullable String rack)` — broker metadata including rack assignment.
 
 
 ### Configuration
@@ -454,7 +541,7 @@ The runtime dispatches incoming requests in one of two modes:
 
 #### Nested router dispatch
 
-When a router calls `sendRequestToNode()` on a route whose target is another router, the runtime dispatches to the nested router rather than forwarding directly to a backend.
+When a router calls `sendRequest()` on a route whose target is another router, the runtime dispatches to the nested router rather than forwarding directly to a backend.
 The dispatch works as follows:
 
 1. The runtime creates (or retrieves from a per-connection cache) a `Router` instance for the nested router.
@@ -484,13 +571,44 @@ A router may send multiple requests (fan-out) and compose their responses before
 Different routes may respond at different times.
 The runtime uses a _response sequencer_ to ensure that responses are delivered to the client in the same order as the original client requests, regardless of the order in which fan-out responses arrive.
 
+#### Topology cache population
+
+When a `TopologyService` has been created for a router level (via `RouterFactoryContext.topologyService()`), the runtime populates it from METADATA responses.
+In `RoutingDecisionHandler.write()`, the processing order for each backend response is:
+
+1. `MetadataAddressCacher` extracts broker addresses (before node ID translation, using the route's `NodeIdMapping` to store addresses keyed by the outermost virtual ID).
+2. `NodeIdResponseTranslator` translates all node IDs in-place from target-cluster IDs to virtual IDs.
+3. `TopologyCache.updateFromMetadata()` updates the cache with translated (virtual) node IDs — partition leaders, replicas, ISR, broker info, and topicId→name mappings (if the cache exists for this router level).
+4. The router's `CompletionStage` future is completed.
+
+This ordering guarantees that the topology cache reflects the response by the time the router's callback fires.
+
+#### Shared node address map
+
+Broker address resolution (`sharedNodeAddresses`) is shared per router level, backed by `ConcurrentHashMap` stored in `RouterChainFactory`.
+This is necessary because the `TopologyCache` is shared: a leader virtual node ID cached from connection A's METADATA must be resolvable to a broker address on connection B.
+If addresses were per-connection, connection B would find the leader in the topology cache (skipping METADATA), but then fail to resolve the leader's address — "Upstream address not yet known."
+
+The shared address map is populated from two sources:
+* `RouterContextImpl.registerBootstrapAddresses()` — at handler installation time, adds bootstrap addresses for cluster-targeting routes.
+* `MetadataAddressCacher.cacheIfMetadata()` — from METADATA responses, adds broker addresses learned from the broker list.
+
+#### TopologyService request sending
+
+The `TopologyServiceImpl` is shared per router level (created in `RouterChainFactory`).
+Methods that may send requests (`ensureLeadersCached`, `discoverCoordinator`, `topicNames`) use a `RequestSender` functional interface, bound per-connection via `TopologyServiceImpl.bindRequestSender()`.
+The binding happens in `RoutingDecisionHandler.dispatchDynamically()` before each `Router.onRequest()` call — the sender lambda captures the per-request `RouterContextImpl`.
+
+The `RequestSender` field is volatile.
+This is safe because all calls to `TopologyService` methods happen on the event loop thread during `onRequest` processing, and `bindRequestSender` is called on the same thread before `onRequest`.
+
 #### Node ID mapping implementation
 
-As described in _Virtual node IDs_ above, the runtime translates between real target-cluster node IDs and virtual node IDs.
+As described in _VirtualNode_ above, the runtime translates between real target-cluster node IDs and virtual node IDs.
 This is implemented by a `NodeIdMapping` abstraction (internal to the runtime) with two operations:
 
 * `toVirtual(route, targetNodeId)` — used when rewriting responses received from a target cluster (the runtime rewrites broker node IDs in `METADATA`, `PRODUCE`, `FIND_COORDINATOR`, and `DESCRIBE_CLUSTER` responses before they reach the router).
-* `fromVirtual(virtualNodeId)` — used when the router calls `sendRequestToNode(virtualNodeId, ...)`, returning both the route and the target-cluster node ID.
+* `fromVirtual(virtualNodeId)` — used internally by the runtime when the router calls `sendRequest(VirtualNode, ...)`. The runtime unwraps the `VirtualNode` to its encoded integer, calls `fromVirtual()`, and gets both the route and the target-cluster node ID. Routers never call `fromVirtual()` directly.
 
 The mapping must satisfy: for any route `r` and target node ID `t`, if `v = toVirtual(r, t)` then `fromVirtual(v)` returns `(r, t)`.
 The mapping must be able to recover the route from the virtual node ID alone.
@@ -550,7 +668,7 @@ The runtime should respond with an appropriate Kafka error code, triggering the 
 
 A shared mapping would require strong consistency across proxy instances to ensure they agree on the virtual node ID assignments.
 
-Note: The current implementation uses a dedicated mapping and does not support shared mappings. Supporting shared mappings would require changes to the `NodeIdMapping` interface to allow `fromVirtual()` to recover the route.
+Note: The current implementation uses a dedicated mapping and does not support shared mappings. The `VirtualNode` abstraction is designed to enable shared mappings in the future: a shared-mapping `VirtualNode` implementation could carry proxy instance identity, shard assignments, or other routing metadata internally, without changing the `sendRequest()` API that routers use.
 
 **Role-based mapping.**
 Virtual nodes correspond to per-route functional roles (e.g. "partition leader", "group coordinator").
@@ -570,8 +688,8 @@ Changing the mapping strategy (e.g. from dedicated to shared) is expected to be 
 The Kafka protocol scopes `API_VERSIONS` to a single broker connection — a client sends `API_VERSIONS` each time it connects to a new broker.
 This means the proxy must forward `API_VERSIONS` to the specific broker the client believes it is talking to, not to an arbitrary broker.
 
-When the client connects to a broker-specific endpoint, `virtualNodeId()` returns that broker's virtual node ID, allowing the router to forward `API_VERSIONS` to the correct broker via `sendRequestToNode()`.
-When the client connects to a bootstrap address, `virtualNodeId()` returns empty, and the router should use `anyNodeId(route)` to send `API_VERSIONS` to an arbitrary broker on the route.
+When the client connects to a broker-specific endpoint, `virtualNode()` returns that broker's `VirtualNode`, allowing the router to forward `API_VERSIONS` to the correct broker via `sendRequest()`.
+When the client connects to a bootstrap address, `virtualNode()` returns empty, and the router should use `anyNode(route)` to send `API_VERSIONS` to an arbitrary broker on the route.
 
 With a shared mapping, the runtime would need to fan out `API_VERSIONS` to all brokers behind that virtual node and return the intersection of their version ranges.
 
@@ -633,8 +751,8 @@ This cardinality is comparable to the existing per-filter metrics and should not
 
 ## Affected/not affected projects
 
-* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`.
-* `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping, response sequencing, metrics.
+* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`, `VirtualNode`, `TopologyService`, `PartitionInfo`, `BrokerInfo`.
+* `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping (`NodeIdMapping`, `BijectiveNodeIdMapping`, `IdentityNodeIdMapping`, `VirtualNodeImpl`), topology caching (`TopologyCache`, `TopologyServiceImpl`), response sequencing, metrics.
 * `kroxylicious-bom` — version management for any new modules.
 * Not affected: existing filters, KMS, authoriser API. The Kubernetes operator will need a separate update to support router configuration in CRDs.
 
@@ -669,13 +787,19 @@ Having a single `clusterDefinitions` list as the authoritative catalogue of upst
 
 This section summarises the key design choices made in this proposal, for ease of reference.
 
-* **Virtual node IDs** provide a uniform addressing scheme that insulates router authors from the node ID collision problem inherent in multi-cluster topologies. The runtime owns the mapping; routers work exclusively with virtual IDs and never need to translate.
-* **Separate `virtualNodeId()` and `anyNodeId(route)` methods** distinguish between broker-specific connections (where the client connected to a specific broker endpoint) and bootstrap connections (where the client connected to a generic bootstrap address). This allows routers to correctly handle `API_VERSIONS` requests by forwarding them to the specific broker the client connected to, which is important during rolling upgrades where different brokers may run different Kafka versions.
-* **Route derived from virtual node ID** — `sendRequestToNode()` takes only a virtual node ID, and the runtime derives the route via `NodeIdMapping.fromVirtual()`. This works for dedicated (one-to-one) mappings where each virtual node belongs to exactly one route. Shared (many-to-one) mappings would require the mapping to maintain additional state to recover the route, or be restricted such that each virtual node still maps to exactly one route.
+* **`VirtualNode` as opaque type** provides a uniform addressing scheme that insulates router authors from the node ID collision problem inherent in multi-cluster topologies, and enables alternative networking models (proxy-as-broker) without changing the Router API. The runtime owns the mapping; routers work exclusively with `VirtualNode` instances and never need to know the underlying encoding. Routers never perform arithmetic on node IDs — they use them as opaque handles for map keys and `sendRequest()` arguments.
+* **`nodeForId(int)` as wire-protocol bridge** converts integer node IDs from Kafka protocol response bodies into `VirtualNode` instances. This is retained permanently (not transitional) because routers will always need to interpret integers from protocol messages — for METADATA response merging, FIND_COORDINATOR responses, and future protocol extensions. Removing it would mean every such use case needs a dedicated method on `RouterContext` or `TopologyService`, which does not scale.
+* **Separate `virtualNode()` and `anyNode(route)` methods** distinguish between broker-specific connections (where the client connected to a specific broker endpoint) and bootstrap connections (where the client connected to a generic bootstrap address). This allows routers to correctly handle `API_VERSIONS` requests by forwarding them to the specific broker the client connected to, which is important during rolling upgrades where different brokers may run different Kafka versions.
+* **Route derived from `VirtualNode`** — `sendRequest()` takes only a `VirtualNode`, and the runtime derives the route by unwrapping to the internal integer and calling `NodeIdMapping.fromVirtual()`. This works for dedicated (one-to-one) mappings where each virtual node belongs to exactly one route. Shared (many-to-one) mappings encode the routing metadata within the `VirtualNode` implementation, without changing the `sendRequest()` API.
 * **Per-connection `Router` instances** allow per-connection state (caches, sessions) without synchronisation. Shared state lives in the `RouterFactory`'s initialisation data, which must be thread-safe.
 * **Builder pattern for response construction** follows the same fluent interface pattern as `FilterResult`, where outcomes are constructed via `RouterContext` builder methods rather than by directly instantiating result types. This allows the API to evolve (e.g. adding new builder stages) without breaking existing implementations.
-* **All requests addressed by virtual node ID.** Routers must explicitly obtain a virtual node ID (via `virtualNodeId()`, `anyNodeId(route)`, or from a previous response) before sending a request. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
-* **`topicName(Uuid)` for synchronous topic ID resolution** allows routers to resolve topic IDs to names without relying on wire-object enrichment. This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field. The runtime guarantees the cache is warm before `onRequest()` is called.
+* **All requests addressed by `VirtualNode`.** Routers must explicitly obtain a `VirtualNode` (via `virtualNode()`, `anyNode(route)`, `nodeForId(int)`, or from `TopologyService`) before sending a request. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
+* **`TopologyService` is opt-in** via `RouterFactoryContext.topologyService()`. The runtime creates the underlying cache lazily on first call. Simple routers (subject-based, client-ID-based) that never call it pay no cost — no cache, no topology-related processing. This avoids a one-size-fits-all design where all routers pay for topology caching.
+* **Side-effect cache population** — the topology cache is populated from METADATA responses in `RoutingDecisionHandler.write()`, after node ID translation, before the router's `CompletionStage` completes. This is simpler and more automatic than giving `TopologyService` full request-sending capability for all cache operations.
+* **Coarse invalidation** via `invalidateRoute(route)` rather than fine-grained `invalidateLeader()`, `invalidateCoordinator()`, `invalidateNode()`. A single method clears partition info, coordinators, and broker info for a route (but not topic ID→name mappings, which are stable within a cluster). Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request. This avoids an ever-growing set of invalidation methods as more cached entity types are added.
+* **Router-driven invalidation** rather than runtime-driven. The runtime would need to deserialise an open-ended and growing set of response types to scan for staleness error codes. Different error codes have different semantics. Routers that don't use the topology cache shouldn't pay the deserialisation cost.
+* **Shared node address map** — broker address resolution is per-router-level (`ConcurrentHashMap`), not per-connection. Required because the shared topology cache means a leader virtual node ID cached from one connection's METADATA must be resolvable to a broker address on another connection.
+* **`topicName(Uuid)` for synchronous topic ID resolution** allows routers to resolve topic IDs to names without relying on wire-object enrichment. This is necessary for Kafka APIs (such as `SHARE_FETCH`) that have only a topic ID field. The runtime guarantees the cache is warm before `onRequest()` is called. `TopologyService` also offers `topicNames(Set<Uuid>)` as an async batched alternative.
 * **`routeNames()` in `RouterFactoryContext`** allows router factories to validate at initialization time that route names referenced in their plugin configuration actually exist, providing early feedback on configuration errors.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
