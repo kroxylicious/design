@@ -337,36 +337,51 @@ Routers that never call `topologyService()` pay no cost — no cache is created,
 
 ```java
 interface TopologyService {
+    // Discovery (async, may send requests, return self-contained results)
+    CompletionStage<PartitionLeaders> leaders(Map<String, Set<String>> topicsByRoute);
+    CompletionStage<Coordinators> coordinators(String route, byte keyType, Set<String> keys);
     CompletionStage<Map<Uuid, String>> topicNames(Set<Uuid> topicIds);
 
-    Optional<VirtualNode> leaderOf(String topicName, int partitionIndex);
-    CompletionStage<Void> ensureLeadersCached(Map<String, Set<String>> topicsByRoute);
-
-    Optional<VirtualNode> coordinatorOf(String route, byte keyType, String key);
-    CompletionStage<VirtualNode> discoverCoordinator(String route, byte keyType, String key);
-
-    Optional<PartitionInfo> partitionInfoFor(String topicName, int partitionIndex);
+    // Supplementary lookups (sync, best-effort from cache)
+    Optional<PartitionInfo> partitionInfo(String topicName, int partitionIndex);
     Optional<BrokerInfo> brokerInfo(VirtualNode node);
 
+    // Invalidation
     void invalidateRoute(String route);
+}
+
+interface PartitionLeaders {
+    Optional<VirtualNode> leaderOf(String topicName, int partitionIndex);
+}
+
+interface Coordinators {
+    Optional<VirtualNode> coordinatorFor(String key);
 }
 ```
 
 The service provides three categories of methods:
 
-**Synchronous reads** — `leaderOf()`, `coordinatorOf()`, `partitionInfoFor()`, `brokerInfo()` — query the cache and return immediately.
-If the data is not cached, they return empty.
-Callers should warm the cache first (via `ensureLeadersCached()`, `discoverCoordinator()`, or by sending METADATA directly).
-
-**Asynchronous operations** — `ensureLeadersCached()`, `discoverCoordinator()`, `topicNames()` — may send requests internally to warm the cache.
-`ensureLeadersCached()` batches all uncached topics into one METADATA request per route.
-`discoverCoordinator()` sends METADATA (if needed) then FIND_COORDINATOR.
-`topicNames()` resolves topic IDs to names, batching cache misses into a single METADATA request.
+**Discovery** — `leaders()`, `coordinators()`, `topicNames()` — are async and return self-contained result objects.
+They may send requests internally (METADATA for leaders and topic names, FIND_COORDINATOR for coordinators).
+The results are valid immediately upon completion and do not require further cache queries.
+`leaders()` batches all uncached topics into one METADATA request per route and returns a `PartitionLeaders` snapshot.
+`coordinators()` sends METADATA (if needed) then FIND_COORDINATOR and returns a `Coordinators` snapshot; it supports batched lookup matching the FIND_COORDINATOR v4+ protocol.
+`topicNames()` resolves topic IDs to names, batching cache misses.
 These methods use a `RequestSender` bound per-connection by the runtime (see _Runtime_ below).
+
+**Supplementary lookups** — `partitionInfo()`, `brokerInfo()` — query the cache synchronously and return immediately.
+These are for use cases like follower-fetch / AZ-aware routing where the router needs replica or rack information beyond what `PartitionLeaders` provides.
+If they return empty, the router can fall back to the leader from `PartitionLeaders`.
 
 **Invalidation** — `invalidateRoute(route)` performs coarse invalidation: clears all partition info (leaders, replicas, ISR), coordinators, and broker info for a route.
 Topic ID→name mappings are _not_ cleared (they are stable within a cluster — a topic ID always maps to the same name).
 Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request.
+
+**Why discovery methods return result objects, not void.**
+An earlier design had `ensureLeadersCached()` returning `CompletionStage<Void>` (warming the cache as a side effect) and separate synchronous `leaderOf()`/`coordinatorOf()` methods for querying the cache.
+This was rejected because the synchronous methods are unsafe: the cache is shared across connections and can be invalidated at any time by another connection calling `invalidateRoute()`.
+The only moment a leader is guaranteed to be in the cache is immediately after the discovery future completes — and even then, another thread could invalidate between completion and the synchronous call.
+Returning a self-contained `PartitionLeaders` snapshot eliminates this race: the router uses the snapshot directly, not the cache.
 
 **Cache population model.**
 The cache is populated as a _side effect_ of METADATA responses flowing through the routing pipeline.
@@ -397,6 +412,8 @@ Different error codes have different semantics (`NOT_LEADER_OR_FOLLOWER` vs `NOT
 Routers that don't use the topology cache shouldn't pay the deserialization cost.
 
 **Supporting types:**
+* `PartitionLeaders` — snapshot of partition leader assignments, returned by `leaders()`. Has `leaderOf(topicName, partitionIndex)`.
+* `Coordinators` — snapshot of coordinator assignments, returned by `coordinators()`. Has `coordinatorFor(key)`. The key type is implicit (specified in the `coordinators()` call).
 * `PartitionInfo(VirtualNode leader, List<VirtualNode> replicas, List<VirtualNode> isr)` — full partition topology for follower-fetch / AZ-aware routing.
 * `BrokerInfo(String host, int port, @Nullable String rack)` — broker metadata including rack assignment.
 
@@ -753,7 +770,7 @@ This cardinality is comparable to the existing per-filter metrics and should not
 
 ## Affected/not affected projects
 
-* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`, `VirtualNode`, `TopologyService`, `PartitionInfo`, `BrokerInfo`.
+* `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`, `VirtualNode`, `TopologyService`, `PartitionLeaders`, `Coordinators`, `PartitionInfo`, `BrokerInfo`.
 * `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping (`NodeIdMapping`, `BijectiveNodeIdMapping`, `IdentityNodeIdMapping`, `VirtualNodeImpl`), topology caching (`TopologyCache`, `TopologyServiceImpl`), response sequencing, metrics.
 * `kroxylicious-bom` — version management for any new modules.
 * Not affected: existing filters, KMS, authoriser API. The Kubernetes operator will need a separate update to support router configuration in CRDs.
@@ -797,7 +814,8 @@ This section summarises the key design choices made in this proposal, for ease o
 * **Builder pattern for response construction** follows the same fluent interface pattern as `FilterResult`, where outcomes are constructed via `RouterContext` builder methods rather than by directly instantiating result types. This allows the API to evolve (e.g. adding new builder stages) without breaking existing implementations.
 * **All requests addressed by `VirtualNode`.** Routers must explicitly obtain a `VirtualNode` (via `virtualNode()`, `anyNode(route)`, `nodeForId(int)`, or from `TopologyService`) before sending a request. This forces router authors to think about broker targeting, avoiding a class of bugs where a broker-specific API is mistakenly sent to an arbitrary broker.
 * **`TopologyService` is opt-in** via `RouterFactoryContext.topologyService()`. The runtime creates the underlying cache lazily on first call. Simple routers (subject-based, client-ID-based) that never call it pay no cost — no cache, no topology-related processing. This avoids a one-size-fits-all design where all routers pay for topology caching.
-* **Side-effect cache population** — the topology cache is populated from METADATA responses in `RoutingDecisionHandler.write()`, after node ID translation, before the router's `CompletionStage` completes. This is simpler and more automatic than giving `TopologyService` full request-sending capability for all cache operations.
+* **Side-effect cache population** — the topology cache is populated from METADATA and FIND_COORDINATOR responses in `RoutingDecisionHandler.write()`, after node ID translation, before the router's `CompletionStage` completes. Discovery methods (`leaders()`, `coordinators()`) return self-contained snapshot objects (`PartitionLeaders`, `Coordinators`) that read from the now-warm cache. The snapshots are safe to use across async callback boundaries.
+* **Discovery methods return snapshots, not void** — an earlier design had `ensureLeadersCached()` returning `CompletionStage<Void>` with separate synchronous `leaderOf()`/`coordinatorOf()` methods. This was rejected because the synchronous methods are unsafe: the shared cache can be invalidated between the discovery future completing and the synchronous query. Returning a self-contained snapshot eliminates this race. It also makes the three discovery methods symmetric: `leaders()`, `coordinators()`, `topicNames()` all return self-contained results.
 * **Coarse invalidation** via `invalidateRoute(route)` rather than fine-grained `invalidateLeader()`, `invalidateCoordinator()`, `invalidateNode()`. A single method clears partition info, coordinators, and broker info for a route (but not topic ID→name mappings, which are stable within a cluster). Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request. This avoids an ever-growing set of invalidation methods as more cached entity types are added.
 * **Router-driven invalidation** rather than runtime-driven. The runtime would need to deserialise an open-ended and growing set of response types to scan for staleness error codes. Different error codes have different semantics. Routers that don't use the topology cache shouldn't pay the deserialisation cost.
 * **Shared node address map** — broker address resolution is per-router-level (`ConcurrentHashMap`), not per-connection. Required because the shared topology cache means a leader virtual node ID cached from one connection's METADATA must be resolvable to a broker address on another connection.
