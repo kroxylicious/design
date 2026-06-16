@@ -154,6 +154,7 @@ Implementations should release any per-connection resources (session caches, etc
 #### `RouterFactory`
 
 `RouterFactory` manages the lifecycle of `Router` instances, analogous to `FilterFactory` for filters.
+Like `FilterFactory`, each instance is scoped to a single virtual cluster.
 
 ```java
 interface RouterFactory<C, I> {
