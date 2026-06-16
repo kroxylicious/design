@@ -395,6 +395,19 @@ The cache is shared per router level (not per connection), backed by `Concurrent
 All connections through the same router level share the same topology view.
 This is efficient (no per-connection duplication) and necessary for correctness: a leader discovered by connection A must be usable by connection B (see _Shared node address map_ in the Runtime section).
 
+**Authorization and cache scope.**
+The cache is not scoped by authenticated subject.
+When Kafka brokers filter METADATA responses based on ACLs, different connections may receive different subsets of topics.
+Because the cache is shared, it converges toward the _union_ of all connections' views: each METADATA response adds or updates entries for topics present in the response, but does not remove entries for topics absent from the response.
+
+This is safe because the cache is a _routing optimization_, not an access-control mechanism:
+* The cache stores _where_ to send requests (partition leaders, coordinator nodes, broker addresses), not _whether_ a client is authorized.
+* Backend brokers enforce ACLs on every request. A client that resolves a leader from the cache but lacks permission to produce or fetch will receive an authorization error from the broker, exactly as it would without the proxy.
+* Cache misses trigger discovery requests on the current connection's `RequestSender`, which carries that connection's authentication context. A low-privilege connection's filtered METADATA response adds a subset of entries without corrupting entries populated by other connections.
+
+Router authors must not use the topology cache for authorization decisions.
+Routers should use the cache only for routing (leader selection, coordinator discovery, broker address resolution) and rely on backend broker ACL enforcement for access control.
+
 **Invalidation responsibility.**
 Staleness invalidation is the _router's_ responsibility, not the runtime's.
 The router calls `invalidateRoute(route)` when it observes staleness indicators (e.g. `NOT_LEADER_OR_FOLLOWER`, `NOT_COORDINATOR`) in responses.
