@@ -256,7 +256,7 @@ For shared (many-to-one) mappings — where a single virtual node may serve brok
 `sessionId()` returns a string that uniquely identifies the connection with the Kafka client. It will have the same value for all invocations of `onRequest()` which happen for that client connection, both for the same router over time, and different routers in a topology.
 `authenticatedSubject()` returns the client's `Subject` established by mTLS or SASL processing on the VC filter chain (e.g. a SASL termination filter).
 If no authentication has occurred, the subject will be anonymous.
-Correct placement of SASL plugins in the topology is the operator's responsibility;
+Correct placement of SASL plugins in the topology is the administrator's responsibility;
 a future proposal may add runtime validation of SASL plugin placement.
 
 **Response builder methods** — `respondWith()`, `respondWithError()`, and `respondWithoutReply()` — follow a fluent builder pattern consistent with the `Filter` API.
@@ -319,7 +319,7 @@ Routers never need to manage correlation IDs themselves.
 Having a dedicated builder method rather than a nullable response makes the fire-and-forget case explicit.
 The runtime can log a warning if a router uses `respondWith()` for a request that has no response, or `respondWithoutReply()` for a request that expects one.
 
-**Error handling.** If the `CompletionStage<RouterResponse>` completes exceptionally, the runtime treats this as an unrecoverable error and closes the client connection.
+**Error handling.** If the `CompletionStage<RouterResponse>` completes exceptionally, or if the implementation throws an unchecked exception, the runtime treats this as an unrecoverable error and closes the client connection.
 Routers should generally handle errors within the terms of the Kafka protocol, using `respondWithError()` to generate error responses with appropriate Kafka error codes.
 Throwing an exception or returning an exceptionally-completed stage should be avoided where possible.
 
