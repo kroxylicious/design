@@ -96,7 +96,7 @@ The runtime transparently translates between `VirtualNode` and real node IDs at 
 The integer-based port-per-broker networking model encodes both route and target broker into a single `int` via a bijective formula.
 An alternative networking model — where proxy instances act as brokers with their own identities and shard-based ownership — needs richer routing information that cannot be encoded in a single integer.
 `VirtualNode` hides this difference: the same router code works with either networking model.
-The runtime implementation (`VirtualNodeImpl`) wraps the encoded integer for the current model; a future implementation could carry proxy instance identity, shard keys, or other routing metadata.
+The runtime's internal class `VirtualNodeImpl` wraps the encoded integer for the current model; a future implementation could carry proxy instance identity, shard keys, or other routing metadata.
 
 **`nodeForId(int)` — the wire-protocol bridge.**
 Kafka protocol messages (METADATA responses, FIND_COORDINATOR responses, etc.) carry node IDs as integers.
@@ -378,13 +378,13 @@ Returning a self-contained `PartitionLeaders` snapshot eliminates this race: the
 
 **Cache population model.**
 The cache is populated as a _side effect_ of METADATA responses flowing through the routing pipeline.
-When any request sent via `RouterContext.sendRequest()` produces a METADATA response, the runtime intercepts the response in `RoutingDecisionHandler.write()` (after node ID translation) and updates the topology cache _before_ completing the router's `CompletionStage`.
+When any request sent via `RouterContext.sendRequest()` produces a METADATA response, the runtime intercepts the response in `RoutingDecisionHandler.write()` (an internal class; after node ID translation) and updates the topology cache _before_ completing the router's `CompletionStage`.
 This means: after a METADATA request's future completes, the cache is guaranteed to reflect that response.
 Routers that need to warm the cache for uncached topics send METADATA requests themselves (or via `ensureLeadersCached()`), and the cache is populated as a side effect of the response flow.
 
 Coordinator caching uses the same side-effect model, with one twist: the FIND_COORDINATOR response lacks `keyType`, and pre-v4 responses lack the `key` field entirely.
-To solve this, `PendingResponse` carries a `CoordinatorRequestContext(keyType, key)` extracted from the FIND_COORDINATOR request.
-When the response arrives in `RoutingDecisionHandler.write()`, the runtime uses this request-side context alongside the response to populate the cache — `TopologyCache.updateFromFindCoordinator()` matches coordinator keys from the request with node IDs from the response.
+To solve this, `PendingResponse` (an internal class) carries a `CoordinatorRequestContext(keyType, key)` (also internal) extracted from the FIND_COORDINATOR request.
+When the response arrives in `RoutingDecisionHandler.write()`, the runtime uses this request-side context alongside the response to populate the cache — the internal `TopologyCache.updateFromFindCoordinator()` method matches coordinator keys from the request with node IDs from the response.
 Coordinators are keyed by `(route, keyType, key)` — not by route alone, fixing a limitation where different consumer groups on the same route could collide.
 
 Only METADATA responses populate partition and broker data.
@@ -568,7 +568,7 @@ When a router calls `sendRequest()` on a route whose target is another router, t
 The dispatch works as follows:
 
 1. The runtime creates (or retrieves from a per-connection cache) a `Router` instance for the nested router.
-2. A new `RouterContextImpl` is constructed for the nested router, with its own `NodeIdMapping`, routes, and bootstrap virtual node IDs.
+2. A new `RouterContextImpl` (the internal implementation of `RouterContext`) is constructed for the nested router, with its own `NodeIdMapping`, routes, and bootstrap virtual node IDs.
    The nested context shares the same Netty client channel, response sequencer, correlation ID allocator, and metrics as the outer context.
    Its forwarder callbacks wrap the outer forwarders to translate virtual node IDs from the nested space to the outermost space (see _Per-router scoping and nested dispatch_ above).
 3. The runtime invokes `nestedRouter.onRequest()` with the nested context.
@@ -599,8 +599,8 @@ The runtime uses a _response sequencer_ to ensure that responses are delivered t
 When a `TopologyService` has been created for a router level (via `RouterFactoryContext.topologyService()`), the runtime populates it from METADATA responses.
 In `RoutingDecisionHandler.write()`, the processing order for each backend response is:
 
-1. `MetadataAddressCacher` extracts broker addresses (before node ID translation, using the route's `NodeIdMapping` to store addresses keyed by the outermost virtual ID).
-2. `NodeIdResponseTranslator` translates all node IDs in-place from target-cluster IDs to virtual IDs.
+1. `MetadataAddressCacher` (an internal class) extracts broker addresses (before node ID translation, using the route's `NodeIdMapping` to store addresses keyed by the outermost virtual ID).
+2. `NodeIdResponseTranslator` (an internal class) translates all node IDs in-place from target-cluster IDs to virtual IDs.
 3. Topology cache update (if the cache exists for this router level):
    - For METADATA responses: `TopologyCache.updateFromMetadata()` updates partition leaders, replicas, ISR, broker info, and topicId→name mappings.
    - For FIND_COORDINATOR responses: `TopologyCache.updateFromFindCoordinator()` uses the `CoordinatorRequestContext` (keyType, key) carried by `PendingResponse` from the original request.
@@ -620,7 +620,7 @@ The shared address map is populated from two sources:
 
 #### TopologyService request sending
 
-The `TopologyServiceImpl` is shared per router level (created in `RouterChainFactory`).
+The internal `TopologyServiceImpl` is shared per router level (created in the internal `RouterChainFactory`).
 Methods that may send requests (`ensureLeadersCached`, `discoverCoordinator`, `topicNames`) use a `RequestSender` functional interface, bound per-connection via `TopologyServiceImpl.bindRequestSender()`.
 The binding happens in `RoutingDecisionHandler.dispatchDynamically()` before each `Router.onRequest()` call — the sender lambda captures the per-request `RouterContextImpl`.
 
@@ -777,7 +777,7 @@ This cardinality is comparable to the existing per-filter metrics and should not
 ## Affected/not affected projects
 
 * `kroxylicious-api` — new `io.kroxylicious.proxy.router` package containing `Router`, `RouterFactory`, `RouterFactoryContext`, `RouterContext`, `RouterResponse`, `CloseOrTerminalStage`, `TerminalStage`, `CloseStage`; new `io.kroxylicious.proxy.topology` package containing `VirtualNode`, `TopologyService`, `PartitionLeaders`, `Coordinators`, `PartitionInfo`, `BrokerInfo`.
-* `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping (`NodeIdMapping`, `BijectiveNodeIdMapping`, `IdentityNodeIdMapping`, `VirtualNodeImpl`), topology caching (`TopologyCache`, `TopologyServiceImpl`), response sequencing, metrics.
+* `kroxylicious-runtime` — routing engine, configuration model (`RouterDefinition`, `RouteDefinition`, `TargetClusterDefinition`), graph validation, node ID mapping (internal classes: `NodeIdMapping`, `BijectiveNodeIdMapping`, `IdentityNodeIdMapping`, `VirtualNodeImpl`), topology caching (internal classes: `TopologyCache`, `TopologyServiceImpl`), response sequencing, metrics.
 * `kroxylicious-bom` — version management for any new modules.
 * Not affected: existing filters, KMS, authoriser API. The Kubernetes operator will need a separate update to support router configuration in CRDs.
 
@@ -826,7 +826,7 @@ This section summarises the key design choices made in this proposal, for ease o
 * **Router-driven invalidation** rather than runtime-driven. The runtime would need to deserialise an open-ended and growing set of response types to scan for staleness error codes. Different error codes have different semantics. Routers that don't use the topology cache shouldn't pay the deserialisation cost.
 * **Shared node address map** — broker address resolution is per-router-level (`ConcurrentHashMap`), not per-connection. Required because the shared topology cache means a leader virtual node ID cached from one connection's METADATA must be resolvable to a broker address on another connection.
 * **Topic ID resolution via `TopologyService.topicNames(Set<Uuid>)`** is async and batched, consistent with `leaders()` and `coordinators()`. An earlier design had a synchronous `topicName(Uuid)` on `RouterContext`, preloaded by an internal filter before `onRequest()`. This was removed because it silently swallowed resolution errors (returning null for both "not yet resolved" and "topic deleted") and was inconsistent with the async discovery pattern. Routers that need topic names collect IDs from the request, call `topicNames()`, and pass the resolved map to decomposers.
-* **Routes must target distinct clusters by default.** The runtime rejects configurations where two routes in the same router resolve (directly or transitively) to the same cluster, because most routers assume each route is a distinct destination. Router factories that handle shared cluster targets (e.g. aliasing the same cluster under different prefixes) call `allowSharedClusterTargets()` during `initialize()` to suppress the check. The check runs in `RouterChainFactory` after factory initialization, not in `RouterGraphValidator`, because it depends on the factory's runtime declaration.
+* **Routes must target distinct clusters by default.** The runtime rejects configurations where two routes in the same router resolve (directly or transitively) to the same cluster, because most routers assume each route is a distinct destination. Router factories that handle shared cluster targets (e.g. aliasing the same cluster under different prefixes) call `allowSharedClusterTargets()` during `initialize()` to suppress the check. The check runs in the internal `RouterChainFactory` after factory initialization, not in the internal `RouterGraphValidator`, because it depends on the factory's runtime declaration.
 * **`routeNames()` in `RouterFactoryContext`** allows router factories to validate at initialization time that route names referenced in their plugin configuration actually exist, providing early feedback on configuration errors.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
