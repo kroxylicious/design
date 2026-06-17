@@ -342,7 +342,7 @@ interface TopologyService {
     // Discovery (async, may send requests, return self-contained results)
     CompletionStage<PartitionLeaders> leaders(Map<String, Set<String>> topicsByRoute);
     CompletionStage<Coordinators> coordinators(String route, byte keyType, Set<String> keys);
-    CompletionStage<Map<Uuid, String>> topicNames(Set<Uuid> topicIds);
+    CompletionStage<Map<Uuid, String>> topicNames(String route, Set<Uuid> topicIds);
 
     // Supplementary lookups (sync, best-effort from cache)
     Optional<PartitionInfo> partitionInfo(String topicName, int partitionIndex);
@@ -368,15 +368,16 @@ They may send requests internally (METADATA for leaders and topic names, FIND_CO
 The results are valid immediately upon completion and do not require further cache queries.
 `leaders()` batches all uncached topics into one METADATA request per route and returns a `PartitionLeaders` snapshot.
 `coordinators()` sends METADATA (if needed) then FIND_COORDINATOR and returns a `Coordinators` snapshot; it supports batched lookup matching the FIND_COORDINATOR v4+ protocol.
-`topicNames()` resolves topic IDs to names, batching cache misses.
+`topicNames()` resolves topic IDs to names for a given route, batching cache misses.
+The route parameter is required because per-route filter chains can transform topic names differently — the same cluster-level topic ID can map to different router-visible names on different routes.
 These methods use a `RequestSender` bound per-connection by the runtime (see _Runtime_ below).
 
 **Supplementary lookups** — `partitionInfo()`, `brokerInfo()` — query the cache synchronously and return immediately.
 These are for use cases like follower-fetch / AZ-aware routing where the router needs replica or rack information beyond what `PartitionLeaders` provides.
 If they return empty, the router can fall back to the leader from `PartitionLeaders`.
 
-**Invalidation** — `invalidateRoute(route)` performs coarse invalidation: clears all partition info (leaders, replicas, ISR), coordinators, and broker info for a route.
-Topic ID→name mappings are _not_ cleared (they are stable within a cluster — a topic ID always maps to the same name).
+**Invalidation** — `invalidateRoute(route)` performs coarse invalidation: clears all partition info (leaders, replicas, ISR), coordinators, broker info, and topic ID→name mappings for a route.
+Topic ID→name mappings are route-scoped because per-route filter chains can present different names for the same underlying cluster topic.
 Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request.
 
 **Why discovery methods return result objects, not void.**
@@ -834,10 +835,10 @@ This section summarises the key design choices made in this proposal, for ease o
 * **`TopologyService` is opt-in** via `RouterFactoryContext.topologyService()`. The runtime creates the underlying cache lazily on first call. Simple routers (subject-based, client-ID-based) that never call it pay no cost — no cache, no topology-related processing. This avoids a one-size-fits-all design where all routers pay for topology caching.
 * **Side-effect cache population** — the topology cache is populated from METADATA and FIND_COORDINATOR responses in `RoutingDecisionHandler.write()`, after node ID translation, before the router's `CompletionStage` completes. Discovery methods (`leaders()`, `coordinators()`) return self-contained snapshot objects (`PartitionLeaders`, `Coordinators`) that read from the now-warm cache. The snapshots are safe to use across async callback boundaries.
 * **Discovery methods return snapshots, not void** — an earlier design had `ensureLeadersCached()` returning `CompletionStage<Void>` with separate synchronous `leaderOf()`/`coordinatorOf()` methods. This was rejected because the synchronous methods are unsafe: the shared cache can be invalidated between the discovery future completing and the synchronous query. Returning a self-contained snapshot eliminates this race. It also makes the three discovery methods symmetric: `leaders()`, `coordinators()`, `topicNames()` all return self-contained results.
-* **Coarse invalidation** via `invalidateRoute(route)` rather than fine-grained `invalidateLeader()`, `invalidateCoordinator()`, `invalidateNode()`. A single method clears partition info, coordinators, and broker info for a route (but not topic ID→name mappings, which are stable within a cluster). Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request. This avoids an ever-growing set of invalidation methods as more cached entity types are added.
+* **Coarse invalidation** via `invalidateRoute(route)` rather than fine-grained `invalidateLeader()`, `invalidateCoordinator()`, `invalidateNode()`. A single method clears partition info, coordinators, broker info, and topic ID→name mappings for a route. Over-invalidation is acceptable because the cache is repopulated cheaply from the client's next METADATA request. This avoids an ever-growing set of invalidation methods as more cached entity types are added.
 * **Router-driven invalidation** rather than runtime-driven. The runtime would need to deserialise an open-ended and growing set of response types to scan for staleness error codes. Different error codes have different semantics. Routers that don't use the topology cache shouldn't pay the deserialisation cost.
 * **Shared node address map** — broker address resolution is per-router-level (`ConcurrentHashMap`), not per-connection. Required because the shared topology cache means a leader virtual node ID cached from one connection's METADATA must be resolvable to a broker address on another connection.
-* **Topic ID resolution via `TopologyService.topicNames(Set<Uuid>)`** is async and batched, consistent with `leaders()` and `coordinators()`. An earlier design had a synchronous `topicName(Uuid)` on `RouterContext`, preloaded by an internal filter before `onRequest()`. This was removed because it silently swallowed resolution errors (returning null for both "not yet resolved" and "topic deleted") and was inconsistent with the async discovery pattern. Routers that need topic names collect IDs from the request, call `topicNames()`, and pass the resolved map to decomposers.
+* **Topic ID resolution via `TopologyService.topicNames(String route, Set<Uuid>)`** is async, batched, and route-scoped, consistent with `leaders()` and `coordinators()`. An earlier design had a synchronous `topicName(Uuid)` on `RouterContext`, preloaded by an internal filter before `onRequest()`. This was removed because it silently swallowed resolution errors (returning null for both "not yet resolved" and "topic deleted") and was inconsistent with the async discovery pattern. Routers that need topic names collect IDs from the request, call `topicNames()`, and pass the resolved map to decomposers. The route parameter is required because per-route filter chains can transform topic names differently: the same cluster-level topic ID can map to different router-visible names on different routes. When `allowSharedClusterTargets()` is in effect, omitting the route would cause the cache to return whichever name was written last, silently corrupting routing decisions.
 * **Routes must target distinct clusters by default.** The runtime rejects configurations where two routes in the same router resolve (directly or transitively) to the same cluster, because most routers assume each route is a distinct destination. Router factories that handle shared cluster targets (e.g. aliasing the same cluster under different prefixes) call `allowSharedClusterTargets()` during `initialize()` to suppress the check. The check runs in the internal `RouterChainFactory` after factory initialization, not in the internal `RouterGraphValidator`, because it depends on the factory's runtime declaration.
 * **`routeNames()` in `RouterFactoryContext`** allows router factories to validate at initialization time that route names referenced in their plugin configuration actually exist, providing early feedback on configuration errors.
 * **`target` as a discriminated union** provides a uniform way to express "what does this connect to" across both virtual clusters and routes, with the type (`cluster` or `router`) made explicit inside the object.
