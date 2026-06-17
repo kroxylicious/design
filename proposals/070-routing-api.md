@@ -672,6 +672,11 @@ Likewise, adding or removing proxy instances has no effect on the mapping.
 Because the route's `id` is explicit rather than derived from position, reordering routes in the configuration does not change the mapping.
 This stability is important because Kafka clients cache broker metadata and will use previously-seen node IDs in subsequent requests.
 
+However, _adding or removing_ a route changes `S`, which shifts every virtual node ID for every existing route (for any `t > 0`).
+This is an accepted consequence of the formula: virtual cluster configuration changes already drain all client connections before applying the new configuration, so clients reconnect and receive fresh metadata.
+All proxy instances presenting the same virtual cluster must be reconfigured together (i.e. the configuration change must be applied to all instances before any drained clients reconnect), so that clients see a consistent set of virtual node IDs.
+A future formula that avoids the `S`-dependency (e.g. a fixed block size per route) could enable more surgical configuration changes, but is not required for the current dedicated mapping.
+
 For single-route configurations, an identity mapping (a special case of dedicated mapping) is used: the virtual ID equals the target ID, with zero overhead.
 
 ##### Per-router scoping and nested dispatch
@@ -717,6 +722,8 @@ If roles span routes, it behaves like a shared mapping.
 
 All proxy instances presenting the same virtual cluster to clients must use the same `NodeIdMapping`.
 Changing the mapping strategy (e.g. from dedicated to shared) is expected to be a disruptive operation — not a zero-downtime change — because connected clients will hold stale virtual node IDs from the previous mapping.
+Similarly, adding or removing routes changes `S` in the dedicated mapping formula, which invalidates existing virtual node IDs.
+This requires draining all client connections and reconfiguring all proxy instances together before clients reconnect.
 
 `NodeIdMapping` is a `sealed` interface — the runtime controls which implementations exist.
 `Router` authors never implement or interact with this interface directly.
