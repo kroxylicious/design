@@ -254,10 +254,18 @@ For shared (many-to-one) mappings — where a single virtual node may serve brok
 
 **`sessionId()`** and **`authenticatedSubject()`** provide observability and identity context.
 `sessionId()` returns a string that uniquely identifies the connection with the Kafka client. It will have the same value for all invocations of `onRequest()` which happen for that client connection, both for the same router over time, and different routers in a topology.
-`authenticatedSubject()` returns the client's `Subject` established by mTLS or SASL processing on the VC filter chain (e.g. a SASL termination filter).
+`authenticatedSubject()` returns the client's `Subject` established by mTLS or SASL processing on the VC filter chain (e.g. a `SaslTerminator` or `SaslInspector` filter).
 If no authentication has occurred, the subject will be anonymous.
-Correct placement of SASL plugins in the topology is the administrator's responsibility;
-a future proposal may add runtime validation of SASL plugin placement.
+Note that `SaslInitiator` filters on per-route filter chains authenticate the _proxy_ to the _upstream cluster_ — they do not affect the value returned by `authenticatedSubject()`.
+
+To ensure composability and avoid pathological configurations, SASL plugins should follow these placement rules:
+
+* `SaslTerminator` and `SaslInspector` should only appear on the VC filter chain (not on per-route filter chains).
+* There should be at most one `SaslTerminator` or `SaslInspector` per VC.
+* `SaslInitiator` should only appear on routes whose target is a cluster (not a router).
+* There should be at most one `SaslInitiator` per such route.
+
+Enforcement of these rules is currently the administrator's responsibility; a future proposal may add runtime validation (see the _plugin constraint_ concept sketched in [this gist](https://gist.github.com/tombentley/31971d5fba024cc32a6769bd0d799b52)).
 
 **Response builder methods** — `respondWith()`, `respondWithError()`, and `respondWithoutReply()` — follow a fluent builder pattern consistent with the `Filter` API.
 Rather than constructing `RouterResult` subtypes directly, routers use the builder to construct responses:
@@ -836,6 +844,6 @@ This section summarises the key design choices made in this proposal, for ease o
 * **Routes are scoped to their parent router**, not top-level entities. Route names must be unique within the containing router. This avoids a fourth top-level definition list and reflects the fact that a route's meaning depends on its router.
 * **Explicit route `id`** decouples the virtual node ID mapping from route ordering. The `id` is an integer in `[0, S)` used in the formula `V = id + S × t`. Making it explicit means reordering routes in the YAML does not change the mapping, avoiding accidental virtual node ID shifts that would invalidate connected clients' cached metadata.
 * **Routes generalise filter chains.** A route may carry its own filter list in addition to a target, allowing different filter chains for different paths through the graph.
-* **Route-level SASL** (e.g. SASL initiator for upstream authentication) is achieved via per-route filters rather than a dedicated route-level property.
+* **Route-level SASL** (e.g. SASL initiator for upstream authentication) is achieved via per-route filters rather than a dedicated route-level property. `SaslInitiator` filters on per-route chains authenticate the proxy to the upstream cluster; they do not affect `authenticatedSubject()`. Placement rules for SASL plugins are described in the `RouterContext` section above.
 * **Definition names** are global within their type (filters, routers, clusters each have their own namespace) but not across types.
 * **Version capping is the router's responsibility**, not the runtime's. The runtime provides the baseline intersection of proxy and backend version ranges; routers may further constrain as needed.
