@@ -392,9 +392,10 @@ Only METADATA responses populate partition and broker data.
 DESCRIBE_CLUSTER is intentionally excluded: it contains brokers and racks but no topic/partition/leader information, and mixing data from different response types risks inconsistency.
 
 **Cache scope.**
-The cache is shared per router level (not per connection), backed by `ConcurrentHashMap`.
+The `TopologyCache` is shared per router level (not per connection), backed by `ConcurrentHashMap`.
 All connections through the same router level share the same topology view.
 This is efficient (no per-connection duplication) and necessary for correctness: a leader discovered by connection A must be usable by connection B (see _Shared node address map_ in the Runtime section).
+Each connection gets its own `TopologyServiceImpl` wrapping the shared cache; this per-connection instance holds the `RequestSender` used for discovery requests (see _TopologyService request sending_ in the Runtime section).
 
 **Authorization and cache scope.**
 The cache is not scoped by authenticated subject.
@@ -621,12 +622,14 @@ The shared address map is populated from two sources:
 
 #### TopologyService request sending
 
-The internal `TopologyServiceImpl` is shared per router level (created in the internal `RouterChainFactory`).
-Methods that may send requests (`ensureLeadersCached`, `discoverCoordinator`, `topicNames`) use a `RequestSender` functional interface, bound per-connection via `TopologyServiceImpl.bindRequestSender()`.
+The `TopologyCache` is shared per router level (created in the internal `RouterChainFactory`), but each connection gets its own `TopologyServiceImpl` instance wrapping the shared cache.
+`TopologyServiceImpl` is created in `RouterChainFactory.createRouter()` alongside the `Router` instance and passed to both the `Router` (via `RouterFactoryContext.topologyService()`) and the `RoutingDecisionHandler`.
+
+Methods that may send requests (`leaders`, `coordinators`) use a `RequestSender` functional interface, bound per-connection via `TopologyServiceImpl.bindRequestSender()`.
 The binding happens in `RoutingDecisionHandler.dispatchDynamically()` before each `Router.onRequest()` call — the sender lambda captures the per-request `RouterContextImpl`.
 
-The `RequestSender` field is volatile.
-This is safe because all calls to `TopologyService` methods happen on the event loop thread during `onRequest` processing, and `bindRequestSender` is called on the same thread before `onRequest`.
+Because each `TopologyServiceImpl` is per-connection, the `RequestSender` field is a plain (non-volatile) field — all access happens on the single event loop thread assigned to the connection's channel.
+No synchronisation is needed.
 
 #### Node ID mapping implementation
 
