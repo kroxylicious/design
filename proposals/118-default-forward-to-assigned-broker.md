@@ -1,4 +1,4 @@
-# 000 - Default forwarding to the assigned upstream broker
+# 118 - Default forwarding to the assigned upstream broker
 
 Revise the `Router` plugin API (proposal [070](./070-routing-api.md)) so that a request on a
 broker-bound connection is, by default, forwarded to the broker that endpoint already represents,
@@ -45,7 +45,7 @@ Three problems with `staticRoutes()`, drawn from
 ## Proposal
 
 Invert the model: the runtime forwards a bound connection's traffic to its assigned broker by
-default; a router declares only what it must **intercept**, and how much of each message to decode.
+default; a router declares only what it must **intercept**.
 
 ### Route binding is established when the connection is created
 
@@ -87,37 +87,25 @@ interface Router {
         return ctx.virtualNode().isEmpty();
     }
 
-    /**
-     * Whether onRequest() needs the decoded request body. Default false: the request is handed to
-     * onRequest as an opaque frame unless the router asks for it. The header is always available.
-     * There is no response counterpart — see "Decode depth" below.
-     */
-    default boolean shouldDecodeRequest(ApiKeys apiKey, RouterContext ctx) { return false; }
-
     /** Called only when intercepts() is true. The router chooses the destination(s). */
-    CompletionStage<RouterResponse> onRequest(ApiKeys apiKey, RequestFrame frame, RouterContext ctx);
+    CompletionStage<RouterResponse> onRequest(short apiVersion, ApiKeys apiKey,
+            RequestHeaderData header, ApiMessage request, RouterContext ctx);
 
     default void close() {}
 }
 ```
 
-Two axes, deliberately separate:
+`onRequest` keeps 070's signature unchanged: an intercepted request is decoded and handed to the
+router, and responses fetched via `sendRequest` return decoded (`CompletionStage<ApiMessage>`), as
+070 specifies. This proposal changes only the gate.
 
-* **Destination** is decided by `intercepts()` (and, when intercepted, by `onRequest()` calling
-  `ctx.sendRequest(node, ...)`). When not intercepted, the destination is the bound broker.
-* **Decode depth** is "pay only for what you touch," defaulting to nothing:
-  * **Request** — declarative via `shouldDecodeRequest` (default `false`). `onRequest` receives a
-    `RequestFrame` whose body is decoded iff the router declared it. It must be declarative because
-    the request is decoded during the upstream filter pass *before* `onRequest` runs, so it composes
-    with the filter `DecodePredicate` up front.
-  * **Response** — **lazy**, no declaration. `ctx.sendRequest(...)` returns a `ResponseFrame` whose
-    `body()` decodes *on access*. A relay never calls `body()` and pays zero response-decode cost; a
-    virtualising router calls `body()` and it decodes then. This **widens** 070's `sendRequest`
-    (`CompletionStage<ApiMessage>`, always decoded) to `CompletionStage<ResponseFrame>`, and
-    `respondWith` accepts either a decoded `ApiMessage` or an opaque `ResponseFrame` for relay.
-
-There is deliberately no `shouldDecodeResponse` method and no separate `onResponse` callback: the
-lazy frame expresses "decode the response only if the router reads it" without either.
+**Deferred: decode depth on the interception path.** A router that intercepts but only needs the
+header (client-id, subject) shouldn't force a full body decode, and a relay shouldn't pay to decode
+a response it never reads. Those optimisations (a `shouldDecodeRequest` declaration, lazy
+request/response frames) are real but separable: they optimise what happens *after* interception and
+have no bearing on the default destination. They are left to a follow-on proposal so this one stays
+focused on the gate. The gate already delivers the big win by itself — non-intercepted keys are
+never decoded at all (see the `DecodePredicate` wiring below).
 
 ### Three request shapes (one `onRequest`)
 
@@ -131,7 +119,7 @@ no extra methods:
 | **fan-out** | `intercepts == true` | decompose, send to each route, recompose | `Metadata` |
 
 Pinned is the degenerate case of fan-out where the decomposition yields a single `(route, request)`
-entry; it needs no separate code path and does not imply decoding.
+entry; it needs no separate code path.
 
 ### What the runtime does
 
@@ -146,8 +134,7 @@ class RouteDispatchHandler extends ChannelDuplexHandler {
     ApiKeys apiKey = frame.apiKey();
     {
       if (router.intercepts(apiKey, routerCtx)) {
-        // request body decoded iff shouldDecodeRequest; responses from sendRequest decode lazily on access
-        dispatchToRouter(apiKey, frame, routerCtx);
+        dispatchToRouter(apiKey, frame, routerCtx);   // decoded per 070; router picks destination via sendRequest
       } else {
         routerCtx.sendRequest(routerCtx.virtualNode(), frame.header(), frame.rawBody())
               .thenAccept(r -> routerCtx.respondWith(r).build());
@@ -171,22 +158,19 @@ class RouteAwareDelegatingDecodePredicate implements DecodePredicate {
 
   @Override
   public boolean shouldDecodeRequest(ApiKeys k, short v) {
-    return filters.shouldDecodeRequest(k, v)
-        || (router.intercepts(k, routerCtx) && router.shouldDecodeRequest(k, routerCtx));
+    return filters.shouldDecodeRequest(k, v) || router.intercepts(k, routerCtx);
   }
 
   @Override
   public boolean shouldDecodeResponse(ApiKeys k, short v) {
-    return filters.shouldDecodeResponse(k, v);   // router responses decode lazily, not here
+    return filters.shouldDecodeResponse(k, v) || router.intercepts(k, routerCtx);
   }
 }
 ```
 
-The router does not contribute to the response predicate: responses it fetches via `sendRequest`
-decode lazily on access (see _Decode depth_), and responses on the pass-through path are governed by
-the route's filter chain. On a bound (data-plane) connection a router that does not override
-`intercepts` contributes **zero** decode interest, so those connections get the leanest possible
-decode profile.
+On a bound (data-plane) connection a router that does not override `intercepts` contributes **zero**
+decode interest, so those connections get the leanest possible decode profile. Reducing what an
+*intercepted* request/response must decode is the follow-on decode-depth work noted above.
 
 ### Examples
 
@@ -208,12 +192,12 @@ class ClientIdRouter implements Router {
     // on a bound connection, the client-id is already known and the route is fixed; no need to intercept.
     // dev can additional add `ApiVersionsRequestFilter` or decode ApiVersionRequest to validate clientId once in connection lifetime.
     public boolean intercepts(ApiKeys k, RouterContext ctx) { return ctx.virtualNode().isEmpty(); }
-    public boolean shouldDecodeRequest(ApiKeys k, RouterContext ctx) { return false; } // client-id is in the header
-    public CompletionStage<RouterResponse> onRequest(ApiKeys k, RequestFrame f, RouterContext ctx) {
+    public CompletionStage<RouterResponse> onRequest(short v, ApiKeys k, RequestHeaderData header,
+                                                     ApiMessage request, RouterContext ctx) {
         // ctx.clientId() — or some other way: the router is connection-local, so it can capture the
         // client-id when it intercepts the ApiVersions request and carry it on the router object.
         String route = routeFor(ctx.clientId());
-        return ctx.sendRequest(ctx.anyNode(route), f.header(), f.rawBody())
+        return ctx.sendRequest(ctx.anyNode(route), header, request)
                   .thenApply(r -> ctx.respondWith(r).build());
     }
 }
@@ -227,9 +211,10 @@ class ClientIdRouter implements Router {
 ```java
 class SubjectRouter implements Router {
     public boolean intercepts(ApiKeys k, RouterContext ctx) { return ctx.virtualNode().isEmpty(); }
-    public CompletionStage<RouterResponse> onRequest(ApiKeys k, RequestFrame f, RouterContext ctx) {
+    public CompletionStage<RouterResponse> onRequest(short v, ApiKeys k, RequestHeaderData header,
+                                                     ApiMessage request, RouterContext ctx) {
         String route = routeForSubject(ctx.authenticatedSubject());  // set by SaslTerminator earlier
-        return ctx.sendRequest(ctx.anyNode(route), f.header(), f.rawBody())
+        return ctx.sendRequest(ctx.anyNode(route), header, request)
                   .thenApply(r -> ctx.respondWith(r).build());
     }
 }
@@ -243,15 +228,15 @@ class TopicRouter implements Router {
     public boolean intercepts(ApiKeys k, RouterContext ctx) {
         return ctx.virtualNode().isEmpty() || spansClusters(k) || pinned(k); // METADATA…, FIND_COORDINATOR…
     }
-    public boolean shouldDecodeRequest(ApiKeys k, RouterContext ctx) { return needsBody(k); } // false for pinned relays
-    public CompletionStage<RouterResponse> onRequest(ApiKeys k, RequestFrame f, RouterContext ctx) {
-        Map<String, ApiMessage> sub = decomposer(k).decompose(f.body(), table, f.apiVersion()); // 1 entry (pinned) or N
+    public CompletionStage<RouterResponse> onRequest(short v, ApiKeys k, RequestHeaderData header,
+                                                     ApiMessage request, RouterContext ctx) {
+        Map<String, ApiMessage> sub = decomposer(k).decompose(request, table, v); // 1 entry (pinned) or N
         var calls = sub.entrySet().stream()
-            .map(e -> ctx.sendRequest(ctx.anyNode(e.getKey()), f.header(), e.getValue())
+            .map(e -> ctx.sendRequest(ctx.anyNode(e.getKey()), header, e.getValue())
                          .thenApply(r -> Map.entry(e.getKey(), r)))
             .toList();
         return allOf(calls).thenApply(responses ->
-            ctx.respondWith(decomposer(k).recompose(responses, f.body(), f.apiVersion())).build());
+            ctx.respondWith(decomposer(k).recompose(responses, request, v)).build());
     }
 }
 // Data-plane traffic on a broker connection passes through; only cluster-spanning / coordinator
@@ -273,12 +258,9 @@ Subject-routing connection walk-through (`cluster0`: `c0b0`,`c0b1`; `cluster1`: 
 
 ## Affected/not affected projects
 
-- **kroxylicious (runtime):** affected. `staticRoutes()` removed; `Router` gains `intercepts` and
-  `shouldDecodeRequest` (no `shouldDecodeResponse`); `onRequest` takes a `RequestFrame`; the dispatch
-  path gains the bound/unbound gate; the `DecodePredicate` is built per connection. `sendRequest` is
-  widened to return a `CompletionStage<ResponseFrame>` whose body decodes lazily on access (from
-  `CompletionStage<ApiMessage>`), with a matching `respondWith(ResponseFrame)` overload for opaque
-  relay.
+- **kroxylicious (runtime):** affected. `staticRoutes()` removed; `Router` gains `intercepts`; the
+  dispatch path gains the bound/unbound gate; the `DecodePredicate` is built per connection and
+  consults `intercepts`. `onRequest` and `sendRequest` keep their 070 signatures.
 - **Router plugin authors:** affected. The no-op default is "forward to the assigned broker," a safe
   and usually-correct starting point.
 - **Filter API and existing filter configurations:** not affected.
@@ -295,9 +277,8 @@ this revises an in-flight API. The `routingMode` metric (`static`/`dynamic`) is 
 - **Keep `staticRoutes()`** — no router can populate it usefully and a route name can't name the
   represented broker (route ≠ node).
 - **`RoutingMode` enum `{PASS_THROUGH, HEADER_ONLY, FULL_MESSAGE}`** — conflates destination with
-  decode depth; `PASS_THROUGH` has no destination on bootstrap (so it needs the bound gate anyway);
-  `HEADER_ONLY` needs a header-decoded-but-body-opaque codec tier that doesn't exist (`DecodePredicate`
-  is binary per message).
+  decode depth; `PASS_THROUGH` has no destination on bootstrap (so it needs the bound gate anyway).
+  Decode depth is deferred to a follow-on proposal in any case.
 - **`staticRoute(apiKey, ctx)` / `staticRouteForApiKey(apiKey)` returning a route** — a route is
   cluster-granular, so it can't name the specific represented broker that `sendRequest` (070) targets
   by node; loses leader affinity.
@@ -308,8 +289,10 @@ this revises an in-flight API. The `routingMode` metric (`static`/`dynamic`) is 
   job (the router may intercept to reroute, to fan out, _or_ to rewrite a response without
   rerouting). `requiresDynamicRouting` aligns with the `routingMode` metric vocabulary. The metric
   name and method name need not match.
-- **`RequestFrame`/`ResponseFrame` shape** — `RequestFrame.body()` is present only when
-  `shouldDecodeRequest` returned true; `ResponseFrame.body()` decodes lazily on first access (raw
-  bytes retained until then, with the usual `ByteBuf` lifecycle care). Confirm both expose the header
-  unconditionally. Requires widening 070's `sendRequest` to `CompletionStage<ResponseFrame>` and a
-  `respondWith(ResponseFrame)` overload.
+
+## Follow-on work (out of scope here)
+
+- **Decode depth on the interception path** — a `shouldDecodeRequest`-style declaration so a router
+  that routes on the header (client-id, subject) doesn't force a body decode, and lazy
+  request/response frames so a relay doesn't pay to decode a response it never reads. Separable from
+  the gate; deserves its own proposal.
