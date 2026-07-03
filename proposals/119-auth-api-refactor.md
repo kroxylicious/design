@@ -1,4 +1,4 @@
-# xxx - Making the Authorizer API standalone
+# 119 - Making the Authorizer API standalone
 
 The Kroxylicious authorizer API provides a general-purpose abstraction for access control decisions, deliberately designed to be agnostic of specific `Principal` and `ResourceType` implementations.
 However, the API currently depends on `kroxylicious-api`, which transitively pulls in Kafka client libraries, Jackson, and compression codecs. 
