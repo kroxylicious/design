@@ -1,4 +1,4 @@
-# 000 - Rack-aware SNI broker address patterns
+# 120 - Rack-aware SNI broker address patterns
 
 This proposal adds optional rack-aware broker address generation to the SNI node identification strategy.
 It allows an advertised broker address pattern to include broker rack metadata learned from Kafka metadata responses.
