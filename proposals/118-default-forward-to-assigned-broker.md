@@ -99,13 +99,11 @@ interface Router {
 router, and responses fetched via `sendRequest` return decoded (`CompletionStage<ApiMessage>`), as
 070 specifies. This proposal changes only the gate.
 
-**Deferred: decode depth on the interception path.** A router that intercepts but only needs the
-header (client-id, subject) shouldn't force a full body decode, and a relay shouldn't pay to decode
-a response it never reads. Those optimisations (a `shouldDecodeRequest` declaration, lazy
-request/response frames) are real but separable: they optimise what happens *after* interception and
-have no bearing on the default destination. They are left to a follow-on proposal so this one stays
-focused on the gate. The gate already delivers the big win by itself — non-intercepted keys are
-never decoded at all (see the `DecodePredicate` wiring below).
+**Deferred: request decode depth on the interception path.** A router that intercepts but only needs
+the header (client-id, subject) shouldn't force a full body decode. That optimisation is real but
+separable: it optimises what happens *after* interception and has no bearing on the default
+destination, so it is left to a follow-on proposal. The gate already delivers the big win by
+itself — non-intercepted keys are never decoded at all (see the `DecodePredicate` wiring below).
 
 ### Three request shapes (one `onRequest`)
 
@@ -286,14 +284,13 @@ is to be revisited once the SPI settles and is not fixed by this proposal.
 
 ## Open questions
 
-- **Gate naming: `intercepts` vs `requiresDynamicRouting`.** One term should be used everywhere —
-  SPI, metrics, logs, docs. The gate covers rerouting and fan-out (both routing), which favours
-  `requiresDynamicRouting` and matches the existing `routingMode` vocabulary; alternatively, keep
-  `intercepts` and align the metric vocabulary to it when the metrics are revisited.
+- **Gate naming: `intercepts` vs `requiresDynamicRouting`.** Whichever term wins should be used
+  consistently across SPI, metrics, logs, and docs.
 
 ## Follow-on work (out of scope here)
 
-- **Decode depth on the interception path** — a `shouldDecodeRequest`-style declaration so a router
-  that routes on the header (client-id, subject) doesn't force a body decode, and lazy
-  request/response frames so a relay doesn't pay to decode a response it never reads. Separable from
-  the gate; deserves its own proposal.
+- **Request decode depth on the interception path** — a `shouldDecodeRequest`-style declaration so a
+  router that routes on the header (client-id, subject) doesn't force a body decode. Separable from
+  the gate; deserves its own proposal. (Response-side laziness was considered and dropped: virtual
+  node-id translation already decodes the node-reference-bearing responses, `Fetch` included, leaving
+  too narrow a case to justify widening `sendRequest`.)
