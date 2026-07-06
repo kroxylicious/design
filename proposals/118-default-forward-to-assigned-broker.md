@@ -269,8 +269,9 @@ Subject-routing connection walk-through (`cluster0`: `c0b0`,`c0b1`; `cluster1`: 
 ## Compatibility
 
 Proposal [070](./070-routing-api.md) is not yet released, so `staticRoutes()` has no users to break;
-this revises an in-flight API. The `routingMode` metric (`static`/`dynamic`) is preserved:
-`intercepts == false` is reported as `static`, `intercepts == true` as `dynamic`.
+this revises an in-flight API. The gate maps naturally onto the `routingMode` metric
+(`intercepts == false` → `static`, `== true` → `dynamic`), but the metric categorisation
+is to be revisited once the SPI settles and is not fixed by this proposal.
 
 ## Rejected alternatives
 
@@ -285,10 +286,10 @@ this revises an in-flight API. The `routingMode` metric (`static`/`dynamic`) is 
 
 ## Open questions
 
-- **`intercepts` vs `requiresDynamicRouting` naming.** `intercepts` better describes the gate's real
-  job (the router may intercept to reroute, to fan out, _or_ to rewrite a response without
-  rerouting). `requiresDynamicRouting` aligns with the `routingMode` metric vocabulary. The metric
-  name and method name need not match.
+- **Gate naming: `intercepts` vs `requiresDynamicRouting`.** One term should be used everywhere —
+  SPI, metrics, logs, docs. The gate covers rerouting and fan-out (both routing), which favours
+  `requiresDynamicRouting` and matches the existing `routingMode` vocabulary; alternatively, keep
+  `intercepts` and align the metric vocabulary to it when the metrics are revisited.
 
 ## Follow-on work (out of scope here)
 
