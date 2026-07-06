@@ -159,16 +159,14 @@ class RouteAwareDelegatingDecodePredicate implements DecodePredicate {
     return filters.shouldDecodeRequest(k, v) || router.intercepts(k, routerCtx);
   }
 
-  @Override
-  public boolean shouldDecodeResponse(ApiKeys k, short v) {
-    return filters.shouldDecodeResponse(k, v) || router.intercepts(k, routerCtx);
-  }
+  // shouldDecodeResponse is unchanged: response decoding is governed by filters and the runtime's
+  // node-id translation (kroxylicious#4257), neither of which this proposal touches.
 }
 ```
 
 On a bound (data-plane) connection a router that does not override `intercepts` contributes **zero**
-decode interest, so those connections get the leanest possible decode profile. Reducing what an
-*intercepted* request/response must decode is the follow-on decode-depth work noted above.
+request-decode interest. Reducing what an *intercepted* request must decode is the follow-on
+decode-depth work noted above.
 
 ### Examples
 
