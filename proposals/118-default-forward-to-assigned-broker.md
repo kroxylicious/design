@@ -267,9 +267,7 @@ Subject-routing connection walk-through (`cluster0`: `c0b0`,`c0b1`; `cluster1`: 
 ## Compatibility
 
 Proposal [070](./070-routing-api.md) is not yet released, so `staticRoutes()` has no users to break;
-this revises an in-flight API. The gate maps naturally onto the `routingMode` metric
-(`intercepts == false` → `static`, `== true` → `dynamic`), but the metric categorisation
-is to be revisited once the SPI settles and is not fixed by this proposal.
+this revises an in-flight API.
 
 ## Rejected alternatives
 
