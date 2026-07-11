@@ -64,7 +64,7 @@ Instead, it should use the rack value that Kafka already exposes.
 
 ## Proposal
 
-Extend the SNI node identification strategy so `advertisedBrokerAddressPattern` may use these additional tokens:
+Extend the SNI node identification strategy so `advertisedBrokerAddressPattern` may use this additional token:
 
 ```text
 $(rackId)
@@ -139,8 +139,7 @@ Provider-specific values such as availability-zone IDs or subnet-derived placeme
 Today the existing node identification strategies perform basic pattern, token, port, and URI-style checks.
 They do not perform full DNS label validation for generated advertised broker hostnames.
 This proposal does not change that validation model.
-If an advertised address fails the existing validation checks, address generation fails.
-Otherwise, Kroxylicious treats hostname suitability as an operator responsibility, as it does for existing advertised broker address patterns.
+Kroxylicious treats hostname suitability as an operator responsibility, as it does for existing advertised broker address patterns.
 Operators should use `rackIdMappings` to translate arbitrary upstream rack values into advertised address labels that are suitable for their DNS, certificate, and load-balancer conventions.
 
 ### Usage model
@@ -182,7 +181,9 @@ For a SNI configuration using `$(rackId)`, eager endpoint creation uses `rackIdD
 Once upstream metadata has been observed, rack-aware endpoints should be updated by metadata-driven endpoint reconciliation.
 
 If a broker rack value changes, Kroxylicious should treat that as a change in the generated advertised broker address during normal endpoint reconciliation.
-The new hostname should be generated from the updated metadata, and stale endpoint bindings generated from the previous rack value should be removed according to the existing reconciliation lifecycle.
+The new hostname should be generated from the updated metadata, and reconciliation must detect this as an endpoint change even though the node ID is unchanged.
+This requires rack-aware reconciliation logic; the current node-ID membership reconciliation is not sufficient on its own.
+This may be implemented by tracking the effective generated broker address, or by treating `(nodeId, effectiveRackLabel)` as the endpoint identity for rack-aware SNI bindings.
 Existing client connections can continue using the connection they already established, but a client that tries to open a new connection using a cached stale hostname may need to refresh metadata and retry.
 
 ### Endpoint registration and reverse mapping
@@ -211,7 +212,8 @@ Embedding rack labels into broker hostnames does not provide the same routing me
 This is a scoping choice rather than a fundamental limitation.
 If future work defines a useful rack-aware lifecycle and routing model for port-based listeners, it can be considered separately.
 It does not introduce cloud-provider integrations.
-It does not require users to configure rack-aware patterns.
+It does not introduce full DNS label validation for generated advertised broker hostnames.
+It does not require existing users to configure rack-aware patterns.
 
 ## Affected/not affected projects
 
