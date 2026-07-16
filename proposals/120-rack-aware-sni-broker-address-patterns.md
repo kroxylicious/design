@@ -1,7 +1,7 @@
 # 120 - Rack-aware SNI broker address patterns
 
 This proposal adds rack-derived broker address generation to the SNI node identification strategy.
-It uses broker rack metadata learned from Kafka metadata responses, a required `rackIdDefault`, and optional `rackIdMappings` to build advertised broker addresses without changing Kafka protocol rack metadata.
+It uses Kafka broker rack metadata as lookup input, a required `defaultRackAddress`, and optional `rackAddressMappings` to build advertised broker addresses without changing Kafka protocol rack metadata.
 
 ## Current situation
 
@@ -67,24 +67,27 @@ Instead, it should use the rack value that Kafka already exposes.
 Extend the SNI node identification strategy so `advertisedBrokerAddressPattern` may use this additional token:
 
 ```text
-$(rackId)
+$(rackAddress)
 ```
 
-When Kroxylicious rewrites a metadata response, it uses the broker rack value from the metadata response for `$(rackId)`.
-If `rackIdMappings` contains the upstream rack value, Kroxylicious translates it into the configured advertised address label.
-If the upstream rack value is missing or does not have a mapping, Kroxylicious uses `rackIdDefault`.
+When Kroxylicious rewrites a metadata response, it uses the broker Kafka `rackId` from that response to resolve `$(rackAddress)`.
+If `rackAddressMappings` contains an entry whose `rackId` matches the upstream Kafka rack ID, Kroxylicious substitutes the corresponding `rackAddress` label.
+If the upstream Kafka rack ID is missing or does not have a mapping, Kroxylicious uses `defaultRackAddress`.
 
 Example configuration:
 
 ```yaml
 sniHostIdentifiesNode:
   bootstrapAddress: "cluster.example.net:9192"
-  advertisedBrokerAddressPattern: "broker-$(nodeId)-$(rackId).example.net:9192"
-  rackIdDefault: az1
-  rackIdMappings:
-    euc1-az1: az1
-    euc1-az2: az2
-    euc1-az3: az3
+  advertisedBrokerAddressPattern: "broker-$(nodeId)-$(rackAddress).example.net:9192"
+  defaultRackAddress: az1
+  rackAddressMappings:
+    - rackId: euc1-az1
+      rackAddress: az1
+    - rackId: euc1-az2
+      rackAddress: az2
+    - rackId: euc1-az3
+      rackAddress: az3
 ```
 
 If broker `0` has upstream rack value `euc1-az1`, Kroxylicious advertises:
@@ -97,22 +100,22 @@ That advertised hostname can then be backed by operator-managed DNS or load-bala
 For example, `az1` can resolve to proxy endpoints in zone `az1`, while `az2` resolves to proxy endpoints in zone `az2`.
 The exact DNS and networking implementation remains outside Kroxylicious.
 
-Using `$(rackId)` requires `rackIdDefault`.
+Using `$(rackAddress)` requires `defaultRackAddress`.
 This gives Kroxylicious a deterministic advertised address label when the upstream rack value is unavailable or unmapped.
 
 ### Protocol-level consistency
 
 This proposal does not introduce Kafka rack identity translation.
 It uses Kafka broker rack metadata only as input for advertised broker address generation.
-The value substituted for `$(rackId)` is an address label used by DNS, certificates, or load-balancer policy.
+The value substituted for `$(rackAddress)` is an address label used by DNS, certificates, or load-balancer policy.
 It is not a replacement for the broker rack identity in the Kafka protocol.
 
-When `rackIdMappings` is configured, the mapping applies only to advertised broker addresses.
+When `rackAddressMappings` is configured, it maps a Kafka `rackId` to an advertised `rackAddress` label and applies only to advertised broker addresses.
 Kroxylicious should not rewrite Kafka protocol rack fields in responses such as `MetadataResponse` or `DescribeClusterResponse`.
 It should also not rewrite client request fields that carry rack identity, such as the rack ID used by KIP-392 rack-aware fetching.
 Those protocol fields remain in the upstream cluster's rack namespace.
 
-For example, if upstream metadata says broker `0` has rack `euc1-az1`, and `rackIdMappings` maps `euc1-az1` to address label `az1`, the client may see:
+For example, if upstream metadata says broker `0` has rack `euc1-az1`, and `rackAddressMappings` maps `euc1-az1` to address label `az1`, the client may see:
 
 ```text
 advertised hostname: broker-0-az1.example.net
@@ -124,7 +127,7 @@ The hostname label controls the network path to Kroxylicious.
 The Kafka protocol rack value continues to control Kafka features that depend on rack identity.
 Because Kroxylicious does not rewrite protocol rack values, features such as KIP-392 rack-aware fetching continue to use the upstream Kafka rack values and do not require reverse mapping by the proxy.
 
-If the upstream rack value is missing or unmapped, Kroxylicious uses `rackIdDefault`.
+If the upstream rack value is missing or unmapped, Kroxylicious uses `defaultRackAddress`.
 The default is an advertised address fallback label.
 It should be used for cases where the operator prefers deterministic DNS behavior over failing address generation for unknown rack values.
 This means that an unmapped upstream rack value is not passed directly into the advertised hostname.
@@ -140,7 +143,7 @@ Today the existing node identification strategies perform basic pattern, token, 
 They do not perform full DNS label validation for generated advertised broker hostnames.
 This proposal does not change that validation model.
 Kroxylicious treats hostname suitability as an operator responsibility, as it does for existing advertised broker address patterns.
-Operators should use `rackIdMappings` to translate arbitrary upstream rack values into advertised address labels that are suitable for their DNS, certificate, and load-balancer conventions.
+Operators should use `rackAddressMappings` to translate arbitrary upstream rack values into advertised address labels that are suitable for their DNS, certificate, and load-balancer conventions.
 
 ### Usage model
 
@@ -149,8 +152,8 @@ For example, an operator might:
 
 * configure Kafka broker rack values to represent broker failure domains,
 * configure Kroxylicious pods or services in the same failure domains,
-* configure rack mappings from upstream provider-specific rack values to stable DNS labels,
-* advertise broker hostnames containing `$(rackId)`,
+* configure rack address mappings from upstream provider-specific rack values to stable DNS labels,
+* advertise broker hostnames containing `$(rackAddress)`,
 * configure DNS or load-balancer policy so each rack label resolves to the appropriate Kroxylicious endpoint.
 
 Kroxylicious remains responsible for producing consistent advertised broker hostnames and reverse-mapping those hostnames back to broker node IDs.
@@ -166,39 +169,53 @@ Other response types can contain broker endpoints without rack metadata.
 For example, `FindCoordinatorResponse` identifies the coordinator by node ID, host, and port, but does not include broker rack information.
 
 For responses that contain broker endpoints but do not include rack metadata, Kroxylicious should use a rack value previously learned from metadata for the same node ID.
-If no learned rack value is available, Kroxylicious uses `rackIdDefault`.
-Using `rackIdDefault` can cause an early control-plane response to use the default rack label before metadata has been observed, but it preserves routing correctness because SNI reverse mapping remains based on node ID.
+If no learned rack value is available, Kroxylicious uses `defaultRackAddress`.
+Using `defaultRackAddress` can cause an early control-plane response to use the default rack label before metadata has been observed, but it preserves routing correctness because SNI reverse mapping remains based on node ID.
+
+The learned broker topology is shared per virtual-cluster gateway, not per client connection.
+It contains the node ID, upstream address, and Kafka rack ID from the last successfully completed endpoint reconciliation.
+This allows a response on one client connection, such as `FindCoordinatorResponse`, to use rack information learned while serving a different client connection.
+
+Metadata responses build the desired topology and are forwarded only after their endpoint reconciliation has completed.
+The active topology is updated only after that reconciliation succeeds, so Kroxylicious does not advertise a new rack-derived hostname before the matching SNI endpoint has been registered.
+If reconciliation fails, the prior active topology remains in use.
 
 ### Lifecycle
 
-Rack-aware address generation depends on upstream metadata.
+Rack-derived address generation depends on upstream metadata.
 For metadata responses, the rack value is available in the response being rewritten.
-For other responses that contain broker endpoints, Kroxylicious can only generate a rack-aware address after it has previously learned the broker's rack from metadata.
+For other responses that contain broker endpoints, Kroxylicious can only generate a rack-derived address after it has previously learned the broker's Kafka rack ID from metadata.
 
 This has implications for SNI endpoint lifecycle.
-Configurations that eagerly create broker endpoints from configured node ID ranges cannot generate rack-aware broker endpoints before upstream metadata has been observed.
-For a SNI configuration using `$(rackId)`, eager endpoint creation uses `rackIdDefault`.
-Once upstream metadata has been observed, rack-aware endpoints should be updated by metadata-driven endpoint reconciliation.
+Before broker rack metadata is available, configurations that eagerly create broker endpoints from configured node ID ranges use `defaultRackAddress`.
+They cannot yet generate a broker-specific address derived from `rackAddressMappings`.
+Once broker metadata has been observed, metadata-driven endpoint reconciliation updates the endpoints with the effective rack-derived advertised addresses.
+
+The active broker topology is replaced only after a successful reconciliation.
+A metadata response supplies the current broker rack IDs directly; other reconciled topology responses reuse rack IDs already learned for the same node ID.
+Consequently, broker removals and node-ID reuse do not retain stale rack IDs after a successful metadata-driven reconciliation.
 
 If a broker rack value changes, Kroxylicious should treat that as a change in the generated advertised broker address during normal endpoint reconciliation.
 The new hostname should be generated from the updated metadata, and reconciliation must detect this as an endpoint change even though the node ID is unchanged.
-This requires rack-aware reconciliation logic; the current node-ID membership reconciliation is not sufficient on its own.
-This may be implemented by tracking the effective generated broker address, or by treating `(nodeId, effectiveRackLabel)` as the endpoint identity for rack-aware SNI bindings.
+This requires rack-derived reconciliation logic; the current node-ID membership reconciliation is not sufficient on its own.
+Reconciliation must compare the effective generated broker address as well as node ID.
+If the node ID is unchanged but the generated hostname differs, Kroxylicious removes the old explicit SNI binding and registers the new one.
+If the Kafka rack ID changes but maps to the same generated hostname, no SNI rebind is necessary, although the shared topology is still updated.
 Existing client connections can continue using the connection they already established, but a client that tries to open a new connection using a cached stale hostname may need to refresh metadata and retry.
 
 ### Endpoint registration and reverse mapping
 
-The same rack-aware address generation must be used when registering broker-specific SNI endpoints.
+The same rack-derived address generation must be used when registering broker-specific SNI endpoints.
 Otherwise Kroxylicious could advertise one hostname in metadata but bind or route a different hostname internally.
 
 The SNI reverse mapping remains node-ID based.
-When the advertised broker address pattern contains a rack token, reverse mapping treats the rack portion of the hostname as a non-node-ID label and continues to extract the node ID from `$(nodeId)`.
+When the advertised broker address pattern contains `$(rackAddress)`, reverse mapping treats the address-label portion of the hostname as a non-node-ID label and continues to extract the node ID from `$(nodeId)`.
 
 For example, both patterns still resolve node ID correctly:
 
 ```text
-broker-$(nodeId)-$(rackId).example.net
-broker-$(rackId).$(nodeId).example.net
+broker-$(nodeId)-$(rackAddress).example.net
+broker-$(rackAddress).$(nodeId).example.net
 ```
 
 ### Scope
@@ -210,7 +227,7 @@ In `portIdentifiesNode`, broker identity is primarily represented by the port nu
 For example, broker `0` might be advertised as `cluster.example.net:9193` and broker `1` as `cluster.example.net:9194`.
 Embedding rack labels into broker hostnames does not provide the same routing mechanism in that model.
 This is a scoping choice rather than a fundamental limitation.
-If future work defines a useful rack-aware lifecycle and routing model for port-based listeners, it can be considered separately.
+If future work defines a useful rack-derived lifecycle and routing model for port-based listeners, it can be considered separately.
 It does not introduce cloud-provider integrations.
 It does not introduce full DNS label validation for generated advertised broker hostnames.
 It does not require existing users to configure rack-aware patterns.
@@ -238,13 +255,13 @@ Existing configurations remain valid and keep their existing behavior.
 
 The new behavior is opt-in:
 
-* If `advertisedBrokerAddressPattern` does not contain `$(rackId)`, rack metadata is ignored.
+* If `advertisedBrokerAddressPattern` does not contain `$(rackAddress)`, Kafka rack metadata is ignored.
 * Existing tokens retain their current meaning.
 * Strategies that do not use rack metadata continue to generate broker addresses from node ID alone.
 
-There are compatibility considerations for `$(rackId)`.
-If the upstream Kafka cluster does not expose broker rack metadata, or exposes a rack value without a configured mapping, `rackIdDefault` is used.
-Because of this, `rackIdDefault` is required when `$(rackId)` is used.
+There are compatibility considerations for `$(rackAddress)`.
+If the upstream Kafka cluster does not expose broker rack metadata, or exposes a rack value without a configured mapping, `defaultRackAddress` is used.
+Because of this, `defaultRackAddress` is required when `$(rackAddress)` is used.
 
 The reverse SNI mapping must continue to extract exactly the node ID from the advertised broker hostname.
 Rack labels must not become part of the node identity.
@@ -276,10 +293,10 @@ That would require Kroxylicious to rewrite protocol rack fields in responses and
 This proposal is intentionally narrower: it uses broker rack metadata only to derive advertised broker address labels for routing through operator-managed DNS or load-balancer policy.
 Kafka protocol rack identity remains unchanged.
 
-Inline token defaults such as `$(rackId:az1)` were also rejected because token-level default syntax would imply that other tokens should support the same form.
+Inline token defaults such as `$(rackAddress:az1)` were also rejected because token-level default syntax would imply that other tokens should support the same form.
 Defaults belong to the rack address label configuration rather than the generic address templating language.
 
-### Making rack-aware addressing mandatory
+### Making rack-derived addressing mandatory
 
-Making rack metadata mandatory was rejected because many Kafka clusters either do not configure broker rack values or do not need rack-aware DNS names.
+Making Kafka rack metadata mandatory was rejected because many Kafka clusters either do not configure broker rack values or do not need rack-derived DNS names.
 The feature should be opt-in and compatible with existing deployments.
