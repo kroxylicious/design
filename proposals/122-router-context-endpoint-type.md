@@ -1,4 +1,4 @@
-# 000 - Router API: `ClientAddressing` sealed interface
+# 122 - Router API: `ClientAddressing` sealed interface
 
 This proposal refines the Router API introduced in [Proposal 070](070-routing-api.md)
 by introducing a `ClientAddressing` sealed interface that replaces the opaque
