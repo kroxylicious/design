@@ -286,6 +286,24 @@ This is a new feature with no breaking changes:
 - The OAUTHBEARER validation filter is unaffected.
 - The credential store API (`kroxylicious-sasl-credential-store`) is a new public API. Once released, it will follow the project's API stability rules.
 
+## Kafka internal API dependencies
+
+This implementation uses several Kafka APIs that are not part of the [published Kafka javadoc][kafka-javadoc] and may change without notice in future Kafka releases.
+
+**`org.apache.kafka.common.message.*` and `org.apache.kafka.common.protocol.*`** (`ApiKeys`, `Errors`, `RequestHeaderData`, `SaslAuthenticateRequestData`, etc.) — These are the Kafka protocol message classes. They are not in Kafka's public javadoc, but they are a foundational dependency for Kroxylicious: the filter API itself (`RequestFilter`) exposes these types. All Kroxylicious filters depend on them.
+
+**`org.apache.kafka.common.security.oauthbearer.internals.OAuthBearerSaslServerProvider`** — Called once (`initialize()`) to register the OAUTHBEARER SASL mechanism with the JVM's security provider infrastructure. The existing OAUTHBEARER validation filter uses this in the same way. There is no public API alternative.
+
+**`org.apache.kafka.common.security.scram.internals.ScramMechanism`** — An enum identifying SCRAM-SHA-256 and SCRAM-SHA-512. Used internally by the SCRAM handler factories and the keystore credential manager. There is no public API equivalent.
+
+**`org.apache.kafka.common.security.scram.internals.ScramFormatter`** — Used by `KeystoreCredentialManager` to derive salted passwords, server keys, and stored keys from plaintext passwords. This is the only implementation of SCRAM key derivation available in the Kafka client library. There is no public API equivalent.
+
+All of these dependencies are contained within the implementation modules. The public SPI types (`ScramCredentialStore`, `ScramCredentialStoreService`, `ScramCredential`, `MechanismHandler`, `MechanismHandlerFactory`, `AuthenticationResult`) do not reference any Kafka types. Implementors of the credential store SPI are not transitively exposed to Kafka internal APIs.
+
+The `KeystoreCredentialManager` class does expose `ScramMechanism` in its public method signatures (`addUser`, `updatePassword`, `generateKeyStore`, `generateScramCredential`). This class is in the provider module, not the SPI, so it is not part of the formal public API contract — but external code that uses the credential manager directly would take a dependency on this internal Kafka type.
+
+[kafka-javadoc]: https://kafka.apache.org/43/javadoc/index.html
+
 ## Rejected alternatives
 
 ### Generic CredentialStore covering all mechanisms
