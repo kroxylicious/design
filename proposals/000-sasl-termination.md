@@ -512,7 +512,7 @@ To provide a better UX and to reduce the possibility of user error compromising 
 **Security measures:**
 - Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure (they appear in shell history and process listings). Command-line password arguments are supported but gated behind an `--unlock-insecure-options` flag that displays security warnings.
 - A 12-character minimum password length is enforced, following [NIST SP 800-63B][nist-sp800-63b] guidance.
-- SCRAM credentials are generated with 10,000 iterations (above the RFC 5802 minimum of 4,096) and 20 bytes of random salt.
+- SCRAM credentials are generated with 10,000 PBKDF2 iterations and 20 bytes of random salt. The [RFC 5802][rfc5802] minimum is 4,096 (which is also the Kafka broker default). The [OWASP Password Storage Cheat Sheet][owasp-password-storage] currently recommends 600,000 iterations for PBKDF2-HMAC-SHA256, but that guidance targets password storage hashing where derivation happens once at write time. In SCRAM, the client performs the derivation on every authentication, so the iteration count directly affects authentication latency. 10,000 provides a reasonable balance between brute-force resistance and authentication performance for Kafka's typically long-lived connections.
 
 #### Threats and mitigations
 
@@ -520,7 +520,7 @@ To provide a better UX and to reduce the possibility of user error compromising 
 |--------|------------|
 | KeyStore file exposure -- an attacker gains read access to the KeyStore file on disk. | POSIX file permission check: the provider refuses to load a KeyStore with group or world read/write permissions. The KeyStore itself is password-encrypted. |
 
-**Accepted risk: credential material in JVM heap.** SCRAM credential data (serverKey, storedKey, salt) is held in memory for the lifetime of the proxy. An attacker who can obtain a heap dump (e.g. via JMX, `/proc/<pid>/mem`, or a core dump) can extract this material. There is no practical mitigation within a JVM — `byte[]` contents cannot be reliably zeroed because the GC may copy them, and off-heap storage would add complexity without eliminating the risk. Operators should protect heap dump access through operational controls (JMX authentication, file permissions on core dumps, container security policies).
+**Accepted risk: credential material in JVM heap.** SCRAM credential data (serverKey, storedKey, salt) is held in memory for the lifetime of the proxy. An attacker who can obtain a heap dump (e.g. via JMX, `/proc/<pid>/mem`, or a core dump) can extract this material. There is no practical mitigation within a JVM. Operators should protect heap dump access through operational controls (JMX authentication, file permissions on core dumps, container security policies).
 
 Note: `ScramCredential` uses defensive copies for `byte[]` fields and redacts `toString()`, but these are correctness measures (preventing accidental mutation and log leakage), not security mitigations against heap inspection.
 
@@ -680,5 +680,6 @@ Supporting SASL PLAIN was deferred because:
 [kip255]: https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=75968876
 [kip368]: https://cwiki.apache.org/confluence/spaces/KAFKA/pages/89068981/KIP-368+Allow+SASL+Connections+to+Periodically+Re-Authenticate
 [nist-sp800-63b]: https://pages.nist.gov/800-63-4/sp800-63b.html
+[owasp-password-storage]: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
 [sasl-inspection]: https://kroxylicious.io/kroxylicious/#assembly-sasl-inspection
 [oauthbearer-validation]: https://kroxylicious.io/kroxylicious/#assembly-configuring-oauth-bearer-validation-filter
