@@ -132,6 +132,13 @@ OAUTHBEARER is architecturally the simpler mechanism — it requires no credenti
 - The existing validation filter validates tokens then _forwards_ the SASL exchange to the broker. It is fundamentally a SASL passthrough technique. In contrast, the termination handler validates tokens and _short-circuits_ — the broker never sees a SASL exchange.
 - The handler factory owns its callback handler and JWKS configuration, receiving them at `initialize()`-time rather than requiring a credential store.
 
+**Security requirements:** The `expectedAudience` and `expectedIssuer` fields are required. Without audience validation, a token issued for a different service would be accepted; without issuer validation, tokens from any issuer whose keys happen to be in the JWKS would be accepted.
+
+**Known limitations:**
+- **TLS configuration for the JWKS endpoint:** Kafka's `OAuthBearerValidatorCallbackHandler` uses an internal HTTP client with no TLS configuration surface. There is currently no way to configure custom trust stores or client certificates for HTTPS communication with the JWKS endpoint. The JVM's default trust store is used. This is a limitation inherited from Kafka's callback handler and shared with the existing OAUTHBEARER validation filter.
+- **Rate limiting:** The handler does not implement rate limiting or brute-force protection for failed authentication attempts. The existing OAUTHBEARER validation filter has Caffeine-based rate limiting with exponential backoff that could serve as a reference for a future implementation.
+- **Custom JWT validator:** The handler hardcodes `BrokerJwtValidator` as the JWT validator. The existing OAUTHBEARER validation filter allows this to be overridden via `jwtValidatorClass` for custom claim validation logic.
+
 ### SCRAM implementation
 
 SCRAM is more complex than OAUTHBEARER because it is a multi-round challenge-response protocol that requires stored credentials.
