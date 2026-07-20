@@ -499,15 +499,82 @@ The credentials stored in the KeyStore are serialized JSON, which makes for less
 
 To provide a better UX and to reduce the possibility of user error compromising security, a PicoCLI-based command-line tool is provided for managing credentials in KeyStore files.
 
+**Global options:**
+
+```
+keystore-credential-tool [--unlock-insecure-options] <command> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--unlock-insecure-options` | Enable command-line password options (`-p`, `-w`). Without this flag, passwords must be entered via interactive console prompts. Displays security warnings when used. |
+
 **Commands:**
 
-| Command | Description |
-|---------|-------------|
-| `create` | Create a new KeyStore file. |
-| `add-user` | Add a SCRAM credential for a user. |
-| `remove-user` | Remove a user's credential. |
-| `update-password` | Update a user's password (recomputes SCRAM credential). |
-| `list-users` | List all usernames in the KeyStore. |
+```
+keystore-credential-tool create -k <path> [-p <password>] [-t <type>]
+```
+
+Create a new, empty KeyStore file.
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `-k`, `--keystore` | Yes | — | Path to the KeyStore file to create. |
+| `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
+| `-t`, `--type` | No | `PKCS12` | KeyStore type (`PKCS12`, `JKS`). |
+
+```
+keystore-credential-tool add-user -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>]
+```
+
+Add a SCRAM credential for a user. If the user already exists, their credential is replaced.
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `-k`, `--keystore` | Yes | — | Path to the KeyStore file. |
+| `-u`, `--username` | Yes | — | Username to add. |
+| `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
+| `-w`, `--user-password` | No | interactive prompt | User's password. Requires `--unlock-insecure-options`. |
+| `-m`, `--mechanism` | No | `SCRAM_SHA_256` | SCRAM mechanism (`SCRAM_SHA_256`, `SCRAM_SHA_512`). |
+
+```
+keystore-credential-tool remove-user -k <path> -u <username> [-p <password>]
+```
+
+Remove a user's credential from the KeyStore.
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `-k`, `--keystore` | Yes | — | Path to the KeyStore file. |
+| `-u`, `--username` | Yes | — | Username to remove. |
+| `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
+
+```
+keystore-credential-tool update-password -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>]
+```
+
+Update a user's password. Recomputes the SCRAM credential with a new salt.
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `-k`, `--keystore` | Yes | — | Path to the KeyStore file. |
+| `-u`, `--username` | Yes | — | Username to update. |
+| `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
+| `-w`, `--new-password` | No | interactive prompt | New password for the user. Requires `--unlock-insecure-options`. |
+| `-m`, `--mechanism` | No | `SCRAM_SHA_256` | SCRAM mechanism (`SCRAM_SHA_256`, `SCRAM_SHA_512`). |
+
+```
+keystore-credential-tool list-users -k <path> [-p <password>]
+```
+
+List all usernames in the KeyStore.
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `-k`, `--keystore` | Yes | — | Path to the KeyStore file. |
+| `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
+
+**Exit codes:** `0` = success, `1` = operation error, `2` = password/security error.
 
 **Security measures:**
 - Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure (they appear in shell history and process listings). Command-line password arguments are supported but gated behind an `--unlock-insecure-options` flag that displays security warnings.
