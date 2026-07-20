@@ -580,6 +580,7 @@ List all usernames in the KeyStore.
 - Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure (they appear in shell history and process listings). Command-line password arguments are supported but gated behind an `--unlock-insecure-options` flag that displays security warnings.
 - A 12-character minimum password length is enforced, following [NIST SP 800-63B][nist-sp800-63b] guidance.
 - SCRAM credentials are generated with 10,000 PBKDF2 iterations and 20 bytes of random salt. The [RFC 5802][rfc5802] minimum is 4,096 (which is also the Kafka broker default). The [OWASP Password Storage Cheat Sheet][owasp-password-storage] currently recommends 600,000 iterations for PBKDF2-HMAC-SHA256, but that guidance targets password storage hashing where derivation happens once at write time. In SCRAM, the client performs the derivation on every authentication, so the iteration count directly affects authentication latency. 10,000 provides a reasonable balance between brute-force resistance and authentication performance for Kafka's typically long-lived connections.
+- On POSIX systems, newly created KeyStore files are set to owner-only permissions (`rw-------`). When loading an existing KeyStore for modification (`add-user`, `remove-user`, `update-password`, `list-users`), the tool checks that the file does not have group or world read/write permissions and refuses to proceed if it does.
 
 #### Threats and mitigations
 
