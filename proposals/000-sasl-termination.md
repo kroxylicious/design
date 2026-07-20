@@ -238,11 +238,9 @@ The implementation delegates to Kafka's own `SaslServer` for SCRAM, which is wid
 
 When a user is not found in the credential store, the handler returns a generic `"Authentication failed"` error message, identical to the message returned for incorrect credentials. The error does not reveal whether the username exists.
 
-### Timing side-channel
+### Timing side-channel mitigation
 
-**Known limitation:** When a user is not found, the handler returns failure immediately (after the async credential lookup completes). When a user _is_ found, the handler creates a `SaslServer`, processes the first SCRAM message, and returns a challenge. An attacker measuring response times could distinguish these two paths.
-
-**Mitigation recommendation:** For non-existent users, generate a deterministic fake credential using a keyed hash of the username as the salt, and continue the SCRAM exchange as if the user existed. The authentication will fail at the proof verification stage, but the timing will be indistinguishable from a real user with incorrect credentials. This is the approach used by some SCRAM implementations and should be added as a future improvement.
+Without mitigation, an attacker could distinguish existing from non-existing users by measuring response times: credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists. Rather than trying to equalize these inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the SCRAM handler applies a fixed delay to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections.
 
 ### Connection lifecycle safety
 
@@ -255,16 +253,6 @@ When a user is not found in the credential store, the handler returns a generic 
 - Interactive password prompts prevent exposure of passwords in shell history and process listings.
 - The `--unlock-insecure-options` flag gates command-line password arguments with explicit security warnings.
 - 12-character minimum password length follows NIST SP 800-63B recommendations.
-
-### Code quality findings
-
-Two issues identified during security review:
-
-1. **Blocking call on event loop:** `SaslTerminationFilter.handleAuthenticationFailure()` calls `.toCompletableFuture().join()` on a future that should already be complete. While functionally correct, this violates the project's performance rules ("Never call `.join()` or `.get()` on futures in filter code") and should be refactored to fully async handling.
-
-2. **Logging convention violation:** `ScramHandler.evaluateResponse()` uses `addArgument()` for message interpolation, violating the project's logging convention which requires `addKeyValue()` for structured logging.
-
-Both issues should be fixed before merge.
 
 ### Threats considered but out of scope
 
