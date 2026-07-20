@@ -6,7 +6,7 @@ SASL termination allows the Kroxylicious proxy to authenticate Kafka clients dir
 
 Kroxylicious currently handles client SASL authentication in a number of ways:
 
-1. **SASL Passthrough**: The proxy forwards SASL exchanges unmodified between client and broker. The broker performs all authentication.
+1. **SASL Passthrough**: The proxy forwards SASL exchanges unmodified between client and broker. The broker performs all authentication. The proxy remains ignorant of the client subject.
 
 2. **SASL Passthrough Inspection**: The [SASL inspection filter][sasl-inspection] observes SASL exchanges as they pass through, extracting the client's authorization ID without making authentication decisions itself. This supports SCRAM-SHA-256, SCRAM-SHA-512, OAUTHBEARER, and PLAIN mechanisms.
 
@@ -32,7 +32,7 @@ With SASL termination, the proxy authenticates clients using credentials stored 
 
 ### Authentication protocol translation
 
-The proxy can authenticate clients using one SASL mechanism (e.g. SCRAM-SHA-256) while using an entirely different authentication mechanism to connect to the broker (e.g. mTLS, or a service account). This enables:
+The proxy can authenticate clients using one SASL mechanism (e.g. `SCRAM-SHA-256`) while using an entirely different authentication mechanism to connect to the broker (e.g. mTLS, or `OAUTHBEARER`). This enables:
 
 - Migrating broker authentication without changing client configurations.
 - Using client-friendly mechanisms even when the broker supports only a limited set.
@@ -53,7 +53,7 @@ A key problem with any passthrough-based technique is that it depends on the ava
 ## Proposal
 
 This proposal aims to support for the following SASL mechanisms: `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`.
-It also aims to be flexible, so as to allow other mechanisms to be supported either in the future, or as plugins.
+It also aims to be flexible, so as to allow other mechanisms to be supported either in the future.
 
 ### The filter
 
@@ -64,9 +64,9 @@ The SASL termination filter intercepts `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` 
 The filter maintains per-connection state using a sealed interface `State` with four concrete states:
 
 ```
-RequiringHandshake ──→ RequiringAuthenticate ←──╮
-                              │                  │
-                              ├─ (multi-round) ──╯
+RequiringHandshake ──→ RequiringAuthenticate ←────╮
+                              │                   │
+                              ├─→ (multi-round) ──╯
                               │
                               ├──→ Authenticated ──→ (reauth) ──→ RequiringAuthenticate
                               │         │
@@ -84,10 +84,10 @@ The sealed interface prevents creation of invalid states at compile time.
 
 #### Reauthentication (KIP-368)
 
-The filter supports [KIP-368][kip368] reauthentication. When `connectionsMaxReauth` is configured, the filter includes a `sessionLifetimeMs` value in the `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate.
+The filter supports [KIP-368][kip368] reauthentication. When `maxTimeBeforeReauth` is configured, the filter includes a `sessionLifetimeMs` value in the `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate.
 
 **Session lifetime computation:** The effective session lifetime is the minimum of:
-1. The configured `connectionsMaxReauth` value.
+1. The configured `maxTimeBeforeReauth` value.
 2. The handler-reported credential/token lifetime (e.g. the JWT token's expiry for OAUTHBEARER).
 
 If either value is zero (no opinion / no expiry), the other is used. If both are zero, no reauthentication is required.
@@ -193,7 +193,7 @@ Security measures:
 filters:
   - type: SaslTermination
     config:
-      connectionsMaxReauth: 1h
+      maxTimeBeforeReauth: 1h
       mechanisms:
         SCRAM-SHA-256:
           credentialStore: KeystoreScramCredentialStoreService
@@ -210,7 +210,7 @@ filters:
 
 The `mechanisms` map is keyed by IANA-registered mechanism name. The config shape for each entry depends on the mechanism: SCRAM mechanisms use `credentialStore`/`credentialStoreConfig`, while OAUTHBEARER uses JWKS endpoint configuration directly.
 
-The optional `connectionsMaxReauth` sets the maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable.
+The optional `maxTimeBeforeReauth` sets the maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable.
 
 ### Module architecture
 
