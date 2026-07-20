@@ -52,27 +52,38 @@ A key problem with any passthrough-based technique is that it depends on the ava
 
 ## Proposal
 
-This proposal aims to support for the following SASL mechanisms: `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`.
-It also aims to be flexible, so as to allow other mechanisms to be supported either in the future.
+This proposal aims to support the following SASL mechanisms: `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`.
+It also aims to be flexible, so as to allow other mechanisms to be supported in the future.
 
-### The filter
+The proposal is organized per-component. Each component section covers its summary, API surfaces, configuration, threats and mitigations, and known limitations.
 
-The SASL termination filter intercepts `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests, authenticating clients at the proxy and short-circuiting the responses without forwarding them to the broker. It enforces a security barrier: until a client has successfully authenticated, the only requests permitted are `API_VERSIONS`, `SASL_HANDSHAKE`, and `SASL_AUTHENTICATE`. All other request types are rejected with `SASL_AUTHENTICATION_FAILED` and the connection is closed.
+### Component 1: SaslTermination filter
+
+#### Summary
+
+The `SaslTermination` filter is a `@Plugin`-annotated `FilterFactory` that intercepts `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests, authenticating clients at the proxy and short-circuiting the responses without forwarding them to the broker.
+
+Key features:
+
+- **Security barrier.** Until a client has successfully authenticated, the only requests permitted are `API_VERSIONS`, `SASL_HANDSHAKE`, and `SASL_AUTHENTICATE`. All other request types are rejected with `SASL_AUTHENTICATION_FAILED` and the connection is closed.
+- **State machine.** Per-connection authentication state is modelled as a sealed interface with four concrete states, preventing invalid transitions at compile time.
+- **Reauthentication (KIP-368).** When `maxTimeBeforeReauth` is configured, the filter includes a `sessionLifetimeMs` value in `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate. Sessions that expire without reauthentication are rejected and closed.
+- **Mechanism dispatch.** The filter delegates each authentication exchange to a `MechanismHandler` obtained from the appropriate `MechanismHandlerFactory` (see Component 2). The filter itself is mechanism-agnostic.
 
 #### State machine
 
 The filter maintains per-connection state using a sealed interface `State` with four concrete states:
 
 ```
-RequiringHandshake ──→ RequiringAuthenticate ←────╮
-                              │                   │
-                              ├─→ (multi-round) ──╯
-                              │
-                              ├──→ Authenticated ──→ (reauth) ──→ RequiringAuthenticate
-                              │         │
-                              │         └──→ (expired + non-SASL request) ──→ reject & close
-                              │
-                              └──→ Failed (terminal)
+RequiringHandshake ──> RequiringAuthenticate <────╮
+                              |                   |
+                              |─> (multi-round) ──╯
+                              |
+                              |──> Authenticated ──> (reauth) ──> RequiringAuthenticate
+                              |         |
+                              |         └──> (expired + non-SASL request) ──> reject & close
+                              |
+                              └──> Failed (terminal)
 ```
 
 - **RequiringHandshake:** Initial state. Accepts `SASL_HANDSHAKE` requests, which negotiate the mechanism and transition to `RequiringAuthenticate`.
@@ -80,11 +91,9 @@ RequiringHandshake ──→ RequiringAuthenticate ←────╮
 - **Authenticated:** Success state. The filter calls `filterContext.clientSaslAuthenticationSuccess(mechanism, subject)` to propagate the authenticated identity to downstream filters, then forwards all subsequent requests. If reauthentication is configured, this state also stores the session expiry time and allows transition back to `RequiringAuthenticate` via a new `SASL_HANDSHAKE`.
 - **Failed:** Terminal failure state. The connection is closed.
 
-The sealed interface prevents creation of invalid states at compile time.
-
 #### Reauthentication (KIP-368)
 
-The filter supports [KIP-368][kip368] reauthentication. When `maxTimeBeforeReauth` is configured, the filter includes a `sessionLifetimeMs` value in the `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate.
+The filter supports [KIP-368][kip368] reauthentication.
 
 **Session lifetime computation:** The effective session lifetime is the minimum of:
 1. The configured `maxTimeBeforeReauth` value.
@@ -96,105 +105,32 @@ If either value is zero (no opinion / no expiry), the other is used. If both are
 
 **Server-side enforcement:** If the session has expired and a non-SASL request arrives, the filter rejects it with `SASL_AUTHENTICATION_FAILED` and closes the connection. `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests are always accepted regardless of session expiry, to allow reauthentication.
 
-### Mechanism handler extension point
+#### API surfaces
 
-The filter delegates the actual authentication exchange to mechanism-specific handlers, discovered via an internal extension point:
+The filter is a standard Kroxylicious `FilterFactory` plugin. It does not define any new public API. It uses:
 
-- `MechanismHandler` — handles the authentication exchange for a single connection. Implementations process `SaslAuthenticate` request bytes and return `AuthenticationResult` (CHALLENGE, SUCCESS, or FAILURE). Handlers are per-connection and not thread-safe.
+- `FilterFactory<SaslTerminationConfig>` (from `kroxylicious-api`) -- the standard filter factory contract.
+- `RequestFilter` (from `kroxylicious-api`) -- for intercepting requests.
+- `FilterContext.clientSaslAuthenticationSuccess()` / `clientSaslAuthenticationFailure()` (from `kroxylicious-api`, added by Proposal 006) -- to propagate authentication outcomes.
+- `MechanismHandlerFactory` (internal, see Component 2) -- for mechanism dispatch.
 
-- `MechanismHandlerFactory` — manages mechanism-specific resources and creates handler instances. Discovered via `ServiceLoader`. Each factory:
-  1. Reports its IANA-registered mechanism name.
-  2. Receives mechanism-specific configuration at `initialize()` time and creates whatever resources the mechanism requires (credential stores, JWKS callback handlers, etc.).
-  3. Creates per-connection `MechanismHandler` instances, injecting shared resources.
-  4. Releases resources on `close()`.
+#### Configuration
 
-These are **not** user-facing plugins (no `@Plugin` annotation). They provide internal extensibility for adding new mechanism support without modifying the filter itself.
-The intention behind the decision **not** to make these user-facing plugins is to encourage a small number of secure, high-quality implementations, one for each mechanism. 
-Allowing pluggable implementations would make auditing for correctness and security significantly harder.
+The filter is configured via `SaslTerminationConfig`:
 
-**Initial mechanism support:**
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `mechanisms` | `Map<String, MechanismConfig>` | Yes | -- | Map of IANA-registered mechanism name to mechanism-specific configuration. At least one entry is required. |
+| `maxTimeBeforeReauth` | `Duration` | No | disabled | Maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable. |
 
-| Mechanism | Handler | Notes |
-|-----------|---------|-------|
-| SCRAM-SHA-256 | `ScramHandler` via `ScramSha256HandlerFactory` | RFC 5802 |
-| SCRAM-SHA-512 | `ScramHandler` via `ScramSha512HandlerFactory` | RFC 5802 |
-| OAUTHBEARER | `OauthBearerHandler` via `OauthBearerHandlerFactory` | RFC 6750 / RFC 7628 |
+The `mechanisms` map values are polymorphic. Jackson deduction-based deserialization (`@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)`) resolves the concrete type from the fields present:
 
-### OAUTHBEARER implementation
+- If the entry contains `credentialStore` and `credentialStoreConfig`, it deserializes as `ScramMechanismConfig`.
+- If the entry contains `jwksEndpointUrl`, `expectedAudience`, and `expectedIssuer`, it deserializes as `OauthBearerMechanismConfig`.
 
-The OAUTHBEARER handler validates JWT bearer tokens at the proxy without forwarding them to the broker.
+This means the mechanism map key (e.g. `SCRAM-SHA-256`) selects which `MechanismHandlerFactory` handles the exchange, while the value's field structure determines which config type Jackson produces. There is no explicit type discriminator field.
 
-The handler uses Kafka's `OAuthBearerValidatorCallbackHandler` for JWT validation, the same mechanism used by the existing OAUTHBEARER validation filter. The `OauthBearerHandlerFactory` manages the JWKS endpoint configuration and callback handler lifecycle: at `initialize()`-time it configures the callback handler with the JWKS endpoint, expected audience/issuer, and refresh settings; per-connection handlers receive the shared callback handler and use it to create a `SaslServer` via the JSSE/SASL framework.
-
-OAUTHBEARER is architecturally the simpler mechanism — it requires no credential store. The factory's only external dependency is the JWKS endpoint, and authentication is typically single-round (client sends token, server validates it). After successful authentication, the handler extracts the token's remaining lifetime from the `SaslServer`'s negotiated `CREDENTIAL.LIFETIME.MS` property for use in session lifetime computation (see [Reauthentication](#reauthentication-kip-368)).
-
-**Key differences from the existing OAUTHBEARER validation filter:**
-- The existing validation filter validates tokens then _forwards_ the SASL exchange to the broker. It is fundamentally a SASL passthrough technique. In contrast, the termination handler validates tokens and _short-circuits_ — the broker never sees a SASL exchange.
-- The handler factory owns its callback handler and JWKS configuration, receiving them at `initialize()`-time rather than requiring a credential store.
-
-**Security requirements:** The `expectedAudience` and `expectedIssuer` fields are required. Without audience validation, a token issued for a different service would be accepted; without issuer validation, tokens from any issuer whose keys happen to be in the JWKS would be accepted.
-
-**Known limitations:**
-- **TLS configuration for the JWKS endpoint:** Kafka's `OAuthBearerValidatorCallbackHandler` uses an internal HTTP client with no TLS configuration surface. There is currently no way to configure custom trust stores or client certificates for HTTPS communication with the JWKS endpoint. The JVM's default trust store is used. This is a limitation inherited from Kafka's callback handler and shared with the existing OAUTHBEARER validation filter.
-- **Rate limiting:** The handler does not implement rate limiting or brute-force protection for failed authentication attempts. The existing OAUTHBEARER validation filter has Caffeine-based rate limiting with exponential backoff that could serve as a reference for a future implementation.
-- **Custom JWT validator:** The handler hardcodes `BrokerJwtValidator` as the JWT validator. The existing OAUTHBEARER validation filter allows this to be overridden via `jwtValidatorClass` for custom claim validation logic.
-
-### SCRAM implementation
-
-SCRAM is more complex than OAUTHBEARER because it is a multi-round challenge-response protocol that requires stored credentials.
-
-The SCRAM handler delegates to Apache Kafka's own `SaslServer` implementation via the JSSE/SASL framework:
-
-1. **First round:** Extract the username from the SCRAM client-first-message, asynchronously look up the credential from the store, create a `SaslServer` with a `CallbackHandler` that supplies the credential, and process the first message.
-
-2. **Subsequent rounds:** Process messages through the existing `SaslServer` synchronously. When `SaslServer.isComplete()` returns true, return SUCCESS with the authorization ID from `SaslServer.getAuthorizationID()`.
-
-This approach avoids reimplementing the SCRAM protocol and benefits from Kafka's battle-tested implementation.
-
-#### SCRAM Credential store SPI
-
-SCRAM mechanisms need a way to look up stored credentials. The credential store SPI provides async credential lookup, decoupled from any particular storage backend.
-
-**Core types:**
-
-- `ScramCredentialStore` — the lookup interface, returning `CompletionStage<ScramCredential>` for a given username. Returns `null` (via completed stage) when the user is not found. Exceptional completions indicate infrastructure failures.
-
-- `ScramCredentialStoreService<C>` — the lifecycle interface for credential store providers. Follows the initialize/build/close pattern used by `KmsService<C>`:
-  1. `initialize(C config)` — validate and store configuration.
-  2. `buildCredentialStore()` — create an operational store instance.
-  3. `close()` — release resources.
-
-- `ScramCredential` — an immutable sealed record holding the username, salt, iteration count, server key, stored key, and hash algorithm. Byte array fields use defensive copies in the constructor and accessors to prevent mutation. The `toString()` method redacts sensitive fields.
-
-- Exception hierarchy: `CredentialLookupException` with subtypes `CredentialServiceUnavailableException` and `CredentialServiceTimeoutException`.
-
-**Design note:** The SPI is intentionally SCRAM-specific. OAUTHBEARER uses token validation against a JWKS endpoint, which has a fundamentally different shape from stored credential lookup. Rather than creating a leaky abstraction that covers both, each mechanism family uses its own resource management approach (see [Rejected alternatives](#rejected-alternatives)).
-
-#### `KeyStore`-based credential store provider
-
-The first-party provider stores SCRAM credentials in a Java `KeyStore` file, following the project's established pattern of using `KeyStores` to store secrets. Each credential is serialized as JSON and stored as a `SecretKey` entry keyed by username.
-
-**Characteristics:**
-
-- Loads the entire KeyStore into memory at construction time for sub-millisecond lookups.
-- Does not support hot reloading — credential changes require a proxy restart or virtual cluster reconfiguration.
-- Supports PKCS12 and JKS store types.
-- Uses the Kroxylicious `PasswordProvider` abstraction for KeyStore and key passwords, supporting both file-based (production) and inline (development) password configuration.
-
-**CLI credential management tool** (`KeystoreCredentialTool`):
-
-The credentials stored in the KeyStore are serialized JSON, which makes for less than ideal UX: The user needs ensure the JSON has the required format.
-Moreover, the values of that JSON are not all obvious things like the username. Some of the fields are computed from cryptographic operation on the password which need to 
-be done correctly for the authentication to work, and where incorrect construction can undermine security.
-
-To provide a better UX and to reduce the possibility of user error compromising security a PicoCLI-based command-line tool will be provided for managing credentials in KeyStore files. Supports: `create`, `add-user`, `remove-user`, `update-password`, `list-users`.
-
-Security measures:
-- Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure. Command-line password arguments are supported, but gated behind an `--unlock-insecure-options` flag that displays security warnings.
-- A 12-character minimum password length is enforced, following [NIST SP 800-63B][nist-sp800-63b] guidance.
-- SCRAM credentials are generated with 10,000 iterations (above the RFC-5802 minimum of 4,096) and 20 bytes of random salt.
-
-### Configuration model
+**Example configuration:**
 
 ```yaml
 filters:
@@ -215,19 +151,391 @@ filters:
           expectedIssuer: https://idp.example.com
 ```
 
-The `mechanisms` map is keyed by IANA-registered mechanism name. The config shape for each entry depends on the mechanism: SCRAM mechanisms use `credentialStore`/`credentialStoreConfig`, while OAUTHBEARER uses JWKS endpoint configuration directly.
+#### Threats and mitigations
 
-The optional `maxTimeBeforeReauth` sets the maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable.
+| Threat | Mitigation |
+|--------|------------|
+| Unauthenticated request bypass -- a client sends Kafka protocol requests (Produce, Fetch, etc.) before completing SASL authentication. | The security barrier rejects all non-SASL request types until the state reaches `Authenticated`. Rejected requests receive `SASL_AUTHENTICATION_FAILED` and the connection is closed immediately. |
+| Session expiry evasion -- an authenticated client continues sending requests after its session has expired without reauthenticating. | On every non-SASL request in the `Authenticated` state, the filter checks whether the session has expired. If so, the request is rejected with `SASL_AUTHENTICATION_FAILED` and the connection is closed. `SASL_HANDSHAKE` / `SASL_AUTHENTICATE` are always permitted, allowing reauthentication. |
 
-### Module architecture
+#### Known limitations
+
+- The filter does not support SASL PLAIN (see [Rejected alternatives](#rejected-alternatives)).
+
+---
+
+### Component 2: MechanismHandler internal extension point
+
+#### Summary
+
+The filter delegates the actual authentication exchange to mechanism-specific handlers, discovered via an internal extension point. This extension point provides internal extensibility for adding new mechanism support without modifying the filter itself.
+
+These are **not** user-facing plugins (no `@Plugin` annotation). The intention behind this decision is to encourage a small number of secure, high-quality implementations, one for each mechanism. Allowing pluggable implementations would make auditing for correctness and security significantly harder.
+
+#### API surfaces
+
+The extension point consists of three types, all in the `io.kroxylicious.filter.sasl.termination.mechanism` package within the `kroxylicious-sasl-termination` module.
+
+**`MechanismHandler`** -- handles the authentication exchange for a single connection. Instances are per-connection and not thread-safe.
+
+```java
+public interface MechanismHandler {
+
+    String mechanismName();
+
+    CompletionStage<AuthenticationResult> handleAuthenticate(byte[] authBytes);
+
+    void dispose();
+}
+```
+
+**`MechanismHandlerFactory`** -- manages mechanism-specific resources and creates handler instances. Discovered via `ServiceLoader`.
+
+```java
+public interface MechanismHandlerFactory extends AutoCloseable {
+
+    String mechanismName();
+
+    void initialize(MechanismConfig config, FilterFactoryContext context, Clock clock)
+            throws PluginConfigurationException;
+
+    MechanismHandler createHandler();
+
+    @Override
+    void close();
+}
+```
+
+Each factory:
+1. Reports its IANA-registered mechanism name via `mechanismName()`.
+2. Receives mechanism-specific configuration at `initialize()` time and creates whatever resources the mechanism requires (credential stores, JWKS callback handlers, etc.).
+3. Creates per-connection `MechanismHandler` instances via `createHandler()`, injecting shared resources.
+4. Releases resources on `close()`.
+
+**`AuthenticationResult`** -- the outcome of processing a single SASL authenticate request.
+
+```java
+public record AuthenticationResult(
+        Outcome outcome,
+        byte[] responseBytes,
+        @Nullable String authorizationId,
+        @Nullable String errorMessage,
+        long sessionLifetimeMs) {
+
+    public enum Outcome { CHALLENGE, SUCCESS, FAILURE }
+
+    public static AuthenticationResult challenge(byte[] responseBytes);
+    public static AuthenticationResult success(byte[] responseBytes, String authorizationId);
+    public static AuthenticationResult success(byte[] responseBytes, String authorizationId,
+            long sessionLifetimeMs);
+    public static AuthenticationResult failure(byte[] responseBytes, String errorMessage);
+}
+```
+
+**`MechanismConfig`** -- sealed interface for mechanism-specific configuration, using Jackson deduction-based polymorphism:
+
+```java
+@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)
+@JsonSubTypes({
+        @JsonSubTypes.Type(ScramMechanismConfig.class),
+        @JsonSubTypes.Type(OauthBearerMechanismConfig.class)
+})
+public sealed interface MechanismConfig
+        permits ScramMechanismConfig, OauthBearerMechanismConfig {
+}
+```
+
+#### ServiceLoader discovery
+
+Factories are registered in `META-INF/services/io.kroxylicious.filter.sasl.termination.mechanism.MechanismHandlerFactory`. At filter factory initialization time, the `SaslTermination` filter factory loads all registered factories, matches them to the mechanism names present in the user's configuration, and calls `initialize()` on each matched factory.
+
+#### Built-in mechanism handlers
+
+| Mechanism | Factory | Handler | Specification |
+|-----------|---------|---------|---------------|
+| `SCRAM-SHA-256` | `ScramSha256HandlerFactory` | `ScramHandler` | [RFC 5802][rfc5802] |
+| `SCRAM-SHA-512` | `ScramSha512HandlerFactory` | `ScramHandler` | [RFC 5802][rfc5802] |
+| `OAUTHBEARER` | `OauthBearerHandlerFactory` | `OauthBearerHandler` | [RFC 6750][rfc6750] / [RFC 7628][rfc7628] |
+
+#### Known limitations
+
+- Adding a new mechanism requires adding a new `MechanismHandlerFactory` implementation within the `kroxylicious-sasl-termination` module, a new `MechanismConfig` subtype, and updating the sealed permit list. This is intentional.
+
+---
+
+### Component 3: SCRAM mechanism handler
+
+#### Summary
+
+The SCRAM mechanism handler (`ScramHandler`) implements multi-round SCRAM-SHA-256 and SCRAM-SHA-512 authentication by delegating to Apache Kafka's own `SaslServer` implementation via the JSSE/SASL framework. Two factories -- `ScramSha256HandlerFactory` and `ScramSha512HandlerFactory` -- manage the credential store lifecycle and create per-connection handler instances.
+
+Key features:
+
+- **Multi-round SCRAM exchange.** SCRAM is a challenge-response protocol. The handler processes the client-first-message (round 1) and subsequent rounds, returning `CHALLENGE` until the exchange completes.
+- **Delegation to Kafka's SaslServer.** The handler does not reimplement SCRAM. It creates a Kafka `SaslServer` with a `CallbackHandler` that supplies the looked-up credential, then processes all messages through it. This benefits from Kafka's battle-tested implementation.
+- **Timing side-channel mitigation.** A fixed delay is applied to all authentication rounds to prevent attackers from distinguishing existing from non-existing users by measuring response times.
+
+#### Authentication flow
+
+1. **First round:** Extract the username from the SCRAM client-first-message, asynchronously look up the credential from the `ScramCredentialStore`, create a `SaslServer` with a `CallbackHandler` that supplies the credential, and process the first message.
+2. **Subsequent rounds:** Process messages through the existing `SaslServer` synchronously. When `SaslServer.isComplete()` returns true, return `SUCCESS` with the authorization ID from `SaslServer.getAuthorizationID()`.
+
+#### API surfaces
+
+The SCRAM handler factories use:
+
+- `MechanismHandlerFactory` / `MechanismHandler` (internal, Component 2) -- the internal extension point.
+- `ScramCredentialStore` (public SPI, Component 5) -- for credential lookup. The factory resolves the credential store plugin at `initialize()` time using the Kroxylicious plugin system (`@PluginImplName` / `@PluginImplConfig`).
+
+#### Configuration
+
+SCRAM mechanisms are configured via `ScramMechanismConfig`:
+
+```java
+public record ScramMechanismConfig(
+        @JsonProperty(required = true)
+        @PluginImplName(ScramCredentialStoreService.class) String credentialStore,
+        @JsonProperty(required = true)
+        @PluginImplConfig(implNameProperty = "credentialStore") Object credentialStoreConfig)
+    implements MechanismConfig { }
+```
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `credentialStore` | `String` | Yes | -- | Plugin name of the `ScramCredentialStoreService` implementation (e.g. `KeystoreScramCredentialStoreService`). Resolved via the Kroxylicious plugin system. |
+| `credentialStoreConfig` | `Object` | Yes | -- | Type-safe configuration for the credential store plugin. The actual type depends on the `credentialStore` plugin and is resolved via `@PluginImplConfig`. |
+
+#### Threats and mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| Username enumeration -- an attacker distinguishes existing from non-existing users by observing different error messages. | When a user is not found, the handler returns a generic `"Authentication failed"` error message identical to the message returned for incorrect credentials. |
+| Timing side-channel -- an attacker distinguishes existing from non-existing users by measuring response times (credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists). | Rather than trying to equalize inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the handler applies a fixed delay to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections. |
+| SCRAM protocol correctness -- a bug in the SCRAM implementation could allow authentication bypass or credential leakage. | Delegated to Kafka's own `SaslServer`, which is widely deployed and well-tested. The handler is responsible only for credential lookup and passing credentials to the `SaslServer` via a `CallbackHandler`. |
+
+#### Known limitations
+
+- **SCRAM channel binding not supported.** [RFC 5802 Section 6][rfc5802-s6] describes channel binding for SCRAM. Kafka does not use SCRAM channel binding, so this implementation follows Kafka's approach and does not implement it.
+
+---
+
+### Component 4: OAUTHBEARER mechanism handler
+
+#### Summary
+
+The OAUTHBEARER mechanism handler (`OauthBearerHandler`) validates JWT bearer tokens at the proxy without forwarding them to the broker. The `OauthBearerHandlerFactory` manages the JWKS endpoint configuration and callback handler lifecycle.
+
+Key features:
+
+- **JWT validation via Kafka's `OAuthBearerValidatorCallbackHandler`.** The factory configures the callback handler at `initialize()` time with the JWKS endpoint, expected audience/issuer, and refresh settings. Per-connection handlers receive the shared callback handler and use it to create a `SaslServer` via the JSSE/SASL framework.
+- **Token lifetime extraction for reauthentication.** After successful authentication, the handler extracts the token's remaining lifetime from the `SaslServer`'s negotiated `CREDENTIAL.LIFETIME.MS` property, returning it via `AuthenticationResult.sessionLifetimeMs` for use in session lifetime computation (see [Reauthentication](#reauthentication-kip-368)).
+- **No credential store required.** OAUTHBEARER is architecturally simpler than SCRAM -- the factory's only external dependency is the JWKS endpoint, and authentication is typically single-round (client sends token, server validates it).
+
+**Key differences from the existing OAUTHBEARER validation filter:**
+- The existing validation filter validates tokens then _forwards_ the SASL exchange to the broker. It is fundamentally a SASL passthrough technique. In contrast, the termination handler validates tokens and _short-circuits_ -- the broker never sees a SASL exchange.
+- The handler factory owns its callback handler and JWKS configuration, receiving them at `initialize()` time rather than requiring a credential store.
+
+#### API surfaces
+
+The OAUTHBEARER handler factory uses:
+
+- `MechanismHandlerFactory` / `MechanismHandler` (internal, Component 2) -- the internal extension point.
+
+It does not use the `ScramCredentialStore` SPI. Token validation is performed entirely by Kafka's `OAuthBearerValidatorCallbackHandler`.
+
+#### Configuration
+
+OAUTHBEARER is configured via `OauthBearerMechanismConfig`:
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `jwksEndpointUrl` | `URI` | Yes | -- | URL of the JWKS endpoint for fetching token signing keys. |
+| `expectedAudience` | `String` | Yes | -- | Expected `aud` claim value. Comma-separated for multiple audiences. Tokens without a matching audience are rejected. |
+| `expectedIssuer` | `String` | Yes | -- | Expected `iss` claim value. Tokens from a different issuer are rejected. |
+| `scopeClaimName` | `String` | No | `"scope"` | JWT claim name containing the scope. |
+| `subClaimName` | `String` | No | `"sub"` | JWT claim name containing the subject. |
+| `jwksEndpointRefreshMs` | `Long` | No | Kafka default | Interval in milliseconds between JWKS endpoint refreshes. |
+| `jwksEndpointRetryBackoffMs` | `Long` | No | Kafka default | Initial retry backoff in milliseconds when the JWKS endpoint is unreachable. |
+| `jwksEndpointRetryBackoffMaxMs` | `Long` | No | Kafka default | Maximum retry backoff in milliseconds. |
+
+**Security note:** `expectedAudience` and `expectedIssuer` are both required. Without audience validation, a token issued for a different service would be accepted; without issuer validation, tokens from any issuer whose keys happen to be in the JWKS would be accepted.
+
+#### Threats and mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| Token from wrong audience or issuer -- a JWT issued for a different service or identity provider is presented to the proxy. | Both `expectedAudience` and `expectedIssuer` are required fields. The handler rejects tokens that do not match. |
+| JWKS endpoint compromise -- an attacker controls the JWKS endpoint and supplies signing keys for forged tokens. | Mitigated operationally: the JWKS endpoint URL is set by the proxy administrator, not by clients. TLS protects the endpoint in transit (using the JVM's default trust store). |
+
+#### Known limitations
+
+- **No TLS configuration for the JWKS endpoint.** Kafka's `OAuthBearerValidatorCallbackHandler` uses an internal HTTP client with no TLS configuration surface. There is no way to configure custom trust stores or client certificates for HTTPS communication with the JWKS endpoint. The JVM's default trust store is used. This limitation is inherited from Kafka's callback handler and shared with the existing OAUTHBEARER validation filter.
+- **No rate limiting.** The handler does not implement rate limiting or brute-force protection for failed authentication attempts. The existing OAUTHBEARER validation filter has Caffeine-based rate limiting with exponential backoff that could serve as a reference for a future implementation.
+- **Hardcoded `BrokerJwtValidator`.** The handler hardcodes `BrokerJwtValidator` as the JWT validator. The existing OAUTHBEARER validation filter allows this to be overridden via `jwtValidatorClass` for custom claim validation logic.
+
+---
+
+### Component 5: ScramCredentialStore SPI (public plugin API)
+
+#### Summary
+
+The `ScramCredentialStore` SPI, defined in the `kroxylicious-sasl-credential-store` module, is the user-facing plugin API for SCRAM credential store providers. It provides asynchronous credential lookup decoupled from any particular storage backend.
+
+The SPI is intentionally SCRAM-specific. OAUTHBEARER uses token validation against a JWKS endpoint, which has a fundamentally different shape from stored credential lookup. Rather than creating a leaky abstraction that covers both, each mechanism family uses its own resource management approach (see [Rejected alternatives](#rejected-alternatives)).
+
+**No Kafka type dependencies.** The SPI types (`ScramCredentialStore`, `ScramCredentialStoreService`, `ScramCredential`, exception hierarchy) do not reference any Kafka types. Implementors of the credential store SPI are not transitively exposed to Kafka internal APIs.
+
+#### API surfaces
+
+All types are in the `io.kroxylicious.sasl.credentialstore` package.
+
+**`ScramCredentialStore`** -- the lookup interface:
+
+```java
+public interface ScramCredentialStore {
+
+    CompletionStage<ScramCredential> lookupCredential(String username);
+}
+```
+
+Returns a `CompletionStage` that completes with:
+- A `ScramCredential` if the user exists.
+- `null` if the user does not exist.
+- Exceptional completion with `CredentialLookupException` (or subtype) on infrastructure failure.
+
+**`ScramCredentialStoreService<C>`** -- the lifecycle interface for credential store providers. Follows the same initialize/build/close pattern used by `KmsService<C>`:
+
+```java
+public interface ScramCredentialStoreService<C> extends AutoCloseable {
+
+    void initialize(C config);
+
+    ScramCredentialStore buildCredentialStore() throws IllegalStateException;
+
+    @Override
+    default void close() { }
+}
+```
+
+Lifecycle:
+1. `initialize(C config)` -- validate and store configuration. Called exactly once.
+2. `buildCredentialStore()` -- create an operational store instance. May be called multiple times.
+3. `close()` -- release resources. Must be idempotent. Must tolerate being called on an uninitialized or partially initialized service.
+
+**`ScramCredential`** -- immutable record holding the SCRAM credential data:
+
+```java
+public record ScramCredential(
+        String username,
+        byte[] salt,
+        int iterations,
+        byte[] serverKey,
+        byte[] storedKey,
+        String hashAlgorithm) {
+
+    public static final int MINIMUM_ITERATIONS = 4096;
+    // Supported: "SHA-256", "SHA-512"
+}
+```
+
+Security properties:
+- `byte[]` fields (`salt`, `serverKey`, `storedKey`) use defensive copies in both the constructor and accessors.
+- `toString()` redacts sensitive fields (salt, serverKey, storedKey).
+- `iterations` must be at least 4096 (RFC 5802 minimum).
+- `hashAlgorithm` must be `"SHA-256"` or `"SHA-512"`.
+
+**Exception hierarchy:**
+
+```java
+public class CredentialLookupException extends Exception { ... }
+
+public class CredentialServiceUnavailableException extends CredentialLookupException { ... }
+
+public class CredentialServiceTimeoutException extends CredentialLookupException { ... }
+```
+
+- `CredentialLookupException` -- base exception for credential lookup failures (service-level issues, not user-not-found).
+- `CredentialServiceUnavailableException` -- backing service is unavailable (database down, LDAP unreachable, etc.).
+- `CredentialServiceTimeoutException` -- lookup operation timed out.
+
+#### Known limitations
+
+- The SPI covers only SCRAM credential lookup. There is no generic credential store abstraction spanning mechanisms. This is a deliberate design decision (see [Rejected alternatives](#rejected-alternatives)).
+
+---
+
+### Component 6: KeyStore credential store provider
+
+#### Summary
+
+The first-party credential store provider, in the `kroxylicious-sasl-credential-store-provider-keystore` module, stores SCRAM credentials in a Java `KeyStore` file. It follows the project's established pattern of using KeyStores to store secrets. Each credential is serialized as JSON and stored as a `SecretKey` entry keyed by username.
+
+Key features:
+
+- **PKCS12 and JKS support.** Both KeyStore types are supported.
+- **In-memory loading.** The entire KeyStore is loaded into memory at construction time for sub-millisecond lookups.
+- **`PasswordProvider` for secrets.** Uses the Kroxylicious `PasswordProvider` abstraction for KeyStore and key passwords, supporting both file-based (production) and inline (development) password configuration.
+- **File permission enforcement.** On POSIX systems, the credential store refuses to load a KeyStore file that has group or world read/write permissions. This prevents accidental exposure through overly permissive file modes.
+
+#### API surfaces
+
+- Implements `ScramCredentialStoreService<KeystoreScramCredentialStoreConfig>` (from Component 5).
+- Annotated with `@Plugin` for discovery by the Kroxylicious plugin system.
+
+#### Configuration
+
+The provider is configured via `KeystoreScramCredentialStoreConfig`:
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `file` | `String` | Yes | -- | Path to the Java KeyStore file. |
+| `storePassword` | `PasswordProvider` | Yes | -- | Password provider for the KeyStore. In production, use file-based password (`file: /path/to/password.txt`). |
+| `keyPassword` | `PasswordProvider` | No | value of `storePassword` | Password provider for individual keys within the KeyStore. Defaults to `storePassword` if not specified. |
+| `storeType` | `String` | No | `KeyStore.getDefaultType()` | KeyStore type (e.g. `PKCS12`, `JKS`). Defaults to the JVM platform default. |
+
+#### CLI tool: `KeystoreCredentialTool`
+
+The credentials stored in the KeyStore are serialized JSON, which makes for less than ideal UX: the user needs to ensure the JSON has the required format. Moreover, some fields are computed from cryptographic operations on the password which must be done correctly for authentication to work, and where incorrect construction can undermine security.
+
+To provide a better UX and to reduce the possibility of user error compromising security, a PicoCLI-based command-line tool is provided for managing credentials in KeyStore files.
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `create` | Create a new KeyStore file. |
+| `add-user` | Add a SCRAM credential for a user. |
+| `remove-user` | Remove a user's credential. |
+| `update-password` | Update a user's password (recomputes SCRAM credential). |
+| `list-users` | List all usernames in the KeyStore. |
+
+**Security measures:**
+- Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure (they appear in shell history and process listings). Command-line password arguments are supported but gated behind an `--unlock-insecure-options` flag that displays security warnings.
+- A 12-character minimum password length is enforced, following [NIST SP 800-63B][nist-sp800-63b] guidance.
+- SCRAM credentials are generated with 10,000 iterations (above the RFC 5802 minimum of 4,096) and 20 bytes of random salt.
+
+#### Threats and mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| KeyStore file exposure -- an attacker gains read access to the KeyStore file on disk. | POSIX file permission check: the provider refuses to load a KeyStore with group or world read/write permissions. The KeyStore itself is password-encrypted. |
+| Credential material in memory -- sensitive key material (serverKey, storedKey, salt) is accessible in the JVM heap. | `ScramCredential` uses defensive copies for all `byte[]` fields in both the constructor and accessors, preventing callers from mutating stored data. `toString()` redacts sensitive fields. |
+
+#### Known limitations
+
+- **No hot reloading.** Credential changes require a proxy restart or virtual cluster reconfiguration. The KeyStore is loaded once at construction time.
+
+---
+
+### Component 7: Module architecture
 
 The implementation is organized into three modules, following the same pattern as the existing KMS modules (`kroxylicious-kms`, `kroxylicious-kms-provider-*`):
 
-| Module | Purpose |
-|--------|---------|
-| `kroxylicious-filters/kroxylicious-sasl-termination` | The termination filter, state machine, mechanism handler extensibility, and all built-in mechanism implementations |
-| `kroxylicious-sasl-credential-store` | Public API: defines the credential store SPI used by SCRAM mechanism handlers |
-| `kroxylicious-sasl-credential-store-providers/kroxylicious-sasl-credential-store-provider-keystore` | First-party SCRAM credential provider: Java KeyStore-backed implementation with CLI management tool |
+| Module | Contents | Components |
+|--------|----------|------------|
+| `kroxylicious-filters/kroxylicious-sasl-termination` | Filter, state machine, `MechanismHandler` / `MechanismHandlerFactory` internal SPI, `MechanismConfig` sealed hierarchy, and all built-in mechanism handler implementations (SCRAM, OAUTHBEARER). | 1, 2, 3, 4 |
+| `kroxylicious-sasl-credential-store` | Public API: `ScramCredentialStore`, `ScramCredentialStoreService`, `ScramCredential`, exception hierarchy. No implementation, no Kafka dependencies. | 5 |
+| `kroxylicious-sasl-credential-store-providers/kroxylicious-sasl-credential-store-provider-keystore` | First-party SCRAM credential provider: Java KeyStore-backed `ScramCredentialStoreService` implementation with `KeystoreCredentialTool` CLI. | 6 |
 
 ## Security model
 
