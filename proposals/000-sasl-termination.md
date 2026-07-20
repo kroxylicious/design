@@ -68,17 +68,33 @@ RequiringHandshake ──→ RequiringAuthenticate ←──╮
                               │                  │
                               ├─ (multi-round) ──╯
                               │
-                              ├──→ Authenticated (terminal)
+                              ├──→ Authenticated ──→ (reauth) ──→ RequiringAuthenticate
+                              │         │
+                              │         └──→ (expired + non-SASL request) ──→ reject & close
                               │
                               └──→ Failed (terminal)
 ```
 
 - **RequiringHandshake:** Initial state. Accepts `SASL_HANDSHAKE` requests, which negotiate the mechanism and transition to `RequiringAuthenticate`.
 - **RequiringAuthenticate:** Accepts `SASL_AUTHENTICATE` requests. Loops back to itself for multi-round mechanisms (e.g. SCRAM). Carries a reference to the `MechanismHandler` for the negotiated mechanism.
-- **Authenticated:** Terminal success state. The filter calls `filterContext.clientSaslAuthenticationSuccess(mechanism, subject)` to propagate the authenticated identity to downstream filters, then forwards all subsequent requests.
+- **Authenticated:** Success state. The filter calls `filterContext.clientSaslAuthenticationSuccess(mechanism, subject)` to propagate the authenticated identity to downstream filters, then forwards all subsequent requests. If reauthentication is configured, this state also stores the session expiry time and allows transition back to `RequiringAuthenticate` via a new `SASL_HANDSHAKE`.
 - **Failed:** Terminal failure state. The connection is closed.
 
 The sealed interface prevents creation of invalid states at compile time.
+
+#### Reauthentication (KIP-368)
+
+The filter supports [KIP-368][kip368] reauthentication. When `connectionsMaxReauth` is configured, the filter includes a `sessionLifetimeMs` value in the `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate.
+
+**Session lifetime computation:** The effective session lifetime is the minimum of:
+1. The configured `connectionsMaxReauth` value.
+2. The handler-reported credential/token lifetime (e.g. the JWT token's expiry for OAUTHBEARER).
+
+If either value is zero (no opinion / no expiry), the other is used. If both are zero, no reauthentication is required.
+
+**Client behaviour:** Standard Kafka clients (4.0+) handle reauthentication transparently via the `Selector`. When the session nears expiry, the client sends a new `SASL_HANDSHAKE` + `SASL_AUTHENTICATE` sequence over the existing connection. This is invisible to application code.
+
+**Server-side enforcement:** If the session has expired and a non-SASL request arrives, the filter rejects it with `SASL_AUTHENTICATION_FAILED` and closes the connection. `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests are always accepted regardless of session expiry, to allow reauthentication.
 
 ### Mechanism handler extension point
 
@@ -110,7 +126,7 @@ The OAUTHBEARER handler validates JWT bearer tokens at the proxy without forward
 
 The handler uses Kafka's `OAuthBearerValidatorCallbackHandler` for JWT validation, the same mechanism used by the existing OAUTHBEARER validation filter. The `OauthBearerHandlerFactory` manages the JWKS endpoint configuration and callback handler lifecycle: at `initialize()`-time it configures the callback handler with the JWKS endpoint, expected audience/issuer, and refresh settings; per-connection handlers receive the shared callback handler and use it to create a `SaslServer` via the JSSE/SASL framework.
 
-OAUTHBEARER is architecturally the simpler mechanism — it requires no credential store. The factory's only external dependency is the JWKS endpoint, and authentication is typically single-round (client sends token, server validates it).
+OAUTHBEARER is architecturally the simpler mechanism — it requires no credential store. The factory's only external dependency is the JWKS endpoint, and authentication is typically single-round (client sends token, server validates it). After successful authentication, the handler extracts the token's remaining lifetime from the `SaslServer`'s negotiated `CREDENTIAL.LIFETIME.MS` property for use in session lifetime computation (see [Reauthentication](#reauthentication-kip-368)).
 
 **Key differences from the existing OAUTHBEARER validation filter:**
 - The existing validation filter validates tokens then _forwards_ the SASL exchange to the broker. It is fundamentally a SASL passthrough technique. In contrast, the termination handler validates tokens and _short-circuits_ — the broker never sees a SASL exchange.
@@ -177,6 +193,7 @@ Security measures:
 filters:
   - type: SaslTermination
     config:
+      connectionsMaxReauth: 1h
       mechanisms:
         SCRAM-SHA-256:
           credentialStore: KeystoreScramCredentialStoreService
@@ -192,6 +209,8 @@ filters:
 ```
 
 The `mechanisms` map is keyed by IANA-registered mechanism name. The config shape for each entry depends on the mechanism: SCRAM mechanisms use `credentialStore`/`credentialStoreConfig`, while OAUTHBEARER uses JWKS endpoint configuration directly.
+
+The optional `connectionsMaxReauth` sets the maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable.
 
 ### Module architecture
 
@@ -251,7 +270,6 @@ Both issues should be fixed before merge.
 
 - **Compromised KeyStore files:** Protecting the KeyStore file at rest is an operational concern (file permissions, encryption at rest) rather than an application concern.
 - **SCRAM channel binding:** [RFC 5802 Section 6][rfc5802-s6] describes channel binding for SCRAM. Kafka does not use SCRAM channel binding, so this implementation follows Kafka's approach.
-- **Reauthentication (KIP-368):** The current implementation does not support SASL reauthentication. This is acceptable for the initial release and can be added later.
 
 ## Affected/not affected projects
 
@@ -322,6 +340,7 @@ Supporting SASL PLAIN was deferred because:
 - [RFC 7628 — A Set of Simple Authentication and Security Layer (SASL) Mechanisms for OAuth][rfc7628]
 - [KIP-84 — Support SASL SCRAM mechanisms][kip84]
 - [KIP-255 — OAuth Authentication via SASL/OAUTHBEARER][kip255]
+- [KIP-368 — Allow SASL Connections to Periodically Re-Authenticate][kip368]
 - [NIST SP 800-63B — Digital Identity Guidelines: Authentication and Lifecycle Management][nist-sp800-63b]
 
 [proposal-004]: 004-terminology-for-authentication.md
@@ -334,6 +353,7 @@ Supporting SASL PLAIN was deferred because:
 [rfc7628]: https://www.rfc-editor.org/rfc/rfc7628
 [kip84]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-84%3A+Support+SASL+SCRAM+mechanisms
 [kip255]: https://cwiki.apache.org/confluence/pages/viewpage.action?pageId=75968876
+[kip368]: https://cwiki.apache.org/confluence/spaces/KAFKA/pages/89068981/KIP-368+Allow+SASL+Connections+to+Periodically+Re-Authenticate
 [nist-sp800-63b]: https://pages.nist.gov/800-63-4/sp800-63b.html
 [sasl-inspection]: https://kroxylicious.io/kroxylicious/#assembly-sasl-inspection
 [oauthbearer-validation]: https://kroxylicious.io/kroxylicious/#assembly-configuring-oauth-bearer-validation-filter
