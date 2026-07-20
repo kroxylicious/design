@@ -170,7 +170,7 @@ filters:
 
 The filter delegates the actual authentication exchange to mechanism-specific handlers, discovered via an internal extension point. This extension point provides internal extensibility for adding new mechanism support without modifying the filter itself.
 
-These are **not** user-facing plugins (no `@Plugin` annotation). The intention behind this decision is to encourage a small number of secure, high-quality implementations, one for each mechanism. Allowing pluggable implementations would make auditing for correctness and security significantly harder.
+These are **not** intended to be configurable by end uses (no `@Plugin` annotation). The intention behind this decision is to encourage a small number of secure, high-quality implementations, one for each mechanism. Allowing pluggable implementations would make auditing for correctness and security significantly harder.
 
 #### API surfaces
 
@@ -267,12 +267,12 @@ Factories are registered in `META-INF/services/io.kroxylicious.filter.sasl.termi
 
 #### Summary
 
-The SCRAM mechanism handler (`ScramHandler`) implements multi-round SCRAM-SHA-256 and SCRAM-SHA-512 authentication by delegating to Apache Kafka's own `SaslServer` implementation via the JSSE/SASL framework. Two factories -- `ScramSha256HandlerFactory` and `ScramSha512HandlerFactory` -- manage the credential store lifecycle and create per-connection handler instances.
+The SCRAM mechanism handler (`ScramHandler`) implements multi-round `SCRAM-SHA-256` and `SCRAM-SHA-512` authentication by delegating to Apache Kafka's own `SaslServer` implementation via the JSSE/SASL framework. Two factories -- `ScramSha256HandlerFactory` and `ScramSha512HandlerFactory` -- manage the credential store lifecycle and create per-connection handler instances.
 
 Key features:
 
 - **Multi-round SCRAM exchange.** SCRAM is a challenge-response protocol. The handler processes the client-first-message (round 1) and subsequent rounds, returning `CHALLENGE` until the exchange completes.
-- **Delegation to Kafka's SaslServer.** The handler does not reimplement SCRAM. It creates a Kafka `SaslServer` with a `CallbackHandler` that supplies the looked-up credential, then processes all messages through it. This benefits from Kafka's battle-tested implementation.
+- **Delegation to Kafka's `SaslServer`.** The handler does not reimplement SCRAM. It creates a Kafka `SaslServer` with a `CallbackHandler` that supplies the looked-up credential, then processes all messages through it. This benefits from Kafka's battle-tested implementation.
 - **Timing side-channel mitigation.** A fixed delay is applied to all authentication rounds to prevent attackers from distinguishing existing from non-existing users by measuring response times.
 
 #### Authentication flow
@@ -519,7 +519,10 @@ To provide a better UX and to reduce the possibility of user error compromising 
 | Threat | Mitigation |
 |--------|------------|
 | KeyStore file exposure -- an attacker gains read access to the KeyStore file on disk. | POSIX file permission check: the provider refuses to load a KeyStore with group or world read/write permissions. The KeyStore itself is password-encrypted. |
-| Credential material in memory -- sensitive key material (serverKey, storedKey, salt) is accessible in the JVM heap. | `ScramCredential` uses defensive copies for all `byte[]` fields in both the constructor and accessors, preventing callers from mutating stored data. `toString()` redacts sensitive fields. |
+
+**Accepted risk: credential material in JVM heap.** SCRAM credential data (serverKey, storedKey, salt) is held in memory for the lifetime of the proxy. An attacker who can obtain a heap dump (e.g. via JMX, `/proc/<pid>/mem`, or a core dump) can extract this material. There is no practical mitigation within a JVM — `byte[]` contents cannot be reliably zeroed because the GC may copy them, and off-heap storage would add complexity without eliminating the risk. Operators should protect heap dump access through operational controls (JMX authentication, file permissions on core dumps, container security policies).
+
+Note: `ScramCredential` uses defensive copies for `byte[]` fields and redacts `toString()`, but these are correctness measures (preventing accidental mutation and log leakage), not security mitigations against heap inspection.
 
 #### Known limitations
 
@@ -544,7 +547,7 @@ The implementation is organized into three modules, following the same pattern a
 - **KeyStore encryption:** Credentials are stored in Java KeyStore files, encrypted with the KeyStore password. File-system permissions and KeyStore passwords are the primary access controls.
 - **PasswordProvider abstraction:** Production deployments should use file-based passwords rather than inline passwords in configuration. The `PasswordProvider` interface supports both.
 - **File permission enforcement:** On POSIX systems, the credential store refuses to load a KeyStore file that has group or world read/write permissions. This prevents accidental exposure of credential material through overly permissive file modes.
-- **In-memory handling:** `ScramCredential` uses defensive copies for all `byte[]` fields (salt, serverKey, storedKey) in both the constructor and accessors, preventing callers from mutating stored credential data. `toString()` redacts sensitive fields.
+- **In-memory handling:** `ScramCredential` uses defensive copies for `byte[]` fields (correctness measure against accidental mutation) and `toString()` redacts sensitive fields (prevents log leakage). Credential material in the JVM heap is an accepted risk — see Component 6 threat discussion.
 
 ### SCRAM protocol correctness
 
