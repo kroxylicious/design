@@ -228,6 +228,7 @@ The implementation is organized into three modules, following the same pattern a
 
 - **KeyStore encryption:** Credentials are stored in Java KeyStore files, encrypted with the KeyStore password. File-system permissions and KeyStore passwords are the primary access controls.
 - **PasswordProvider abstraction:** Production deployments should use file-based passwords rather than inline passwords in configuration. The `PasswordProvider` interface supports both.
+- **File permission enforcement:** On POSIX systems, the credential store refuses to load a KeyStore file that has group or world read/write permissions. This prevents accidental exposure of credential material through overly permissive file modes.
 - **In-memory handling:** `ScramCredential` uses defensive copies for all `byte[]` fields (salt, serverKey, storedKey) in both the constructor and accessors, preventing callers from mutating stored credential data. `toString()` redacts sensitive fields.
 
 ### SCRAM protocol correctness
@@ -256,7 +257,6 @@ Without mitigation, an attacker could distinguish existing from non-existing use
 
 ### Threats considered but out of scope
 
-- **Compromised KeyStore files:** Protecting the KeyStore file at rest is an operational concern (file permissions, encryption at rest) rather than an application concern.
 - **SCRAM channel binding:** [RFC 5802 Section 6][rfc5802-s6] describes channel binding for SCRAM. Kafka does not use SCRAM channel binding, so this implementation follows Kafka's approach.
 
 ## Affected/not affected projects
