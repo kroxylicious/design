@@ -100,6 +100,10 @@ The filter supports [KIP-368][kip368] reauthentication.
 
 If either value is zero (no opinion / no expiry), the other is used. If both are zero, no reauthentication is required.
 
+Reauthentication is a protocol-level feature, not mechanism-specific — all mechanisms support it. The difference is the session lifetime source:
+- **SCRAM:** Credentials do not expire, so the handler reports no lifetime. `maxTimeBeforeReauth` is the sole source of session lifetime. Without it configured, SCRAM sessions never require reauthentication.
+- **OAUTHBEARER:** Tokens have an inherent expiry. The handler reports the token's remaining lifetime, and the effective session lifetime is `min(maxTimeBeforeReauth, tokenExpiry)`. Even without `maxTimeBeforeReauth`, sessions expire when the token does.
+
 **Client behaviour:** Standard Kafka clients (4.0+) handle reauthentication transparently via the `Selector`. When the session nears expiry, the client sends a new `SASL_HANDSHAKE` + `SASL_AUTHENTICATE` sequence over the existing connection. This is invisible to application code.
 
 **Server-side enforcement:** If the session has expired and a non-SASL request arrives, the filter rejects it with `SASL_AUTHENTICATION_FAILED` and closes the connection. `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests are always accepted regardless of session expiry, to allow reauthentication.
