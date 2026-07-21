@@ -74,8 +74,8 @@ Key features:
 
 The filter maintains per-connection state using a sealed interface `State` with four concrete states:
 
-| From state | Event | To state |
-|------------|-------|----------|
+| From state | Triggering event | To state |
+|------------|------------------|----------|
 | **RequiringHandshake** | `SASL_HANDSHAKE` with supported mechanism | **RequiringAuthenticate** |
 | **RequiringAuthenticate** | `SASL_AUTHENTICATE` → handler returns `CHALLENGE` | **RequiringAuthenticate** (loop) |
 | **RequiringAuthenticate** | `SASL_AUTHENTICATE` → handler returns `SUCCESS` | **Authenticated** |
