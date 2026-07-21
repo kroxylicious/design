@@ -163,7 +163,7 @@ filters:
 
 #### Known limitations
 
-- The filter does not support SASL PLAIN (see [Rejected alternatives](#rejected-alternatives)).
+- The filter does not support SASL PLAIN or GSSAPI (Kerberos). See [Rejected alternatives](#rejected-alternatives).
 
 ---
 
@@ -725,6 +725,14 @@ Supporting SASL PLAIN was deferred because:
 - PLAIN transmits passwords in cleartext (Base64 encoded, not encrypted), making it unsuitable for production use without TLS.
 - SCRAM provides mutual authentication and never transmits the password (though should also be used with TLS to avoid MitM attacks).
 - If PLAIN support is needed in the future, it could be added as a new `MechanismHandler` implementation.
+
+### GSSAPI (Kerberos) mechanism support
+
+Supporting SASL GSSAPI was deferred because:
+- GSSAPI/Kerberos requires the proxy to hold a service principal keytab and participate in the Kerberos infrastructure (KDC, realm trust, service tickets). This is a fundamentally different operational model from the credential store or JWKS endpoint approaches used by SCRAM and OAUTHBEARER.
+- Terminating Kerberos at the proxy would require the proxy to impersonate the broker's service principal (or hold its own), raising complex delegation and trust questions.
+- The demand for Kerberos termination (as opposed to passthrough) is lower than for SCRAM and OAUTHBEARER, which cover the most common credential isolation and identity provider integration use cases.
+- If GSSAPI support is needed in the future, it could be added as a new `MechanismHandler` implementation, but the operational and trust model would need careful design.
 
 ## References
 
