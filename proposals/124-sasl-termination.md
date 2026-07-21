@@ -74,17 +74,16 @@ Key features:
 
 The filter maintains per-connection state using a sealed interface `State` with four concrete states:
 
-```
-RequiringHandshake ──> RequiringAuthenticate <────╮
-                              |                   |
-                              |─> (multi-round) ──╯
-                              |
-                              |──> Authenticated ──> (reauth) ──> RequiringAuthenticate
-                              |         |
-                              |         └──> (expired + non-SASL request) ──> reject & close
-                              |
-                              └──> Failed (terminal)
-```
+| From state | Event | To state |
+|------------|-------|----------|
+| **RequiringHandshake** | `SASL_HANDSHAKE` with supported mechanism | **RequiringAuthenticate** |
+| **RequiringAuthenticate** | `SASL_AUTHENTICATE` → handler returns `CHALLENGE` | **RequiringAuthenticate** (loop) |
+| **RequiringAuthenticate** | `SASL_AUTHENTICATE` → handler returns `SUCCESS` | **Authenticated** |
+| **RequiringAuthenticate** | `SASL_AUTHENTICATE` → handler returns `FAILURE` | **Failed** |
+| **Authenticated** | `SASL_HANDSHAKE` (reauthentication) | **RequiringAuthenticate** |
+| **Authenticated** | non-SASL request, session not expired | forward to broker |
+| **Authenticated** | non-SASL request, session expired | reject and close |
+| **Failed** | *(terminal — connection closed)* | — |
 
 - **RequiringHandshake:** Initial state. Accepts `SASL_HANDSHAKE` requests, which negotiate the mechanism and transition to `RequiringAuthenticate`.
 - **RequiringAuthenticate:** Accepts `SASL_AUTHENTICATE` requests. Loops back to itself for multi-round mechanisms (e.g. SCRAM). Carries a reference to the `MechanismHandler` for the negotiated mechanism.
