@@ -61,7 +61,7 @@ The proposal is organized per-component. Each component section covers its summa
 
 #### Summary
 
-The `SaslTermination` filter is a `@Plugin`-annotated `FilterFactory` that intercepts `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests, authenticating clients at the proxy and short-circuiting the responses without forwarding them to the broker.
+The `SaslTermination` filter is a `@Plugin`-annotated `FilterFactory` that intercepts `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests, authenticating clients at the proxy and short-circuiting the responses without forwarding them to the broker. Multiple mechanisms are configured within a single filter instance because the Kafka SASL protocol requires it: the client sends a `SaslHandshakeRequest` naming its chosen mechanism, and the server responds with the set of supported mechanisms. A filter-per-mechanism model would not work because no single filter would have the complete set of supported mechanisms to advertise in the `SaslHandshakeResponse`.
 
 Key features:
 
