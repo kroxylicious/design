@@ -1,4 +1,4 @@
-# 000 - SASL Termination
+# 124 - SASL Termination
 
 SASL termination allows the Kroxylicious proxy to authenticate Kafka clients directly, without forwarding SASL exchanges to the upstream Kafka broker. This enables credential isolation, authentication protocol translation, and centralized credential management.
 
