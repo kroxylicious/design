@@ -4,7 +4,7 @@
 
 Introduce a layered abstraction for system tests that separates test intent from deployment mechanism, and organise tests into modules by what they cover: feature behaviour, operator reconciliation, webhook behaviour, and installation validation.
 
-A `ProxyScenario` describes the desired proxy configuration in deployment-agnostic terms; a `ProxyFixture` translates that into running infrastructure and blocks until convergence; the resulting `ProxyHandle` is a token of convergence that gates all subsequent interaction. An `Installer` — the primary downstream extension point — handles getting the operator, CRDs, and RBAC into the cluster independently of how proxies are deployed.
+A `ProxyScenario` describes the desired proxy configuration in deployment-agnostic terms; a `ProxyFixture` translates that into running infrastructure and blocks until convergence; the resulting `ProxyHandle` is a token of convergence that gates all subsequent interaction. An `Installer` — the primary downstream extension point — handles getting project components (operator, webhook, CRDs, RBAC) into the cluster independently of how proxies are deployed.
 
 Feature tests become portable across deployment mechanisms — the same test runs against a CRD-deployed proxy, a manifest-managed proxy, a standalone process, or a downstream distribution — and cheap enough to write before the production code, as a specification.
 
@@ -47,7 +47,7 @@ The framework needs one organising question answered for every test class: **wha
 
 Four categories of system test have fundamentally different concerns:
 
-- **Feature tests** — does record encryption work? Does authorisation enforce ACL rules? These tests care only that a correctly-configured proxy exists and is serving traffic. They must not care how the proxy was deployed. They have no Kubernetes dependency.
+- **Feature tests** — does record encryption work? Does authorisation enforce ACL rules? These tests care only that a proxy has been started with a given configuration. They must not care how the proxy was deployed. They have no Kubernetes dependency.
 
 - **Operator tests** — does the operator detect a configuration change and trigger a rolling restart? These tests are explicitly about the operator's reconciliation behaviour. They interact with Kubernetes resources directly and depend on the Kubernetes client.
 
@@ -117,11 +117,11 @@ interface ProxyFixture {
 
 This is an explicit call — not magic JUnit injection — because the test author needs to understand that `apply()` is a blocking operation that includes convergence waiting. Hiding it behind injection would obscure the framework's most important contract.
 
-Fixture implementations span two independent concerns: how the infrastructure is installed (CRDs, RBAC, operator Deployment) and how proxy instances are deployed. These concerns are separated by composing a `ProxyFixture` with an `Installer`.
+Fixture implementations span two independent concerns: how the infrastructure is installed (operator, webhook, CRDs, RBAC) and how proxy instances are deployed. These concerns are separated by composing a `ProxyFixture` with an `Installer`.
 
 ### `Installer` — Infrastructure Installation
 
-`Installer` handles getting the operator, CRDs, RBAC rules, and ServiceAccounts into the cluster. It is a **public interface** — the primary extension point for downstream distributors, who typically vary only by installation method (their own OLM catalog, their own Helm chart) and not by how proxies are deployed.
+`Installer` handles getting project components — operator, webhook, CRDs, RBAC rules, ServiceAccounts — into the cluster. It is a **public interface** — the primary extension point for downstream distributors, who typically vary only by installation method (their own OLM catalog, their own Helm chart) and not by how proxies are deployed.
 
 ```java
 interface Installer {
@@ -150,7 +150,7 @@ Four fixture implementations cover the deployment mechanisms:
 
 **`ManifestProxyFixture`**: translates `ProxyScenario` into a proxy configuration file and a Kubernetes Deployment, applies them, then waits for the Deployment to reach stable state. No operator or installer required.
 
-**`SidecarProxyFixture`**: takes an `Installer` as a constructor dependency. The installer puts the operator and admission webhook into the cluster; the fixture creates a pod with the injection annotation, waits for the webhook to mutate it and the sidecar to be ready, then returns a `ProxyHandle`. Feature tests run against it unchanged — the proxy happens to be a sidecar rather than a standalone Deployment.
+**`SidecarProxyFixture`**: takes an `Installer` as a constructor dependency. The installer puts the admission webhook into the cluster; the fixture creates a pod with the injection annotation, waits for the webhook to mutate it and the sidecar to be ready, then returns a `ProxyHandle`. Feature tests run against it unchanged — the proxy happens to be a sidecar rather than a standalone Deployment.
 
 **`StandaloneProxyFixture`**: starts the proxy as a local Java process with a generated configuration file, waits for the port to be ready, and returns a `ProxyHandle` with a localhost bootstrap. No Kubernetes, no installer, no namespaces. `KubernetesCapability` is not available for tests running against this fixture.
 
