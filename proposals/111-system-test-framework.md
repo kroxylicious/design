@@ -4,7 +4,7 @@
 
 Introduce a layered abstraction for system tests that separates test intent from deployment mechanism, and organise tests into modules by what they cover: feature behaviour, operator reconciliation, webhook behaviour, and installation validation.
 
-A `ProxyScenario` describes the desired proxy configuration in deployment-agnostic terms; a `ProxyFixture` translates that into running infrastructure and blocks until convergence; the resulting `ProxyHandle` is a token of convergence that gates all subsequent interaction. An `Installer` — the primary downstream extension point — handles getting project components (operator, webhook, CRDs, RBAC) into the cluster independently of how proxies are deployed.
+A `ProxyScenario` describes the desired proxy configuration in deployment-agnostic terms; a `ProxyFixture` translates that into running infrastructure and blocks until convergence; the resulting `ProxyHandle` is a token of convergence that gates all subsequent interaction. A `KafkaClusterFixture` provisions the upstream Kafka cluster and returns a `KafkaClusterHandle` — the same handle-based convergence pattern, making cluster provisioning pluggable across implementations (TestContainers, Strimzi, in-VM). An `Installer` — the primary downstream extension point — handles getting project components (operator, webhook, CRDs, RBAC) into the cluster independently of how proxies are deployed.
 
 Feature tests become portable across deployment mechanisms — the same test runs against a CRD-deployed proxy, a manifest-managed proxy, a standalone process, or a downstream distribution — and cheap enough to write before the production code, as a specification.
 
@@ -59,10 +59,10 @@ These are not tags on a single test suite — they are separate modules with dif
 
 | Module | Depends on | Kubernetes dependency | Portable across fixtures |
 |---|---|---|---|
-| `systemtest/feature` | `ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec` | None | Yes — runs against any `ProxyFixture` |
-| `systemtest/operator` | `OperatorFixture`, `KubernetesCapability`, CRD types, K8s client | Yes | No — requires operator installed |
+| `systemtest/feature` | `ProxyFixture`, `KafkaClusterFixture`, `ProxyScenario`, `ProxyHandle`, `KafkaClusterHandle`, `FilterSpec` | None | Yes — runs against any `ProxyFixture` |
+| `systemtest/operator` | `OperatorFixture`, `KafkaClusterFixture`, `KubernetesCapability`, CRD types, K8s client | Yes | No — requires operator installed |
 | `systemtest/webhook` | `WebhookFixture`, `KubernetesCapability`, K8s client | Yes | No — requires webhook installed |
-| `systemtest/installer` | `ProxyFixture`, `KubernetesCapability` | Yes (except standalone) | No — one test per installer |
+| `systemtest/installer` | `ProxyFixture`, `KafkaClusterFixture`, `KubernetesCapability` | Yes (except standalone) | No — one test per installer |
 
 Feature tests do not import Kubernetes types. They cannot accidentally depend on CRDs, namespaces, or client libraries. The module boundary enforces this at compile time, not by convention.
 
@@ -74,17 +74,19 @@ A plain Java value object describing what configuration the proxy should have. N
 
 ```java
 ProxyScenario scenario = ProxyScenario.builder()
-        .withUpstream(clusterName)
+        .withUpstream(upstream)
         .withFilter(new RecordEncryptionFilterSpec(testKmsFacade))
         .build();
 
 ProxyScenario scenario = ProxyScenario.builder()
-        .withUpstream(clusterName)
+        .withUpstream(upstream)
         .withFilter(new RecordEncryptionFilterSpec(testKmsFacade)
                               .withExperimentalConfig(config))
         .withDownstreamTls(tls)
         .build();
 ```
+
+Where `upstream` is a `KafkaClusterHandle` obtained from `kafkaClusterFixture.provision()` — see [KafkaClusterFixture](#kafkaclusterfixture--upstream-cluster-provisioning).
 
 ### `FilterSpec` — The Filter DSL
 
@@ -181,15 +183,40 @@ interface ProxyHandle {
 
 `waitForRestart()` is on `ProxyHandle` rather than on any capability because restarting the proxy is meaningful across all fixture types — on Kubernetes the fixture observes the Deployment rollout; on bare metal the fixture manages the process restart directly. The concept is universal; the mechanism is fixture-specific.
 
-### Injection Model and Tags
+### `KafkaClusterFixture` — Upstream Cluster Provisioning
 
-The appropriate fixture (`ProxyFixture`, `OperatorFixture`, or `WebhookFixture`) is injected by the JUnit extension at class scope — it is an environment configuration concern, long-lived, with no timing implications. For feature tests, `ProxyHandle` is always obtained explicitly by calling `proxyFixture.apply()` in the test body. This call is blocking and includes convergence waiting; making it explicit ensures the test author understands the contract.
+Tests need an upstream Kafka cluster to proxy. Provisioning that cluster is a pluggable concern with meaningfully different implementations: an in-VM broker for fast local iteration, TestContainers for a real broker without a Kubernetes dependency, Strimzi for Kubernetes-native clusters, or a managed service.
+
+`KafkaClusterFixture` follows the same pattern as the other fixtures: the extension injects it, the test author calls `provision()` explicitly, and the returned `KafkaClusterHandle` is a token proving the cluster is ready.
 
 ```java
-ProxyHandle proxy = proxyFixture.apply(scenario);  // explicit — convergence visible
+interface KafkaClusterFixture {
+    KafkaClusterHandle provision();
+}
+
+interface KafkaClusterHandle {
+    String bootstrap();
+}
 ```
 
-**Module boundaries as compile-time separation**: `systemtest/feature` tests depend only on `ProxyFixture` and have no Kubernetes dependency. `systemtest/operator` tests depend on `OperatorFixture` and the Kubernetes client. `systemtest/webhook` tests depend on `WebhookFixture` and the Kubernetes client. These are compile-time boundaries that control what a test *can* depend on.
+`KafkaClusterHandle` serves the same role as `ProxyHandle` — you cannot interact with the cluster before provisioning has completed. `ProxyScenario.withUpstream()` takes a `KafkaClusterHandle` rather than a raw string, making the dependency on a provisioned cluster explicit in the type system.
+
+**Lifecycle is the test author's choice.** A `KafkaClusterHandle` provisioned in `@BeforeAll` is shared across all tests in the class — sensible when tests don't mutate cluster state and the cluster is expensive to provision. A handle provisioned in the test body is per-test. The extension manages cleanup at the appropriate scope. This is the same model as `ProxyFixture` — the framework provides the mechanism; the test author decides the scope.
+
+**Selection**: the `KafkaClusterFixture` implementation is selected via system property (`-Dkafka.cluster=testcontainers|strimzi|invm`), consistent with fixture and installer selection.
+
+Specifying the full set of `KafkaClusterFixture` implementations and their configuration surface is out of scope for this proposal. The key contribution is establishing that upstream cluster provisioning is a pluggable, fixture-managed concern with a handle-based convergence contract — not an ambient assumption.
+
+### Injection Model and Tags
+
+The appropriate fixtures (`ProxyFixture`, `OperatorFixture`, `WebhookFixture`, and `KafkaClusterFixture`) are injected by the JUnit extension at class scope — they are environment configuration concerns, long-lived, with no timing implications. `ProxyHandle` and `KafkaClusterHandle` are always obtained explicitly by calling `apply()` or `provision()` in the test body. These calls are blocking and include convergence waiting; making them explicit ensures the test author understands the contract.
+
+```java
+KafkaClusterHandle upstream = kafkaClusterFixture.provision();  // explicit — provisioning visible
+ProxyHandle proxy = proxyFixture.apply(scenario);               // explicit — convergence visible
+```
+
+**Module boundaries as compile-time separation**: `systemtest/feature` tests depend only on `ProxyFixture`, `KafkaClusterFixture`, and their handle types, and have no Kubernetes dependency. `systemtest/operator` tests depend on `OperatorFixture` and the Kubernetes client. `systemtest/webhook` tests depend on `WebhookFixture` and the Kubernetes client. These are compile-time boundaries that control what a test *can* depend on.
 
 **Tags as runtime skip conditions**: module boundaries cannot account for runtime environment availability. Tags like `@Kubernetes` declare that a test requires a specific runtime environment and cause the extension to skip the test when that environment is not available — e.g. skipping `systemtest/operator` tests when no cluster is reachable. Fixture and installer selection is by system property (see [Fixture and Installer Selection](#fixture-and-installer-selection)).
 
@@ -198,7 +225,9 @@ ProxyHandle proxy = proxyFixture.apply(scenario);  // explicit — convergence v
 | Concept | How obtained | Reason |
 |---|---|---|
 | `ProxyFixture` / `OperatorFixture` / `WebhookFixture` | Injected (class-scoped) | Environment config, no timing implications |
+| `KafkaClusterFixture` | Injected (class-scoped) | Environment config, no timing implications |
 | `KubernetesCapability` | Injected for Kubernetes-deployed tests | Namespace and client access for resource observation |
+| `KafkaClusterHandle` | Always explicit via `provision()` | Provisioning is a blocking operation; must be visible |
 | `ProxyHandle` | Always explicit via `apply()` | Convergence is a blocking operation; must be visible |
 
 ### `KubernetesCapability` — Cluster Environment Access
@@ -217,14 +246,14 @@ The namespace is managed by the fixture. Each `apply()` call deploys into a name
 
 ### Fixture and Installer Selection
 
-Fixture and installer are selected independently via system properties:
+Fixture, installer, and Kafka cluster provisioning are selected independently via system properties:
 
 ```bash
-# Default upstream: operator installed via manifests, proxy deployed via CRDs
-mvn test -Dfixture=crd -Dinstaller=manifest
+# Default upstream: operator installed via manifests, proxy deployed via CRDs, TestContainers Kafka
+mvn test -Dfixture=crd -Dinstaller=manifest -Dkafka.cluster=testcontainers
 
-# OLM installation
-mvn test -Dfixture=crd -Dinstaller=olm
+# OLM installation with Strimzi-managed Kafka
+mvn test -Dfixture=crd -Dinstaller=olm -Dkafka.cluster=strimzi
 
 # Downstream custom installer, upstream fixture
 mvn test -Dfixture=crd -Dinstaller=com.example.downstream.MyInstaller
@@ -232,11 +261,11 @@ mvn test -Dfixture=crd -Dinstaller=com.example.downstream.MyInstaller
 # Manifest-managed proxy (no operator)
 mvn test -Dfixture=manifest
 
-# Standalone
-mvn test -Dfixture=standalone
+# Standalone with in-VM Kafka (fast local iteration)
+mvn test -Dfixture=standalone -Dkafka.cluster=invm
 ```
 
-The extension composes them: it instantiates the installer, passes it to the fixture constructor, and manages the lifecycle. When `-Dinstaller` is not specified, the fixture uses its default (manifest-based for fixtures that require an installer). Standalone and manifest fixtures do not take an installer.
+The extension composes them: it instantiates the installer, passes it to the fixture constructor, and manages the lifecycle. When `-Dinstaller` is not specified, the fixture uses its default (manifest-based for fixtures that require an installer). Standalone and manifest fixtures do not take an installer. When `-Dkafka.cluster` is not specified, the extension uses a sensible default for the fixture type.
 
 ### `KafkaClient` Abstraction
 
@@ -322,7 +351,7 @@ The webhook touches two modules:
 
 ### TCK Extension Points
 
-The framework provides public interfaces for downstream extensibility: `Installer`, `ProxyFixture`, `OperatorFixture`, and `WebhookFixture`.
+The framework provides public interfaces for downstream extensibility: `Installer`, `ProxyFixture`, `OperatorFixture`, `WebhookFixture`, and `KafkaClusterFixture`.
 
 Most downstream distributors differ only in how components are installed — their own OLM catalog, their own Helm chart, a different RBAC configuration. These distributors implement `Installer` (or configure an upstream-provided one) and compose it with upstream's fixtures, inheriting all deployment and convergence logic:
 
@@ -381,8 +410,9 @@ private void deployPortIdentifiesNodeWithRecordEncryptionFilter(
 void ensureClusterHasEncryptedMessage() {
     testKmsFacade.getTestKekManager().generateKek(KEK_PREFIX + topicName);
 
+    KafkaClusterHandle upstream = kafkaClusterFixture.provision();
     ProxyHandle proxy = proxyFixture.apply(ProxyScenario.builder()
-            .withUpstream(clusterName)
+            .withUpstream(upstream)
             .withFilter(new RecordEncryptionFilterSpec(testKmsFacade))
             .build());
 
@@ -394,7 +424,7 @@ void ensureClusterHasEncryptedMessage() {
 }
 ```
 
-The test contains only the Given/When/Then relevant to record encryption. No Kubernetes imports, no namespace — this is a `systemtest/feature` test. It works against a CRD-deployed proxy, a manifest-managed proxy, a sidecar, or a standalone process. It can be written before the filter exists — it will fail (correctly) until the production code makes it pass.
+The test contains only the Given/When/Then relevant to record encryption. No Kubernetes imports, no namespace — this is a `systemtest/feature` test. The upstream cluster is provisioned explicitly; the `KafkaClusterFixture` implementation (TestContainers, Strimzi, etc.) is selected by system property. It works against a CRD-deployed proxy, a manifest-managed proxy, a sidecar, or a standalone process. It can be written before the filter exists — it will fail (correctly) until the production code makes it pass.
 
 ### What Operator Tests Look Like
 
@@ -423,8 +453,9 @@ void shouldUpdateWhenFilterConfigurationChanges(String namespace) {
 ```java
 @Test
 void shouldUpdateWhenFilterConfigurationChanges(KubernetesCapability kube) {
+    KafkaClusterHandle upstream = kafkaClusterFixture.provision();
     ProxyHandle proxy = operatorFixture.apply(ProxyScenario.builder()
-            .withUpstream(clusterName)
+            .withUpstream(upstream)
             .withFilter(new SimpleTransformFilterSpec("foo", "bar"))
             .build());
 
@@ -449,11 +480,11 @@ void shouldUpdateWhenFilterConfigurationChanges(KubernetesCapability kube) {
 ## Affected/Not Affected Projects
 
 **Affected:**
-- **systemtest/feature**: new module. Feature tests migrated here. Depends only on the framework abstractions (`ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec`). No Kubernetes dependency.
+- **systemtest/feature**: new module. Feature tests migrated here. Depends only on the framework abstractions (`ProxyFixture`, `KafkaClusterFixture`, `ProxyScenario`, `ProxyHandle`, `KafkaClusterHandle`, `FilterSpec`). No Kubernetes dependency.
 - **systemtest/operator**: new module. Operator behaviour tests (`OperatorChangeDetectionST`) migrated here. Depends on `KubernetesCapability` and CRD types.
 - **systemtest/webhook**: new module. Webhook behaviour tests migrated here. Depends on `KubernetesCapability`.
 - **systemtest/installer**: new module. One deployment smoke test, run across the installer/fixture matrix by CI.
-- **systemtest (parent)**: parent module with child test modules (`feature`, `operator`, `webhook`, `installer`). Contains the shared framework (fixture interfaces, `ProxyScenario`, `ProxyHandle`, `KubernetesCapability`, fixture implementations) and a public API module for the `Installer` interface and supporting types.
+- **systemtest (parent)**: parent module with child test modules (`feature`, `operator`, `webhook`, `installer`). Contains the shared framework (fixture interfaces, `ProxyScenario`, `ProxyHandle`, `KafkaClusterHandle`, `KubernetesCapability`, fixture implementations) and a public API module for the `Installer` and `KafkaClusterFixture` interfaces and supporting types.
 - **kroxylicious-operator**: no code changes, but operator-managed system tests move to `systemtest/operator`.
 
 **Not affected:**
@@ -465,7 +496,7 @@ void shouldUpdateWhenFilterConfigurationChanges(KubernetesCapability kube) {
 
 This proposal introduces new framework abstractions alongside the existing code. Existing tests continue to work throughout the migration — the new layer wraps the existing `Kroxylicious` class internally. No test assertions change; only setup code is replaced.
 
-The `ProxyFixture` and `Installer` interfaces are designed for extension. Downstream distributors typically implement `Installer` and compose it with upstream fixtures; distributors with fundamentally different deployment models implement `ProxyFixture` directly. Once published, `ProxyFixture`, `Installer`, `ProxyScenario`, and `ProxyHandle` become API surface for downstream consumers — their signatures should be treated as a compatibility commitment.
+The `ProxyFixture` and `Installer` interfaces are designed for extension. Downstream distributors typically implement `Installer` and compose it with upstream fixtures; distributors with fundamentally different deployment models implement `ProxyFixture` directly. Once published, `ProxyFixture`, `KafkaClusterFixture`, `Installer`, `ProxyScenario`, `ProxyHandle`, and `KafkaClusterHandle` become API surface for downstream consumers — their signatures should be treated as a compatibility commitment.
 
 ## Rejected Alternatives
 
