@@ -30,7 +30,7 @@ Three problems prevent this from being the norm:
 
 2. **No convergence contract**: the framework does not define when the proxy is ready. Each test class independently polls for readiness, with varying strategies and varying reliability.
 
-3. **Operator coupling**: every test implicitly requires the operator. Feature tests — which care only that a correctly-configured proxy is serving traffic — cannot run without the full operator installation. This conflates feature correctness with operator correctness and prevents fast local iteration.
+3. **Operator coupling**: every test implicitly requires the operator. Feature tests — which care only that a proxy has been started with a given configuration — cannot run without the full operator installation. This conflates feature correctness with operator correctness and prevents fast local iteration.
 
 Addressing these enables:
 
@@ -59,10 +59,10 @@ These are not tags on a single test suite — they are separate modules with dif
 
 | Module | Depends on | Kubernetes dependency | Portable across fixtures |
 |---|---|---|---|
-| `systemtest-feature` | `ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec` | None | Yes — runs against any fixture |
-| `systemtest-operator` | Above + `KubernetesCapability`, CRD types, K8s client | Yes | No — requires CRD-based fixture |
-| `systemtest-webhook` | Above + `KubernetesCapability`, K8s client | Yes | No — requires webhook installed |
-| `systemtest-installer` | Above + `KubernetesCapability` | Yes (except standalone) | No — one test per installer |
+| `systemtest/feature` | `ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec` | None | Yes — runs against any `ProxyFixture` |
+| `systemtest/operator` | `OperatorFixture`, `KubernetesCapability`, CRD types, K8s client | Yes | No — requires operator installed |
+| `systemtest/webhook` | `WebhookFixture`, `KubernetesCapability`, K8s client | Yes | No — requires webhook installed |
+| `systemtest/installer` | `ProxyFixture`, `KubernetesCapability` | Yes (except standalone) | No — one test per installer |
 
 Feature tests do not import Kubernetes types. They cannot accidentally depend on CRDs, namespaces, or client libraries. The module boundary enforces this at compile time, not by convention.
 
@@ -117,46 +117,52 @@ interface ProxyFixture {
 
 This is an explicit call — not magic JUnit injection — because the test author needs to understand that `apply()` is a blocking operation that includes convergence waiting. Hiding it behind injection would obscure the framework's most important contract.
 
-Fixture implementations span two independent concerns: how the infrastructure is installed (operator, webhook, CRDs, RBAC) and how proxy instances are deployed. These concerns are separated by composing a `ProxyFixture` with an `Installer`.
+Test fixtures span two independent concerns: how infrastructure components are installed (operator, webhook, CRDs, RBAC) and what the test is exercising. The `Installer` handles the first concern; the fixture type handles the second. Feature tests use `ProxyFixture`, operator tests use `OperatorFixture`, and webhook tests use `WebhookFixture`.
 
 ### `Installer` — Infrastructure Installation
 
-`Installer` handles getting project components — operator, webhook, CRDs, RBAC rules, ServiceAccounts — into the cluster. It is a **public interface** — the primary extension point for downstream distributors, who typically vary only by installation method (their own OLM catalog, their own Helm chart) and not by how proxies are deployed.
+`Installer` handles getting project components — operator, webhook, CRDs, RBAC rules, ServiceAccounts — into the cluster. It is a **public interface** — the primary extension point for downstream distributors, who typically vary only by installation method (their own OLM catalog, their own Helm chart) and not by how proxies are deployed. The `Installer` interface and supporting types live in a dedicated API module so that downstream distributors can depend on it without pulling in framework internals.
 
 ```java
+enum Component { OPERATOR, WEBHOOK }
+
 interface Installer {
-    void install();
-    void uninstall();
+    void install(Component component);
+    void uninstall(Component component);
 }
 ```
 
-Upstream ships implementations for each supported installation method:
+We recognise there is likely to be a set of standard installers which need customising only by simple parameters such as a Helm chart URI or an OLM bundle image. Specifying those implementations and their configuration surface is out of scope for this proposal. A downstream distributor could configure an upstream-provided implementation or implement the interface directly.
 
-| Installer | What it installs |
-|---|---|
-| `ManifestInstaller` | Operator via kustomize/raw manifests (upstream default) |
-| `HelmInstaller` | Operator via Helm chart |
-| `OlmInstaller` | Operator via OLM catalog |
+### `ProxyFixture` Implementations
 
-A downstream distributor implements `Installer` for their distribution and composes it with upstream's fixture — no need to reimplement proxy deployment or convergence logic.
+Tests never instantiate fixtures or installers — the JUnit extension reads system properties (`-Dfixture`, `-Dinstaller`) and composes them. The composition is extension-internal; the test sees only an injected fixture.
 
-### Fixture Implementations
+Four `ProxyFixture` implementations cover the deployment mechanisms. Feature tests run against all of them unchanged — the test calls `apply(scenario)` and gets a `ProxyHandle` regardless of how the proxy was deployed.
 
-Tests never instantiate fixtures or installers — the JUnit extension reads system properties (`-Dfixture`, `-Dinstaller`) and composes them. The composition is extension-internal; the test sees only an injected `ProxyFixture`.
-
-Four fixture implementations cover the deployment mechanisms:
-
-**`CrdProxyFixture`**: takes an `Installer` as a constructor dependency. The installer puts the operator into the cluster; the fixture applies Kroxylicious CRDs (`KafkaProxy`, `VirtualKafkaCluster`, `KafkaProtocolFilter`) via Server-Side Apply, then waits for observable convergence signals — the controller has reconciled the resources and the Deployment has reached stable state with updated replicas ready and serving. The fixture knows the CRD schema and the convergence protocol, not the operator's internals.
+**`CrdProxyFixture`**: takes an `Installer` as a constructor dependency. Calls `install(OPERATOR)` to put the operator into the cluster, then applies Kroxylicious CRDs (`KafkaProxy`, `VirtualKafkaCluster`, `KafkaProtocolFilter`) via Server-Side Apply, then waits for observable convergence signals — the controller has reconciled the resources and the Deployment has reached stable state with updated replicas ready and serving. The fixture knows the CRD schema and the convergence protocol, not the operator's internals.
 
 **`ManifestProxyFixture`**: translates `ProxyScenario` into a proxy configuration file and a Kubernetes Deployment, applies them, then waits for the Deployment to reach stable state. No operator or installer required.
 
-**`SidecarProxyFixture`**: takes an `Installer` as a constructor dependency. The installer puts the admission webhook into the cluster; the fixture creates a pod with the injection annotation, waits for the webhook to mutate it and the sidecar to be ready, then returns a `ProxyHandle`. Feature tests run against it unchanged — the proxy happens to be a sidecar rather than a standalone Deployment.
+**`SidecarProxyFixture`**: takes an `Installer` as a constructor dependency. Calls `install(WEBHOOK)` to put the admission webhook into the cluster, then creates a pod with the injection annotation, waits for the webhook to mutate it and the sidecar to be ready, then returns a `ProxyHandle`. Feature tests run against it unchanged — the proxy happens to be a sidecar rather than a standalone Deployment.
 
 **`StandaloneProxyFixture`**: starts the proxy as a local Java process with a generated configuration file, waits for the port to be ready, and returns a `ProxyHandle` with a localhost bootstrap. No Kubernetes, no installer, no namespaces. `KubernetesCapability` is not available for tests running against this fixture.
 
 Kubernetes fixtures use Server-Side Apply. Neither `CrdProxyFixture` nor `ManifestProxyFixture` requires `createOrUpdate` branching or `resourceVersion` management.
 
 **A note on convergence**: the framework waits for the best observable signal, not a guarantee. There is an inherent gap between "the operator updated the Deployment" and "the new pods are handling traffic." The `ProxyFixture` contract is: when `apply()` returns, the proxy is serving the requested configuration to the best observable precision.
+
+### `OperatorFixture` — Reconciliation Testing
+
+Operator tests are explicitly about the operator's behaviour — they need to manipulate CRDs and observe how the operator reconciles them. `OperatorFixture` calls `install(OPERATOR)` internally and exposes the operator's surface directly: applying CRD changes, observing reconciliation outcomes, and verifying that the operator reacts correctly to configuration changes, invalid inputs, and resource deletion.
+
+Tests in `systemtest/operator` receive an `OperatorFixture` rather than a `ProxyFixture`. The test drives the operator through its CRD API and asserts the resulting cluster state.
+
+### `WebhookFixture` — Admission Webhook Testing
+
+Webhook tests are about the admission webhook's mutation behaviour — they need to create pods and verify that the webhook mutates them correctly. `WebhookFixture` calls `install(WEBHOOK)` internally and exposes the webhook's surface: creating annotated pods, inspecting the resulting pod spec, and verifying that injection produces valid sidecar configurations.
+
+Tests in `systemtest/webhook` receive a `WebhookFixture` rather than a `ProxyFixture`. The test drives the webhook through pod creation and asserts the mutation outcome.
 
 ### `ProxyHandle` — A Token of Convergence
 
@@ -177,19 +183,21 @@ interface ProxyHandle {
 
 ### Injection Model and Tags
 
-`ProxyFixture` is injected by the JUnit extension at class scope — it is an environment configuration concern, long-lived, with no timing implications. `ProxyHandle` is always obtained explicitly by calling `proxyFixture.apply()` in the test body. This call is blocking and includes convergence waiting; making it explicit ensures the test author understands the contract.
+The appropriate fixture (`ProxyFixture`, `OperatorFixture`, or `WebhookFixture`) is injected by the JUnit extension at class scope — it is an environment configuration concern, long-lived, with no timing implications. For feature tests, `ProxyHandle` is always obtained explicitly by calling `proxyFixture.apply()` in the test body. This call is blocking and includes convergence waiting; making it explicit ensures the test author understands the contract.
 
 ```java
 ProxyHandle proxy = proxyFixture.apply(scenario);  // explicit — convergence visible
 ```
 
-**Tags as skip conditions**: module boundaries are the primary separation — `systemtest-operator` tests have compile-time Kubernetes dependencies that `systemtest-feature` tests do not. Within Kubernetes-dependent modules, `@Operator` and `@AdmissionWebhook` tags serve as runtime skip conditions: if the required component is not present in the active fixture, the extension skips the test. Tags declare requirements — they do not select fixtures. Fixture and installer selection is by system property (see [Fixture and Installer Selection](#fixture-and-installer-selection)).
+**Module boundaries as compile-time separation**: `systemtest/feature` tests depend only on `ProxyFixture` and have no Kubernetes dependency. `systemtest/operator` tests depend on `OperatorFixture` and the Kubernetes client. `systemtest/webhook` tests depend on `WebhookFixture` and the Kubernetes client. These are compile-time boundaries that control what a test *can* depend on.
+
+**Tags as runtime skip conditions**: module boundaries cannot account for runtime environment availability. Tags like `@Kubernetes` declare that a test requires a specific runtime environment and cause the extension to skip the test when that environment is not available — e.g. skipping `systemtest/operator` tests when no cluster is reachable. Fixture and installer selection is by system property (see [Fixture and Installer Selection](#fixture-and-installer-selection)).
 
 **`KubernetesCapability`**: any test running on Kubernetes can have `KubernetesCapability` injected as a test parameter. This provides general-purpose access to the cluster environment — the namespace the proxy was deployed into and a `KubernetesClient` for observing resource state. Tests running on bare metal do not have `KubernetesCapability` available.
 
 | Concept | How obtained | Reason |
 |---|---|---|
-| `ProxyFixture` | Injected (class-scoped) | Environment config, no timing implications |
+| `ProxyFixture` / `OperatorFixture` / `WebhookFixture` | Injected (class-scoped) | Environment config, no timing implications |
 | `KubernetesCapability` | Injected for Kubernetes-deployed tests | Namespace and client access for resource observation |
 | `ProxyHandle` | Always explicit via `apply()` | Convergence is a blocking operation; must be visible |
 
@@ -206,11 +214,6 @@ interface KubernetesCapability {
 
 The namespace is managed by the fixture. Each `apply()` call deploys into a namespace the fixture controls; the test discovers it through the capability rather than supplying it. This keeps `ProxyScenario` free of deployment concerns while giving tests the access they need for resource observation and client operations.
 
-### Tags and Component Requirements
-
-`@Operator` and `@AdmissionWebhook` are skip tags — they declare that a test requires a specific component and cause the extension to skip the test if that component is not present. The operator itself is infrastructure: the extension uses the configured `Installer` to deploy it before operator-tagged tests run.
-
-The test does not interact with the operator directly. It interacts with the proxy (via `ProxyHandle`) and with Kubernetes resources (via `KubernetesCapability`). The operator is the mechanism that makes the proxy appear in response to CRDs; the test observes the result, not the mechanism.
 
 ### Fixture and Installer Selection
 
@@ -233,9 +236,7 @@ mvn test -Dfixture=manifest
 mvn test -Dfixture=standalone
 ```
 
-The extension composes them: it instantiates the installer, passes it to the fixture constructor, and manages the lifecycle. When `-Dinstaller` is not specified, the fixture uses its default (`ManifestInstaller` for operator fixtures). Standalone and manifest fixtures do not take an installer.
-
-If a test in `systemtest-operator` runs but the active fixture is `ManifestProxyFixture` or `StandaloneProxyFixture`, the test skips — the operator is not present, and the fixture cannot satisfy the requirement.
+The extension composes them: it instantiates the installer, passes it to the fixture constructor, and manages the lifecycle. When `-Dinstaller` is not specified, the fixture uses its default (manifest-based for fixtures that require an installer). Standalone and manifest fixtures do not take an installer.
 
 ### `KafkaClient` Abstraction
 
@@ -292,54 +293,53 @@ The framework must be runnable across three meaningfully different environments:
 
 The principle is that **environment differences are absorbed by the fixture, not exposed to the test**. A `CrdProxyFixture` on OCP creates a Route; on vanilla K8s it creates a LoadBalancer Service. The test sees only `proxy.bootstrap()`. Cluster environment is a constructor-time or environment-variable-time concern for the fixture implementation.
 
-Where a fixture genuinely cannot run in a given environment — OLM absent, OCP required — it throws `AssumptionViolatedException` and the test skips. This is the same mechanism as `@Operator` and `@AdmissionWebhook` tags, extended to cluster environment. A test run on minikube naturally skips OLM deployment tests and any OCP-specific webhook behaviour tests without configuration.
+Where a fixture genuinely cannot run in a given environment — OLM absent, OCP required — it throws `AssumptionViolatedException` and the test skips. This is the same skip mechanism, extended to cluster environment. A test run on minikube naturally skips OLM deployment tests and any OCP-specific webhook behaviour tests without configuration.
 
 ### Installer Tests
 
-The `systemtest-installer` module contains a single smoke test: deploy a proxy with a file-based filter (one that reads substitution values from a mounted file), produce a message, assert the consumer sees the transformed value. The test does not vary between installers — it is the same test run with different `-Dinstaller` and `-Dfixture` values. CI provides the matrix; the test provides the assertion.
+The `systemtest/installer` module contains a single smoke test: deploy a proxy with a file-based filter (one that reads substitution values from a mounted file), produce a message, assert the consumer sees the transformed value. The test does not vary between installers — it is the same test run with different `-Dinstaller` and `-Dfixture` values. CI provides the matrix; the test provides the assertion.
 
-This test is deliberately minimal — it is not a feature matrix. Its purpose is to catch installation failures: the plugin does not load, the Secret is not mounted, the file path is wrong. Features are correct by virtue of the `systemtest-feature` module; the installer test only asserts that the installation mechanism puts the proxy in a state where features can run.
+This test is deliberately minimal — it is not a feature matrix. Its purpose is to catch installation failures: the plugin does not load, the Secret is not mounted, the file path is wrong. Features are correct by virtue of the `systemtest/feature` module; the installer test only asserts that the installation mechanism puts the proxy in a state where features can run.
 
 Each installer test run has a single reason to fail: the consumer did not see the transformed value. Every possible installation failure collapses into that one observable. No separate assertions per failure mode are needed or wanted; they all manifest identically, and the CI matrix entry tells you which installation mechanism failed.
 
 | Install method | Fixture | Installer | File config mechanism |
 |---|---|---|---|
-| CRD (manifests) | `CrdProxyFixture` | `ManifestInstaller` | Kubernetes Secret mount |
-| CRD (Helm) | `CrdProxyFixture` | `HelmInstaller` | Kubernetes Secret mount |
-| CRD (OLM) | `CrdProxyFixture` | `OlmInstaller` | Kubernetes Secret mount |
-| Manifest (Helm, no operator) | `ManifestProxyFixture` | — | Kubernetes Secret mount |
-| Manifest (Kustomize / raw YAML) | `ManifestProxyFixture` | — | Kubernetes Secret mount |
-| Sidecar injection (webhook) | `SidecarProxyFixture` | `ManifestInstaller` | Kubernetes Secret mount |
+| CRD (manifests) | `CrdProxyFixture` | manifest-based | Kubernetes Secret mount |
+| CRD (Helm) | `CrdProxyFixture` | Helm-based | Kubernetes Secret mount |
+| CRD (OLM) | `CrdProxyFixture` | OLM-based | Kubernetes Secret mount |
+| Manifest (no operator) | `ManifestProxyFixture` | — | Kubernetes Secret mount |
+| Sidecar injection (webhook) | `SidecarProxyFixture` | manifest-based | Kubernetes Secret mount |
 | Standalone | `StandaloneProxyFixture` | — | File written to local path |
 
 ### Webhook Tests
 
 The webhook touches two modules:
 
-**As a deployment path** (`systemtest-installer`): `SidecarProxyFixture` is an installer test entry in the matrix — it proves that sidecar injection produces a working proxy. The same single smoke test runs against it. Feature tests in `systemtest-feature` also run against `SidecarProxyFixture` unchanged.
+**As a deployment path** (`systemtest/installer`): `SidecarProxyFixture` is an installer test entry in the matrix — it proves that sidecar injection produces a working proxy. The same single smoke test runs against it. Feature tests in `systemtest/feature` also run against `SidecarProxyFixture` unchanged.
 
-**As behaviour under test** (`systemtest-webhook`): a separate module that asserts on the webhook's API interception behaviour. These tests ask questions that do not produce a `ProxyHandle`: does the webhook inject into pods with annotation X but not Y? Does it produce a valid pod spec? What happens when the webhook is unavailable and `failurePolicy: Ignore`? These tests depend on `KubernetesCapability` and require the webhook to be installed.
+**As behaviour under test** (`systemtest/webhook`): a separate module that uses `WebhookFixture` to assert on the webhook's API interception behaviour. These tests ask questions that do not produce a `ProxyHandle`: does the webhook inject into pods with annotation X but not Y? Does it produce a valid pod spec? What happens when the webhook is unavailable and `failurePolicy: Ignore`?
 
 ### TCK Extension Points
 
-The framework provides two public interfaces for downstream extensibility: `ProxyFixture` and `Installer`.
+The framework provides public interfaces for downstream extensibility: `Installer`, `ProxyFixture`, `OperatorFixture`, and `WebhookFixture`.
 
-Most downstream distributors differ only in how the operator is installed — their own OLM catalog, their own Helm chart, a different RBAC configuration. These distributors implement `Installer` and compose it with upstream's `CrdProxyFixture`, inheriting all proxy deployment and convergence logic:
+Most downstream distributors differ only in how components are installed — their own OLM catalog, their own Helm chart, a different RBAC configuration. These distributors implement `Installer` (or configure an upstream-provided one) and compose it with upstream's fixtures, inheriting all deployment and convergence logic:
 
 ```bash
 mvn test -Dfixture=crd -Dinstaller=com.example.downstream.MyInstaller
 ```
 
-Distributors with fundamentally different deployment models (e.g. a custom orchestrator, a managed service) implement `ProxyFixture` directly. Both interfaces have no upstream-specific dependencies in their signatures.
+Distributors with fundamentally different deployment models (e.g. a custom orchestrator, a managed service) may also need custom fixture implementations. The `Installer` and fixture interfaces have no upstream-specific dependencies in their signatures.
 
 All four test modules are consumable as a TCK:
 
-- **`systemtest-feature`**: downstream proves their distribution satisfies the proxy's behavioural contract — features work regardless of installation method.
-- **`systemtest-installer`**: downstream proves their installation method produces a working system — their OLM catalog installs correctly, their Helm chart renders valid resources.
-- **`systemtest-operator`**: downstream proves operator reconciliation works with their installation — change detection, status conditions, rolling restarts all function correctly.
-- **`systemtest-webhook`**: downstream proves admission webhook behaviour works with their installation — sidecar injection targets the right pods, produces valid pod specs, and respects failure policies.
+- **`systemtest/feature`**: downstream proves their distribution satisfies the proxy's behavioural contract — features work regardless of installation method.
+- **`systemtest/installer`**: downstream proves their installation method produces a working system — their OLM catalog installs correctly, their Helm chart renders valid resources.
+- **`systemtest/operator`**: downstream proves operator reconciliation works with their installation — change detection, status conditions, rolling restarts all function correctly.
+- **`systemtest/webhook`**: downstream proves admission webhook behaviour works with their installation — sidecar injection targets the right pods, produces valid pod specs, and respects failure policies.
 
-Upstream maintains the definition of correct behaviour across all four modules; downstream provides the `Installer` (and optionally the `ProxyFixture`) that adapts the tests to their distribution.
+Upstream maintains the definition of correct behaviour across all four modules. Most downstream distributors need only implement `Installer` for their installation mechanism. Distributors with fundamentally different deployment models may also need custom fixture implementations.
 
 ### What Feature Tests Look Like
 
@@ -394,7 +394,7 @@ void ensureClusterHasEncryptedMessage() {
 }
 ```
 
-The test contains only the Given/When/Then relevant to record encryption. No Kubernetes imports, no namespace — this is a `systemtest-feature` test. It works against a CRD-deployed proxy, a manifest-managed proxy, a sidecar, or a standalone process. It can be written before the filter exists — it will fail (correctly) until the production code makes it pass.
+The test contains only the Given/When/Then relevant to record encryption. No Kubernetes imports, no namespace — this is a `systemtest/feature` test. It works against a CRD-deployed proxy, a manifest-managed proxy, a sidecar, or a standalone process. It can be written before the filter exists — it will fail (correctly) until the production code makes it pass.
 
 ### What Operator Tests Look Like
 
@@ -421,10 +421,9 @@ void shouldUpdateWhenFilterConfigurationChanges(String namespace) {
 **After**:
 
 ```java
-@Operator
 @Test
 void shouldUpdateWhenFilterConfigurationChanges(KubernetesCapability kube) {
-    ProxyHandle proxy = proxyFixture.apply(ProxyScenario.builder()
+    ProxyHandle proxy = operatorFixture.apply(ProxyScenario.builder()
             .withUpstream(clusterName)
             .withFilter(new SimpleTransformFilterSpec("foo", "bar"))
             .build());
@@ -445,17 +444,17 @@ void shouldUpdateWhenFilterConfigurationChanges(KubernetesCapability kube) {
 }
 ```
 
-`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so `readChecksumAnnotation()` is called against stable state — no polling required to establish the baseline. This test lives in the `systemtest-operator` module, which has compile-time access to `KubernetesCapability` and the CRD types. The test does not interact with the operator directly — it observes the operator's effect on Kubernetes resources. The resource mutation is intentionally direct — this test exists to prove the operator detects and responds to changes made outside the fixture.
+`getInitialChecksum` disappears: `proxyFixture.apply()` blocks until convergence, so `readChecksumAnnotation()` is called against stable state — no polling required to establish the baseline. This test lives in the `systemtest/operator` module, which uses `OperatorFixture` and has compile-time access to `KubernetesCapability` and the CRD types. The resource mutation is intentionally direct — this test exists to prove the operator detects and responds to changes made outside the fixture.
 
 ## Affected/Not Affected Projects
 
 **Affected:**
-- **systemtest-feature**: new module. Feature tests migrated here. Depends only on the framework abstractions (`ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec`). No Kubernetes dependency.
-- **systemtest-operator**: new module. Operator behaviour tests (`OperatorChangeDetectionST`) migrated here. Depends on `KubernetesCapability` and CRD types.
-- **systemtest-webhook**: new module. Webhook behaviour tests migrated here. Depends on `KubernetesCapability`.
-- **systemtest-installer**: new module. One deployment smoke test, run across the installer/fixture matrix by CI.
-- **kroxylicious-systemtest (framework)**: the shared framework module providing `ProxyFixture`, `Installer`, `ProxyScenario`, `ProxyHandle`, `KubernetesCapability`, and fixture implementations.
-- **kroxylicious-operator**: no code changes, but operator-managed system tests move to `systemtest-operator`.
+- **systemtest/feature**: new module. Feature tests migrated here. Depends only on the framework abstractions (`ProxyFixture`, `ProxyScenario`, `ProxyHandle`, `FilterSpec`). No Kubernetes dependency.
+- **systemtest/operator**: new module. Operator behaviour tests (`OperatorChangeDetectionST`) migrated here. Depends on `KubernetesCapability` and CRD types.
+- **systemtest/webhook**: new module. Webhook behaviour tests migrated here. Depends on `KubernetesCapability`.
+- **systemtest/installer**: new module. One deployment smoke test, run across the installer/fixture matrix by CI.
+- **systemtest (parent)**: parent module with child test modules (`feature`, `operator`, `webhook`, `installer`). Contains the shared framework (fixture interfaces, `ProxyScenario`, `ProxyHandle`, `KubernetesCapability`, fixture implementations) and a public API module for the `Installer` interface and supporting types.
+- **kroxylicious-operator**: no code changes, but operator-managed system tests move to `systemtest/operator`.
 
 **Not affected:**
 - **kroxylicious-proxy (runtime)**: no production code changes. The framework abstracts over the proxy; it does not change it.
@@ -478,11 +477,6 @@ We considered having the JUnit extension inject `ProxyHandle` directly as a test
 
 We considered having operator tests use `proxyFixture.apply()` for all mutations, including the mid-test configuration changes that operator tests need to assert on. However, operator tests exist specifically to prove that the operator detects mutations made outside the fixture — bypassing the fixture for the mid-test mutation is the point of the test. Routing those mutations through the fixture would test the fixture's update path, not the operator's reconciliation behaviour.
 
-### `OperatorCapability` as a test-facing API
-
-We considered exposing an `OperatorCapability` interface to tests, providing methods like `observedGeneration()`, `waitForReconciliation()`, and `currentStatusConditions()`. This would give operator tests a typed API for interacting with the operator's observable state.
-
-On closer examination, operator tests do not need to interact with the operator — they observe its effects on Kubernetes resources. The change detection test reads a checksum annotation; the status condition test reads a resource's status. Both are Kubernetes API observations, not operator interactions. `KubernetesCapability` provides everything these tests need. The operator is infrastructure the extension manages; the `@Operator` tag ensures it is present. Making the operator invisible to the test keeps `ProxyHandle` deployment-agnostic and avoids an abstraction that doesn't carry its weight.
 
 ### Merging `KubernetesCapability` into `ProxyHandle`
 
