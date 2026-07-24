@@ -57,6 +57,102 @@ It also aims to be flexible, so as to allow other mechanisms to be supported in 
 
 The proposal is organized per-component. Each component section covers its summary, API surfaces, configuration, threats and mitigations, and known limitations.
 
+### Component overview
+
+The following diagram shows the key types across the three implementation modules and their relationships. Namespaces correspond to modules: **SaslTermination** → `kroxylicious-filters/kroxylicious-sasl-termination` (Components 1–4), **CredentialStoreSPI** → `kroxylicious-sasl-credential-store` (Component 5), **KeystoreProvider** → `kroxylicious-sasl-credential-store-provider-keystore` (Component 6).
+
+```mermaid
+classDiagram
+    direction TB
+
+    namespace SaslTermination {
+        class SaslTerminationFilter {
+            <<FilterFactory>>
+        }
+        class State {
+            <<sealed>>
+            RequiringHandshake
+            RequiringAuthenticate
+            Authenticated
+            Failed
+        }
+        class MechanismHandlerFactory {
+            <<interface>>
+            +mechanismName() String
+            +initialize(MechanismConfig)
+            +createHandler() MechanismHandler
+        }
+        class MechanismHandler {
+            <<interface>>
+            +handleAuthenticate(byte[]) CompletionStage~AuthenticationResult~
+        }
+        class AuthenticationResult {
+            <<record>>
+            CHALLENGE / SUCCESS / FAILURE
+        }
+        class MechanismConfig {
+            <<sealed>>
+        }
+        class ScramMechanismConfig
+        class OauthBearerMechanismConfig
+        class ScramSha256HandlerFactory
+        class ScramSha512HandlerFactory
+        class ScramHandler
+        class OauthBearerHandlerFactory
+        class OauthBearerHandler
+    }
+
+    namespace CredentialStoreSPI {
+        class ScramCredentialStore {
+            <<interface>>
+            +lookupCredential(String) CompletionStage~ScramCredential~
+        }
+        class ScramCredentialStoreService~C~ {
+            <<interface>>
+            +initialize(C)
+            +buildCredentialStore() ScramCredentialStore
+        }
+        class ScramCredential {
+            <<record>>
+        }
+    }
+
+    namespace KeystoreProvider {
+        class KeystoreScramCredentialStoreService {
+            <<Plugin>>
+        }
+        class KeystoreCredentialTool {
+            <<CLI>>
+        }
+    }
+
+    SaslTerminationFilter *-- State
+    SaslTerminationFilter ..> MechanismHandlerFactory : discovers via ServiceLoader
+    MechanismHandlerFactory --> MechanismHandler : creates per connection
+    MechanismHandler --> AuthenticationResult : returns
+    MechanismHandlerFactory ..> MechanismConfig : configured by
+
+    ScramMechanismConfig ..|> MechanismConfig
+    OauthBearerMechanismConfig ..|> MechanismConfig
+
+    ScramSha256HandlerFactory ..|> MechanismHandlerFactory
+    ScramSha512HandlerFactory ..|> MechanismHandlerFactory
+    OauthBearerHandlerFactory ..|> MechanismHandlerFactory
+
+    ScramSha256HandlerFactory --> ScramHandler : creates
+    ScramSha512HandlerFactory --> ScramHandler : creates
+    OauthBearerHandlerFactory --> OauthBearerHandler : creates
+
+    ScramHandler ..|> MechanismHandler
+    OauthBearerHandler ..|> MechanismHandler
+
+    ScramHandler --> ScramCredentialStore : looks up credentials
+    ScramCredentialStore --> ScramCredential : returns
+
+    ScramCredentialStoreService --> ScramCredentialStore : builds
+    KeystoreScramCredentialStoreService ..|> ScramCredentialStoreService
+```
+
 ### Component 1: SaslTermination filter
 
 #### Summary
