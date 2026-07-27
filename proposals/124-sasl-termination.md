@@ -61,7 +61,19 @@ The proposal is organized per-component. Each component section covers its summa
 
 The `SaslTerminationFilter` (Component 1) intercepts SASL requests and manages per-connection authentication state via a sealed state machine. It delegates the actual authentication exchange to mechanism-specific `MechanismHandler` instances (Component 2), created per-connection by `MechanismHandlerFactory` implementations discovered via ServiceLoader. The OAUTHBEARER handler factory (Component 4) validates JWT tokens against a JWKS endpoint. The SCRAM handler factories (Component 3) use a `ScramCredentialStore` (Component 5) to look up stored credentials — a public SPI with a first-party KeyStore-backed provider (Component 6).
 
-The following diagram shows the key types across the three implementation modules and their relationships. Namespaces correspond to modules: **SaslTermination** → `kroxylicious-filters/kroxylicious-sasl-termination` (Components 1–4), **CredentialStoreSPI** → `kroxylicious-sasl-credential-store` (Component 5), **KeystoreProvider** → `kroxylicious-sasl-credential-store-provider-keystore` (Component 6).
+The implementation spans three modules. Their dependencies:
+
+```mermaid
+graph LR
+    ST["kroxylicious-sasl-termination<br/>(Components 1–4)"]
+    CS["kroxylicious-sasl-credential-store<br/>(Component 5)"]
+    KP["kroxylicious-sasl-credential-store-provider-keystore<br/>(Component 6)"]
+
+    ST --> CS
+    KP --> CS
+```
+
+The key types and their relationships across these modules:
 
 ```mermaid
 classDiagram
@@ -95,13 +107,6 @@ classDiagram
         class MechanismConfig {
             <<sealed>>
         }
-        class ScramMechanismConfig
-        class OauthBearerMechanismConfig
-        class ScramSha256HandlerFactory
-        class ScramSha512HandlerFactory
-        class ScramHandler
-        class OauthBearerHandlerFactory
-        class OauthBearerHandler
     }
 
     namespace CredentialStoreSPI {
@@ -123,9 +128,6 @@ classDiagram
         class KeystoreScramCredentialStoreService {
             <<Plugin>>
         }
-        class KeystoreCredentialTool {
-            <<CLI>>
-        }
     }
 
     SaslTerminationFilter *-- State
@@ -133,25 +135,10 @@ classDiagram
     MechanismHandlerFactory --> MechanismHandler : creates per connection
     MechanismHandler --> AuthenticationResult : returns
     MechanismHandlerFactory ..> MechanismConfig : configured by
-
-    ScramMechanismConfig ..|> MechanismConfig
-    OauthBearerMechanismConfig ..|> MechanismConfig
-
-    ScramSha256HandlerFactory ..|> MechanismHandlerFactory
-    ScramSha512HandlerFactory ..|> MechanismHandlerFactory
-    OauthBearerHandlerFactory ..|> MechanismHandlerFactory
-
-    ScramSha256HandlerFactory --> ScramHandler : creates
-    ScramSha512HandlerFactory --> ScramHandler : creates
-    OauthBearerHandlerFactory --> OauthBearerHandler : creates
-
-    ScramHandler ..|> MechanismHandler
-    OauthBearerHandler ..|> MechanismHandler
-
-    ScramHandler --> ScramCredentialStore : looks up credentials
-    ScramCredentialStore --> ScramCredential : returns
+    MechanismHandler ..> ScramCredentialStore : looks up credentials (SCRAM)
 
     ScramCredentialStoreService --> ScramCredentialStore : builds
+    ScramCredentialStore --> ScramCredential : returns
     KeystoreScramCredentialStoreService ..|> ScramCredentialStoreService
 ```
 
@@ -182,6 +169,18 @@ The filter maintains per-connection state using a sealed interface `State` with 
 | **Authenticated** | non-SASL request, session not expired | forward to broker |
 | **Authenticated** | non-SASL request, session expired | reject and close |
 | **Failed** | *(terminal — connection closed)* | — |
+
+```mermaid
+stateDiagram-v2
+    [*] --> RequiringHandshake
+    RequiringHandshake --> RequiringAuthenticate : SASL_HANDSHAKE (supported mechanism)
+    RequiringAuthenticate --> RequiringAuthenticate : CHALLENGE
+    RequiringAuthenticate --> Authenticated : SUCCESS
+    RequiringAuthenticate --> Failed : FAILURE
+    Authenticated --> RequiringAuthenticate : SASL_HANDSHAKE (reauthentication)
+    Authenticated --> [*] : session expired
+    Failed --> [*]
+```
 
 **Why there is no `Expired` state:** Session expiry is a property of the `Authenticated` state, checked lazily when the next non-SASL request arrives. An explicit `Expired` state was considered but would be momentary — the connection is immediately either closed (non-SASL request) or transitions to `RequiringAuthenticate` (reauthentication handshake). It would also complicate the handshake guard, which currently accepts handshakes from `RequiringHandshake` and `Authenticated`. The expiry check is a simple conditional within `handleDefaultRequest`, which is easier to audit than an additional state with duplicated transition methods.
 
