@@ -172,12 +172,13 @@ The filter maintains per-connection state using a sealed interface `State` with 
 
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> RequiringHandshake
-    RequiringHandshake --> RequiringAuthenticate : SASL_HANDSHAKE (supported mechanism)
-    RequiringAuthenticate --> RequiringAuthenticate : CHALLENGE
+    RequiringHandshake --> RequiringAuthenticate : supported mechanism
+    note right of RequiringAuthenticate : Loops on CHALLENGE
     RequiringAuthenticate --> Authenticated : SUCCESS
     RequiringAuthenticate --> Failed : FAILURE
-    Authenticated --> RequiringAuthenticate : SASL_HANDSHAKE (reauthentication)
+    Authenticated --> RequiringAuthenticate : reauthentication
     Authenticated --> [*] : session expired
     Failed --> [*]
 ```
