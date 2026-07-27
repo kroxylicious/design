@@ -44,7 +44,7 @@ In a zero-trust architecture the proxy can enforce authentication at the network
 
 ### Centralized credential management
 
-A single credential store serves all proxy instances, rather than requiring per-broker credential configuration. Combined with the proxy's existing plugin system, this allows integration with enterprise credential stores.
+The credential store is per-filter-instance. Clients of multiple brokers authenticate against a shared credential store, rather than requiring per-broker credential configuration. Combined with the proxy's existing plugin system, this allows integration with enterprise credential stores.
 
 ### Broker-less authentication
 
@@ -58,6 +58,8 @@ It also aims to be flexible, so as to allow other mechanisms to be supported in 
 The proposal is organized per-component. Each component section covers its summary, API surfaces, configuration, threats and mitigations, and known limitations.
 
 ### Component overview
+
+The `SaslTerminationFilter` (Component 1) intercepts SASL requests and manages per-connection authentication state via a sealed state machine. It delegates the actual authentication exchange to mechanism-specific `MechanismHandler` instances (Component 2), created per-connection by `MechanismHandlerFactory` implementations discovered via ServiceLoader. The OAUTHBEARER handler factory (Component 4) validates JWT tokens against a JWKS endpoint. The SCRAM handler factories (Component 3) use a `ScramCredentialStore` (Component 5) to look up stored credentials — a public SPI with a first-party KeyStore-backed provider (Component 6).
 
 The following diagram shows the key types across the three implementation modules and their relationships. Namespaces correspond to modules: **SaslTermination** → `kroxylicious-filters/kroxylicious-sasl-termination` (Components 1–4), **CredentialStoreSPI** → `kroxylicious-sasl-credential-store` (Component 5), **KeystoreProvider** → `kroxylicious-sasl-credential-store-provider-keystore` (Component 6).
 
@@ -181,6 +183,10 @@ The filter maintains per-connection state using a sealed interface `State` with 
 | **Authenticated** | non-SASL request, session expired | reject and close |
 | **Failed** | *(terminal — connection closed)* | — |
 
+**Why there is no `Expired` state:** Session expiry is a property of the `Authenticated` state, checked lazily when the next non-SASL request arrives. An explicit `Expired` state was considered but would be momentary — the connection is immediately either closed (non-SASL request) or transitions to `RequiringAuthenticate` (reauthentication handshake). It would also complicate the handshake guard, which currently accepts handshakes from `RequiringHandshake` and `Authenticated`. The expiry check is a simple conditional within `handleDefaultRequest`, which is easier to audit than an additional state with duplicated transition methods.
+
+**In-flight requests at expiry:** The filter checks expiry before forwarding, so the request that triggers the expiry check never reaches the broker. Previously-forwarded requests whose responses are still in flight will be delivered to the client before the connection closes.
+
 - **RequiringHandshake:** Initial state. Accepts `SASL_HANDSHAKE` requests, which negotiate the mechanism and transition to `RequiringAuthenticate`.
 - **RequiringAuthenticate:** Accepts `SASL_AUTHENTICATE` requests. Loops back to itself for multi-round mechanisms (e.g. SCRAM). Carries a reference to the `MechanismHandler` for the negotiated mechanism.
 - **Authenticated:** Success state. The filter calls `filterContext.clientSaslAuthenticationSuccess(mechanism, subject)` to propagate the authenticated identity to downstream filters, then forwards all subsequent requests. If reauthentication is configured, this state also stores the session expiry time and allows transition back to `RequiringAuthenticate` via a new `SASL_HANDSHAKE`.
@@ -202,7 +208,7 @@ Reauthentication is a protocol-level feature, not mechanism-specific — all mec
 
 **Client behaviour:** Standard Kafka clients (4.0+) handle reauthentication transparently via the `Selector`. When the session nears expiry, the client sends a new `SASL_HANDSHAKE` + `SASL_AUTHENTICATE` sequence over the existing connection. This is invisible to application code.
 
-**Server-side enforcement:** If the session has expired and a non-SASL request arrives, the filter rejects it with `SASL_AUTHENTICATION_FAILED` and closes the connection. `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests are always accepted regardless of session expiry, to allow reauthentication.
+**Server-side enforcement:** If the session has expired and a non-SASL request arrives, the filter rejects it with `SASL_AUTHENTICATION_FAILED` and closes the connection. `API_VERSIONS`, `SASL_HANDSHAKE` and `SASL_AUTHENTICATE` requests are always accepted regardless of session expiry — `API_VERSIONS` is handled unconditionally before the state machine, and the SASL requests allow reauthentication.
 
 #### API surfaces
 
@@ -221,6 +227,7 @@ The filter is configured via `SaslTerminationConfig`:
 |--------|------|----------|---------|-------------|
 | `mechanisms` | `Map<String, MechanismConfig>` | Yes | -- | Map of IANA-registered mechanism name to mechanism-specific configuration. At least one entry is required. |
 | `maxTimeBeforeReauth` | `Duration` | No | disabled | Maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable. |
+| `fixedAuthDelay` | `Duration` | No | `200ms` | Fixed delay applied to all authentication rounds to prevent timing side-channel attacks that could enable user enumeration. Set to `0` to disable if the deployment's threat model does not require user enumeration protection. |
 
 The `mechanisms` map values are polymorphic. Jackson deduction-based deserialization (`@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)`) resolves the concrete type from the fields present:
 
@@ -236,6 +243,7 @@ filters:
   - type: SaslTermination
     config:
       maxTimeBeforeReauth: 1h
+      fixedAuthDelay: 200ms
       mechanisms:
         SCRAM-SHA-256:
           credentialStore: KeystoreScramCredentialStoreService
@@ -287,6 +295,10 @@ public interface MechanismHandler {
     void dispose();
 }
 ```
+
+**`MechanismHandler` lifecycle:** The filter calls `dispose()` on the handler after SUCCESS (the handler is no longer needed once the client is authenticated) and after FAILURE (the connection is about to close). It is *not* called on raw connection close (e.g. client disconnects mid-exchange) because the `Filter` API has no connection-close hook — the handler becomes unreachable and is garbage collected. Handler implementations must therefore not hold resources that require explicit cleanup beyond what GC provides.
+
+For reauthentication (KIP-368), the previous handler was already disposed at SUCCESS time, so a fresh handler is created for the new exchange.
 
 **`MechanismHandlerFactory`** -- manages mechanism-specific resources and creates handler instances. Discovered via `ServiceLoader`.
 
@@ -372,7 +384,7 @@ Key features:
 
 - **Multi-round SCRAM exchange.** SCRAM is a challenge-response protocol. The handler processes the client-first-message (round 1) and subsequent rounds, returning `CHALLENGE` until the exchange completes.
 - **Delegation to Kafka's `SaslServer`.** The handler does not reimplement SCRAM. It creates a Kafka `SaslServer` with a `CallbackHandler` that supplies the looked-up credential, then processes all messages through it. This benefits from Kafka's battle-tested implementation.
-- **Timing side-channel mitigation.** A fixed delay is applied to all authentication rounds to prevent attackers from distinguishing existing from non-existing users by measuring response times.
+- **Timing side-channel mitigation.** A configurable fixed delay (`fixedAuthDelay`) is applied to all authentication rounds to prevent attackers from distinguishing existing from non-existing users by measuring response times. Set to `0` to disable if the deployment's threat model does not require user enumeration protection.
 
 #### Authentication flow
 
@@ -409,7 +421,7 @@ public record ScramMechanismConfig(
 | Threat | Mitigation |
 |--------|------------|
 | Username enumeration -- an attacker distinguishes existing from non-existing users by observing different error messages. | When a user is not found, the handler returns a generic `"Authentication failed"` error message identical to the message returned for incorrect credentials. |
-| Timing side-channel -- an attacker distinguishes existing from non-existing users by measuring response times (credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists). | Rather than trying to equalize inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the handler applies a fixed delay to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections. |
+| Timing side-channel -- an attacker distinguishes existing from non-existing users by measuring response times (credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists). | Rather than trying to equalize inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the filter applies a configurable fixed delay (`fixedAuthDelay`) to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections. If the observed authentication duration exceeds the configured delay, a WARN log is emitted indicating the delay should be increased. The delay can be disabled by setting `fixedAuthDelay` to `0` if the deployment's threat model does not require user enumeration protection. |
 | SCRAM protocol correctness -- a bug in the SCRAM implementation could allow authentication bypass or credential leakage. | Delegated to Kafka's own `SaslServer`, which is widely deployed and well-tested. The handler is responsible only for credential lookup and passing credentials to the `SaslServer` via a `CallbackHandler`. |
 
 #### Known limitations
@@ -685,7 +697,7 @@ List all usernames in the KeyStore.
 
 | Threat | Mitigation |
 |--------|------------|
-| KeyStore file exposure -- an attacker gains read access to the KeyStore file on disk. | POSIX file permission check: the provider refuses to load a KeyStore with group or world read/write permissions. The KeyStore itself is password-encrypted. |
+| KeyStore file exposure -- an attacker gains read access to the KeyStore file on disk. | POSIX file permission check: the provider checks file permissions before loading, requiring `0600` or stricter by default. On Kubernetes/OpenShift where group-readable files are necessary, the `KROXYLICIOUS_DANGEROUSLY_CHANGE_PERMISSION_CHECK` environment variable allows relaxing to `0640`. The KeyStore itself is password-encrypted. |
 
 **Accepted risk: credential material in JVM heap.** SCRAM credential data (serverKey, storedKey, salt) is held in memory for the lifetime of the proxy. An attacker who can obtain a heap dump (e.g. via JMX, `/proc/<pid>/mem`, or a core dump) can extract this material. There is no practical mitigation within a JVM. Operators should protect heap dump access through operational controls (JMX authentication, file permissions on core dumps, container security policies).
 
@@ -713,7 +725,7 @@ The implementation is organized into three modules, following the same pattern a
 
 - **KeyStore encryption:** Credentials are stored in Java KeyStore files, encrypted with the KeyStore password. File-system permissions and KeyStore passwords are the primary access controls.
 - **PasswordProvider abstraction:** Production deployments should use file-based passwords rather than inline passwords in configuration. The `PasswordProvider` interface supports both.
-- **File permission enforcement:** On POSIX systems, the credential store refuses to load a KeyStore file that has group or world read/write permissions. This prevents accidental exposure of credential material through overly permissive file modes.
+- **File permission enforcement:** On POSIX systems, the credential store checks the KeyStore file's permissions before loading it. By default, group or world read/write permissions are rejected (`0600` or stricter required). This prevents accidental exposure of credential material through overly permissive file modes. The required permission level is configurable via the `KROXYLICIOUS_DANGEROUSLY_CHANGE_PERMISSION_CHECK` environment variable, which can be set to `0640` to allow group-readable files. This is necessary on OpenShift, where the `restricted-v2` SCC runs containers as an arbitrary UID while Secret volume files are owned by root — requiring group-readable permissions (`defaultMode: 0440` with `fsGroup`) for the container process to access them. The environment variable is set in the PodSpec by the `kroxylicious-operator`, keeping the trust chain secure: operator → pod spec → env var → policy, with no writable config file in the loop. Using a config file for this setting would create a bootstrapping problem — if the config file itself were group-writable, an attacker could downgrade the permission policy.
 - **In-memory handling:** `ScramCredential` uses defensive copies for `byte[]` fields (correctness measure against accidental mutation) and `toString()` redacts sensitive fields (prevents log leakage). Credential material in the JVM heap is an accepted risk — see Component 6 threat discussion.
 
 ### SCRAM protocol correctness
@@ -726,7 +738,26 @@ When a user is not found in the credential store, the handler returns a generic 
 
 ### Timing side-channel mitigation
 
-Without mitigation, an attacker could distinguish existing from non-existing users by measuring response times: credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists. Rather than trying to equalize these inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the SCRAM handler applies a fixed delay to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections.
+Without mitigation, an attacker could distinguish existing from non-existing users by measuring response times: credential lookup, deserialization, and SCRAM server creation take different amounts of time depending on whether the user exists. Rather than trying to equalize these inherently different code paths (which is fragile under JIT optimizations and varies by credential store implementation), the filter applies a configurable fixed delay (`fixedAuthDelay`) to all authentication rounds. The delay is long enough to swamp any timing differences but short enough to be negligible for Kafka's typically long-lived connections. If the observed authentication duration exceeds the configured delay, a WARN log is emitted indicating the delay should be increased. The delay can be disabled by setting `fixedAuthDelay` to `0` if the deployment's threat model does not require user enumeration protection.
+
+### Observability
+
+#### Runtime-level metrics
+
+The proxy runtime emits authentication outcome metrics when any filter announces an authentication result via `FilterContext.clientSaslAuthenticationSuccess()` or `clientSaslAuthenticationFailure()`. These apply uniformly to all authentication approaches (SASL termination, SASL inspection, transport authentication).
+
+| Metric | Type | Tags | Description |
+|--------|------|------|-------------|
+| `kroxylicious_client_auth_total` | Counter | `virtual_cluster`, `mechanism`, `outcome` (`success` / `failure`) | Authentication outcomes. |
+
+#### Filter-specific metrics
+
+The SASL termination filter emits additional metrics for authentication latency and session expiry.
+
+| Metric | Type | Tags | Description |
+|--------|------|------|-------------|
+| `kroxylicious_filter_sasl_termination_auth_duration_seconds` | Timer | `virtual_cluster`, `mechanism` | Authentication latency, exclusive of the configured fixed timing delay. Measures the real work: credential store lookup, token validation, SCRAM rounds. |
+| `kroxylicious_filter_sasl_termination_session_expired_total` | Counter | `virtual_cluster`, `mechanism` | Sessions that expired without the client reauthenticating. |
 
 ### Connection lifecycle safety
 
@@ -759,9 +790,9 @@ Without mitigation, an attacker could distinguish existing from non-existing use
 
 **Not affected:**
 - `kroxylicious-api` — no API changes needed (uses existing `clientSaslAuthenticationSuccess`/`clientSaslAuthenticationFailure` from proposal 006)
-- `kroxylicious-runtime` — no runtime changes
+- `kroxylicious-runtime` — authentication outcome metrics (`kroxylicious_client_auth_total`)
 - `kroxylicious-kms` and KMS providers — unrelated
-- `kroxylicious-kubernetes` — no operator changes (the termination filter is configured via standard filter configuration)
+- `kroxylicious-kubernetes` — the operator should set `KROXYLICIOUS_DANGEROUSLY_CHANGE_PERMISSION_CHECK=0640` in the PodSpec on OpenShift (and optionally on plain Kubernetes) to allow group-readable Secret volume mounts
 
 ## Compatibility
 
