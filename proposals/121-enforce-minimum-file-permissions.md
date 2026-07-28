@@ -26,52 +26,98 @@ The threat model includes:
 
 ## Proposal
 
-### File permission policy
+### File permission policies
 
-Introduce a configurable `security.filePermissions.policy` setting with three modes:
+Three policy modes are available:
 
 - `STRICT` - files must be owner-only (equivalent to `chmod 400` or `chmod 600`). Any group or
   other read/write/execute bits cause an `IllegalStateException` at startup. Mirrors SSH behaviour.
 - `RELAXED` - other-user bits are forbidden, but group bits are permitted. This supports
   Kubernetes deployments where `fsGroup` is used to grant a specific GID read access to mounted
   secrets (e.g. `defaultMode: 0440`).
-- `DISABLED` - no enforcement. A warning is logged for files that would be rejected by other
-  policies, but startup is never rejected. This is the default for backward compatibility; see
-  the [Delivery](#delivery) section for how the default will eventually change to `STRICT`.
+- `DISABLED` - no enforcement. A warning is logged for files that would be rejected by `STRICT`,
+  but startup is never rejected.
 
-### Scope of enforcement
+### Per-category enforcement
 
-The policy applies before reading any of the following:
+Different files have different sensitivity levels and different control boundaries. A single
+global policy forces a trade-off: AWS IRSA/Pod Identity token files are typically mounted with
+`0644` by the platform (the user cannot control this), while TLS private keys and passwords are
+user-controlled. A single policy either weakens protection for secrets or breaks platform
+integrations.
 
-- TLS private key files (`key.privateKeyFile`)
-- TLS keystore and truststore files (`key.storeFile`, `trust.storeFile`)
-- Password files referenced by `FilePassword` providers (including KMS credentials)
-- AWS IRSA web identity token files
-- AWS EKS Pod Identity authorization token files
+Policies are therefore configured per category:
+
+| Category              | Covers                                                                                           | Default    |
+|-----------------------|--------------------------------------------------------------------------------------------------|------------|
+| `secrets`             | TLS private keys, keystores, password files (all `FilePassword` uses, including KMS credentials) | `STRICT`   |
+| `truststores`         | TLS truststore files                                                                             | `RELAXED`  |
+| `platformCredentials` | AWS IRSA web identity tokens, AWS EKS Pod Identity authorization tokens                          | `DISABLED` |
+
+The categories are defined by two axes:
+
+- **Who controls the file permissions:** user/operator-controlled files (`secrets`, `truststores`)
+  vs. platform-managed files (`platformCredentials`). Platform-managed files are injected by cloud
+  provider webhooks/agents and the user cannot control their permissions.
+- **Sensitivity of the content:** high-sensitivity material like private keys and credentials
+  (`secrets`) vs. public certificates (`truststores`).
 
 ### Configuration
 
 ```yaml
 ---
 management:
-  # ...
+# ...
 virtualClusters:
-    - name: "one"
-      targetCluster:
-        # ...
-      gateways:
-        # ...
+  - name: "one"
+    targetCluster:
+    # ...
+    gateways:
+    # ...
 security:
-    filePermissions:
-        policy: "STRICT"
+  filePermissions:
+    secrets: STRICT
+    truststores: RELAXED
+    platformCredentials: DISABLED
 ```
 
-### Global policy propagation
+When a category is omitted from the configuration, its default value is used. When the entire
+`security.filePermissions` section is omitted, all categories use their defaults.
 
-`FilePermissionValidator` holds a static `AtomicReference<Policy>` that is set once when
-`Configuration` is constructed. This allows `FilePassword` and KMS credential providers - which
-live in modules that do not depend on `kroxylicious-runtime` - to enforce the configured policy
-without requiring changes to their public interfaces.
+### Category propagation
+
+`FilePermissionValidator` holds per-category policies that are set when `Configuration` is
+constructed. Each call site passes the appropriate category when calling `validate()`.
+
+`FilePassword.getProvidedPassword()` defaults to the `secrets` category. This is correct for all
+current callers (KMS API keys, Vault tokens, TLS keystore/truststore passwords are all
+user-controlled credential files). If a future caller needs a different category, it can validate
+explicitly before calling `getProvidedPassword()`.
+
+### Config file write-protection
+
+The configuration file is the trust root for the per-category policies above. If an attacker can
+write to the config file, they can weaken the policies to `DISABLED`, rendering the entire feature
+useless. Hot-reload ([proposal #83](https://github.com/kroxylicious/design/pull/83), already implemented)
+amplifies the risk: with a filesystem watcher trigger, the change takes effect immediately without a restart.
+
+To solve this, Kroxylicious enforces a hardcoded write-protection check on the config file
+**before** reading it. This check is independent of any policy setting in the config file.
+
+The config file must not have group-write or other-write bits set. Typical `0644` (`rw-r--r--`)
+passes. Group-writable (`0664`) or world-writable (`0666`) files are rejected. Kubernetes
+ConfigMap mounts are typically `0644` and pass.
+
+For environments where the config file genuinely needs weaker permissions, an environment variable
+with a deliberately alarming name can relax the check:
+
+```
+KROXYLICIOUS_DANGEROUSLY_OVERRIDE_CONFIG_FILE_PERMISSION_POLICY=RELAXED
+```
+
+This accepts `STRICT` (default when unset), `RELAXED`, or `DISABLED`. The env var is read at
+process start and is immutable during the process lifetime - it cannot be weakened by config file
+modification or hot-reload. The operator should not set this env var under normal circumstances.
 
 ### Kubernetes operator
 
@@ -87,17 +133,19 @@ On OpenShift,
 [`fsGroup` and `runAsGroup` are omitted](https://www.redhat.com/en/blog/a-guide-to-openshift-and-uids);
 [the `restricted-v2` SCC's `MustRunAs` strategy injects the namespace-allocated GID automatically](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/authentication_and_authorization/managing-pod-security-policies#security-context-constraints-example_configuring-internal-oauth).
 
-The `KafkaProxy` CRD exposes `spec.security.filePermissions.policy` (default `RELAXED`) to allow
-users to override the policy.
+The `KafkaProxy` CRD exposes `spec.security.filePermissions` with per-category policy fields
+(default `secrets: STRICT`, `truststores: RELAXED`, `platformCredentials: DISABLED`) to allow
+users to override the policies.
 
 ## Affected/not affected projects
 
 **Affected:**
 - `kroxylicious-security` - new module; contains `FilePermissionValidator` and `FilePermissionConfig`
-- `kroxylicious-api` - `FilePassword.getProvidedPassword()` now validates permissions
+- `kroxylicious-app` - config file write-protection check before parsing, env var override
+- `kroxylicious-api` - `FilePassword.getProvidedPassword()` validates permissions with `secrets` category
 - `kroxylicious-runtime` - `Configuration`, `NettyKeyProvider`, `NettyTrustProvider`, `VirtualClusterModel`, `ServerConnectionStateMachine`
-- `kroxylicious-kms-providers` / `kroxylicious-kms-provider-aws-kms` - IRSA and Pod Identity providers validate their token files
-- `kroxylicious-kubernetes` / `kroxylicious-operator` - secret volume `defaultMode`, conditional `fsGroup`, `KafkaProxy` CRD field
+- `kroxylicious-kms-providers` / `kroxylicious-kms-provider-aws-kms` - IRSA and Pod Identity providers validate their token files with `platformCredentials` category
+- `kroxylicious-kubernetes` / `kroxylicious-operator` - secret volume `defaultMode`, conditional `fsGroup`, `KafkaProxy` CRD fields
 
 **Not affected:**
 - `kroxylicious-filters` - no file reading
@@ -107,31 +155,33 @@ users to override the policy.
 ## Delivery
 
 In order to comply with the project's [deprecation policy](https://github.com/kroxylicious/kroxylicious/blob/main/DEV_GUIDE.md#deprecation-policy),
-the change in default policy should be staged across two releases.
+the change in default policies should be staged across two releases.
 
-**Stage 1 (this proposal):** Introduce the feature with `DISABLED` as the default for backward
-compatibility. When `DISABLED` is the effective policy, Kroxylicious logs a `WARN` for every
-confidential file whose permissions would be rejected by `STRICT`. This gives users a
+**Stage 1 (this proposal):** Introduce the feature with `DISABLED` as the default for all
+categories for backward compatibility. When `DISABLED` is the effective policy, Kroxylicious logs
+a `WARN` for every confidential file whose permissions would be rejected by that category's
+intended default (`STRICT` for `secrets`, `RELAXED` for `truststores`). This gives users a
 deprecation period to identify and harden their file permissions. The deprecation of `DISABLED`
 as the default should be announced in the `CHANGELOG` under "Changes, deprecations and removals".
 
-**Stage 2 (subsequent release, following the deprecation policy):** Change the default to `STRICT`.
+**Stage 2 (subsequent release, following the deprecation policy):** Change the defaults to their
+intended values: `secrets: STRICT`, `truststores: RELAXED`, `platformCredentials: DISABLED`.
 This will be a breaking change for deployments that have confidential files with overly permissive
-permissions and have not explicitly configured a policy. Deployments that set
-`security.filePermissions.policy: DISABLED` explicitly will be unaffected.
-The change in default should be documented in the `CHANGELOG` as a breaking change.
+permissions and have not explicitly configured a policy. Deployments that explicitly set
+categories to `DISABLED` will be unaffected.
+The change in defaults should be documented in the `CHANGELOG` as a breaking change.
 
 ## Compatibility
 
 ### Backward compatibility
 
-The default policy in Stage 1 is `DISABLED`, so existing deployments are unaffected. Warnings are
-emitted for insecure files to assist users in identifying files to harden before the default
-changes to `STRICT` in Stage 2.
+The default policy for all categories in Stage 1 is `DISABLED`, so existing deployments are
+unaffected. Warnings are emitted for insecure files to assist users in identifying files to
+harden before the defaults change in Stage 2.
 
 ### `FilePassword.getProvidedPassword()` behaviour change
 
-With a non-`DISABLED` policy, `FilePassword.getProvidedPassword()` can now throw
+With a non-`DISABLED` `secrets` policy, `FilePassword.getProvidedPassword()` can now throw
 `IllegalStateException` if the password file has group or other read bits set. This is an
 unchecked exception that did not previously occur. Filter authors using `FilePassword` directly
 should be aware of this.
@@ -140,12 +190,13 @@ should be aware of this.
 
 `FilePermissionValidator` and `FilePermissionConfig` in the new `kroxylicious-security` module
 become accessible to consumers of `kroxylicious-api` (which depends on `kroxylicious-security`).
-`FilePermissionValidator.setGlobalPolicy()` is necessarily public because `Configuration` (in
+`FilePermissionValidator.setGlobalPolicies()` is necessarily public because `Configuration` (in
 `kroxylicious-runtime`) and `FilePermissionValidator` (in `kroxylicious-security`) are in
 different modules and Java's access control cannot express "accessible to exactly one other module"
 without JPMS. This is a known design limitation: third-party code could in principle call
-`setGlobalPolicy()` and alter the global policy for all validations. A future improvement could
-adopt JPMS module encapsulation to restrict the method to the `kroxylicious.runtime` module only.
+`setGlobalPolicies()` and alter the global policies for all validations. A future improvement
+could adopt JPMS module encapsulation to restrict the method to the `kroxylicious.runtime` module
+only.
 
 ## Rejected alternatives
 
@@ -165,9 +216,31 @@ adding a logging-heavy implementation utility (with SLF4J, `AtomicBoolean`, `Con
 would pollute the API module with infrastructure concerns. A dedicated `kroxylicious-security`
 module is the right architectural home.
 
-### System property override
+### Single global policy
 
-A JVM system property (`-Dkroxylicious.security.filePermissionPolicy=STRICT`) was considered as
-a secondary configuration mechanism alongside the YAML field. Rejected because system properties
-are undiscoverable, untestable, and bypass the normal configuration validation path. The YAML
-field is the right single mechanism.
+A single `security.filePermissions.policy` setting applying to all files was considered. Rejected
+because it forces a trade-off between security and platform compatibility: AWS IRSA/Pod Identity
+token files are typically `0644` (platform-managed, user cannot control this), so a global
+`STRICT` or `RELAXED` policy would break AWS integrations, while a global `DISABLED` policy would
+weaken protection for user-controlled secrets. Per-category policies allow each file type to have
+the appropriate level of enforcement.
+
+## Future considerations
+
+The following additions to `security.filePermissions` are out of scope for this proposal but could
+be added in future work:
+
+- **Symlink policy:** whether to follow symlinks when reading secret files. Kubernetes mounts
+  ConfigMaps and Secrets using symlinks internally (`..data` → `..timestamp_directory`), so
+  blanket symlink rejection is not viable, but a policy could restrict symlinks in non-Kubernetes
+  environments to prevent symlink-based attacks.
+- **Path allowlist:** restrict where secret files can be loaded from (e.g. only under
+  `/etc/kroxylicious/secrets/`), preventing a configuration from pointing at unexpected filesystem
+  locations.
+
+**Probably overkill:**
+
+- **ACL or SELinux context validation:** very environment-specific, hard to get right generically.
+- **File integrity (checksum):** verifying file contents against a known hash belongs in a
+  different layer (config signing or image verification) rather than in the file permission
+  subsystem.
