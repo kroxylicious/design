@@ -119,6 +119,23 @@ This accepts `STRICT` (default when unset), `RELAXED`, or `DISABLED`. The env va
 process start and is immutable during the process lifetime - it cannot be weakened by config file
 modification or hot-reload. The operator should not set this env var under normal circumstances.
 
+### Exit code for permission failures
+
+When a file permission violation causes the proxy to fail at startup, the proxy exits with exit
+code 78 (`EX_CONFIG` from [sysexits.h](https://manpages.ubuntu.com/manpages/noble/man3/sysexits.h.3head.html))
+instead of the generic exit code 1. This is implemented via picocli's `IExitCodeExceptionMapper`,
+which walks the exception cause chain looking for an `IllegalStateException` containing `"too open"`.
+
+The distinct exit code allows the Kubernetes operator to determine _why_ the proxy crashed by
+inspecting `containerStatuses[*].lastState.terminated.exitCode` on the pod - without reading
+logs or parsing error messages.
+
+The termination message (the human-readable error text) is surfaced automatically via the
+`terminationMessagePolicy: FallbackToLogsOnError` already configured on the proxy container.
+Kubernetes captures the last 2048 bytes of log output as
+`containerStatuses[*].lastState.terminated.message` when the container exits with a non-zero
+exit code.
+
 ### Kubernetes operator
 
 The operator mounts all secret volumes with `defaultMode: 0440` (group-readable, no world
@@ -137,15 +154,34 @@ The `KafkaProxy` CRD exposes `spec.security.filePermissions` with per-category p
 (default `secrets: STRICT`, `truststores: RELAXED`, `platformCredentials: DISABLED`) to allow
 users to override the policies.
 
+### Operator status condition: `FilePermissionsValid`
+
+The operator surfaces file permission validation failures as a status condition on the
+`KafkaProxy` resource:
+
+- `FilePermissionsValid=True` - the proxy is running and no permission violation has been detected.
+- `FilePermissionsValid=False` with reason `FilePermissionsViolation` - the proxy crashed
+  with exit code 78, indicating a file permission policy violation. The condition's `message`
+  field contains the error detail from the termination message.
+
+The operator watches proxy pods via a JOSDK `InformerEventSource<Pod>`, filtered by the
+`app.kubernetes.io/managed-by=kroxylicious-operator` label selector. When a pod's container
+status shows a terminated state with exit code 78, the operator sets `FilePermissionsValid=False`.
+The condition clears automatically when the proxy restarts successfully (the container is no
+longer in a terminated state).
+
+Only containers that are not currently running are inspected - if the container has recovered
+and is running, the previous crash in `lastState.terminated` is treated as resolved.
+
 ## Affected/not affected projects
 
 **Affected:**
 - `kroxylicious-security` - new module; contains `FilePermissionValidator` and `FilePermissionConfig`
-- `kroxylicious-app` - config file write-protection check before parsing, env var override
+- `kroxylicious-app` - config file write-protection check before parsing, env var override, `IExitCodeExceptionMapper` for exit code 78
 - `kroxylicious-api` - `FilePassword.getProvidedPassword()` validates permissions with `secrets` category
 - `kroxylicious-runtime` - `Configuration`, `NettyKeyProvider`, `NettyTrustProvider`, `VirtualClusterModel`, `ServerConnectionStateMachine`
 - `kroxylicious-kms-providers` / `kroxylicious-kms-provider-aws-kms` - IRSA and Pod Identity providers validate their token files with `platformCredentials` category
-- `kroxylicious-kubernetes` / `kroxylicious-operator` - secret volume `defaultMode`, conditional `fsGroup`, `KafkaProxy` CRD fields
+- `kroxylicious-kubernetes` / `kroxylicious-operator` - secret volume `defaultMode`, conditional `fsGroup`, `KafkaProxy` CRD fields, `FilePermissionsValid` status condition, Pod `InformerEventSource`, pods RBAC
 
 **Not affected:**
 - `kroxylicious-filters` - no file reading
