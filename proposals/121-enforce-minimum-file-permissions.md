@@ -31,7 +31,7 @@ The threat model includes:
 Three policy modes are available:
 
 - `STRICT` - files must be owner-only (equivalent to `chmod 400` or `chmod 600`). Any group or
-  other read/write/execute bits cause an `IllegalStateException` at startup. Mirrors SSH behaviour.
+  other read/write/execute bits cause a `FilePermissionViolationException` at startup. Mirrors SSH behaviour.
 - `RELAXED` - other-user bits are forbidden, but group bits are permitted. This supports
   Kubernetes deployments where `fsGroup` is used to grant a specific GID read access to mounted
   secrets (e.g. `defaultMode: 0440`).
@@ -124,7 +124,7 @@ modification or hot-reload. The operator should not set this env var under norma
 When a file permission violation causes the proxy to fail at startup, the proxy exits with exit
 code 78 (`EX_CONFIG` from [sysexits.h](https://manpages.ubuntu.com/manpages/noble/man3/sysexits.h.3head.html))
 instead of the generic exit code 1. This is implemented via picocli's `IExitCodeExceptionMapper`,
-which walks the exception cause chain looking for an `IllegalStateException` containing `"too open"`.
+which walks the exception cause chain looking for a `FilePermissionViolationException`.
 
 The distinct exit code allows the Kubernetes operator to determine _why_ the proxy crashed by
 inspecting `containerStatuses[*].lastState.terminated.exitCode` on the pod - without reading
@@ -218,7 +218,7 @@ harden before the defaults change in Stage 2.
 ### `FilePassword.getProvidedPassword()` behaviour change
 
 With a non-`DISABLED` `secrets` policy, `FilePassword.getProvidedPassword()` can now throw
-`IllegalStateException` if the password file has group or other read bits set. This is an
+`FilePermissionViolationException` if the password file has group or other read bits set. This is an
 unchecked exception that did not previously occur. Filter authors using `FilePassword` directly
 should be aware of this.
 
