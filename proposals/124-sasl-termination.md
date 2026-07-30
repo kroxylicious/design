@@ -271,7 +271,6 @@ filters:
 
 - The filter does not support SASL PLAIN or GSSAPI (Kerberos). See [Rejected alternatives](#rejected-alternatives).
 - **Delegation tokens are not supported.** The filter removes the delegation token APIs (`CreateDelegationToken`, `RenewDelegationToken`, `ExpireDelegationToken`, `DescribeDelegationToken`) from the `API_VERSIONS` response and rejects those request types with a clear error. Future support may be possible by using `DescribeDelegationToken` to sync token credentials from the broker into the proxy's credential store.
-- **Upstream authentication failure is not surfaced to the client.** SASL termination splits authentication into two independent exchanges: client-to-proxy and proxy-to-broker. The client can authenticate successfully against the proxy's credential store, but the proxy's own authentication to the broker may fail independently (wrong credentials, expired certificates, misconfigured mTLS). In this case the client has already been told authentication succeeded, and will only discover the problem when subsequent requests fail with broker-level errors. Ideally the filter would verify upstream authentication before reporting success to the client — for example, by triggering an internal request to force authentication on the broker connection. However, this is complex: the filter would need to act as both a SASL terminator and a SASL initiator (or coordinate with a separate `SaslInitiator` filter), and the broker connection may not even use SASL (e.g. mTLS). Operators can diagnose the disconnect via logging and metrics, which distinguish client-side and broker-side authentication outcomes. A full solution is deferred to future work.
 
 ---
 
@@ -824,6 +823,14 @@ The `KeystoreCredentialManager` class does expose `ScramMechanism` in its public
 
 [kafka-javadoc]: https://kafka.apache.org/43/javadoc/index.html
 [proposal-116]: https://github.com/kroxylicious/design/pull/116
+
+## Open questions
+
+### Upstream authentication failure visibility
+
+SASL termination splits authentication into two independent exchanges: client-to-proxy and proxy-to-broker. The client can authenticate successfully against the proxy's credential store, but the proxy's own authentication to the broker may fail independently (wrong credentials, expired certificates, misconfigured mTLS). In this case the client has already been told authentication succeeded, and will only discover the problem when subsequent requests fail with broker-level errors.
+
+Ideally the filter would verify upstream authentication before reporting success to the client — for example, by triggering an internal request to force authentication on the broker connection. However, this is complex: the filter would need to act as both a SASL terminator and a SASL initiator (or coordinate with a separate `SaslInitiator` filter), and the broker connection may not even use SASL (e.g. mTLS). The failure response to the client should be indistinguishable from a terminated auth failure, so that an attacker cannot determine which side failed. Logging and metrics would help operators distinguish the two cases.
 
 ## Rejected alternatives
 
