@@ -923,7 +923,7 @@ Supporting SASL GSSAPI was deferred because:
 
 [proposal-004]: 004-terminology-for-authentication.md
 [proposal-006]: 006-filter-api-to-expose-client-sasl-info.md
-[proposal-072]: 070-routing-api.md
+[proposal-072]: 072-routing-api.md
 [rfc4422]: https://www.rfc-editor.org/rfc/rfc4422
 [rfc5802]: https://www.rfc-editor.org/rfc/rfc5802
 [rfc5802-s6]: https://www.rfc-editor.org/rfc/rfc5802#section-6
