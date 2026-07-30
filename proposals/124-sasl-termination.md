@@ -297,7 +297,7 @@ public interface MechanismHandler {
 }
 ```
 
-**`MechanismHandler` lifecycle:** The filter calls `dispose()` on the handler after SUCCESS (the handler is no longer needed once the client is authenticated) and after FAILURE (the connection is about to close). It is *not* called on raw connection close (e.g. client disconnects mid-exchange) because the `Filter` API has no connection-close hook — the handler becomes unreachable and is garbage collected. Handler implementations must therefore not hold resources that require explicit cleanup beyond what GC provides.
+**`MechanismHandler` lifecycle:** The filter calls `dispose()` on the handler after SUCCESS (the handler is no longer needed once the client is authenticated) and after FAILURE (the connection is about to close). It is *not* called on raw connection close (e.g. client disconnects mid-exchange) because the `Filter` API has no connection-close hook — the handler becomes unreachable and is garbage collected. Handler implementations must therefore not hold resources that require explicit cleanup beyond what GC provides. This is safe for the built-in handlers: Kafka's `ScramSaslServer.dispose()` is a no-op, and the OAUTHBEARER handler's per-connection state is similarly GC-safe.
 
 For reauthentication (KIP-368), the previous handler was already disposed at SUCCESS time, so a fresh handler is created for the new exchange.
 
