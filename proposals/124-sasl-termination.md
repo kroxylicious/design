@@ -153,6 +153,7 @@ The `SaslTermination` filter is a `@Plugin`-annotated `FilterFactory` that inter
 Key features:
 
 - **Security barrier.** Until a client has successfully authenticated, the only requests permitted are `API_VERSIONS`, `SASL_HANDSHAKE`, and `SASL_AUTHENTICATE`. All other request types are rejected with `SASL_AUTHENTICATION_FAILED` and the connection is closed.
+- **Fail closed on unknown versions.** If a `SASL_HANDSHAKE` or `SASL_AUTHENTICATE` request arrives with an API version outside the range known to the filter, the filter rejects the request and closes the connection. This prevents a future protocol version from bypassing the filter's security logic.
 - **State machine.** Per-connection authentication state is modelled as a sealed interface with four concrete states, preventing invalid transitions at compile time.
 - **Reauthentication (KIP-368).** When `maxTimeBeforeReauth` is configured, the filter includes a `sessionLifetimeMs` value in `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate. Sessions that expire without reauthentication are rejected and closed.
 - **Mechanism dispatch.** The filter delegates each authentication exchange to a `MechanismHandler` obtained from the appropriate `MechanismHandlerFactory` (see Component 2). The filter itself is mechanism-agnostic.
