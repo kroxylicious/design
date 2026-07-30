@@ -268,6 +268,7 @@ filters:
 #### Known limitations
 
 - The filter does not support SASL PLAIN or GSSAPI (Kerberos). See [Rejected alternatives](#rejected-alternatives).
+- **Delegation tokens are not supported.** The filter removes the delegation token APIs (`CreateDelegationToken`, `RenewDelegationToken`, `ExpireDelegationToken`, `DescribeDelegationToken`) from the `API_VERSIONS` response and rejects those request types with a clear error. Future support may be possible by using `DescribeDelegationToken` to sync token credentials from the broker into the proxy's credential store.
 
 ---
 
