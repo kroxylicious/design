@@ -228,17 +228,12 @@ The filter is configured via `SaslTerminationConfig`:
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `mechanisms` | `Map<String, MechanismConfig>` | Yes | -- | Map of IANA-registered mechanism name to mechanism-specific configuration. At least one entry is required. |
+| `mechanisms` | `List<MechanismConfig>` | Yes | -- | List of mechanism configurations. Each entry includes a `mechanism` field (the IANA-registered mechanism name) and mechanism-specific configuration. At least one entry is required. |
 | `maxTimeBeforeReauth` | `Duration` | No | disabled | Maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable. |
 | `fixedAuthDelay` | `Duration` | No | `200ms` | Fixed delay applied to all authentication rounds to prevent timing side-channel attacks that could enable user enumeration. Set to `0` to disable if the deployment's threat model does not require user enumeration protection. |
 | `subjectBuilder` | `SaslSubjectBuilderService` | No | `DEFAULT_SUBJECT_BUILDER` | Plugin for constructing the `Subject` from authentication results. Defaults to `DEFAULT_SUBJECT_BUILDER`, consistent with the existing SASL inspection filter. |
 
-The `mechanisms` map values are polymorphic. Jackson deduction-based deserialization (`@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)`) resolves the concrete type from the fields present:
-
-- If the entry contains `credentialStore` and `credentialStoreConfig`, it deserializes as `ScramMechanismConfig`.
-- If the entry contains `jwksEndpointUrl`, `expectedAudience`, and `expectedIssuer`, it deserializes as `OauthBearerMechanismConfig`.
-
-This means the mechanism map key (e.g. `SCRAM-SHA-256`) selects which `MechanismHandlerFactory` handles the exchange, while the value's field structure determines which config type Jackson produces. There is no explicit type discriminator field.
+The `mechanisms` list elements are polymorphic. Jackson name-based deserialization (`@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "mechanism")`) resolves the concrete type from the `mechanism` field, which is the IANA-registered mechanism name (e.g. `SCRAM-SHA-256`, `OAUTHBEARER`). This also selects which `MechanismHandlerFactory` handles the exchange.
 
 **Example configuration:**
 
@@ -249,14 +244,14 @@ filters:
       maxTimeBeforeReauth: 1h
       fixedAuthDelay: 200ms
       mechanisms:
-        SCRAM-SHA-256:
+        - mechanism: SCRAM-SHA-256
           credentialStore: KeystoreScramCredentialStoreService
           credentialStoreConfig:
             file: /path/to/credentials.p12
             storePassword:
               file: /etc/kroxylicious/keystore-password.txt
             storeType: PKCS12
-        OAUTHBEARER:
+        - mechanism: OAUTHBEARER
           jwksEndpointUrl: https://idp.example.com/.well-known/jwks.json
           expectedAudience: kafka
           expectedIssuer: https://idp.example.com
@@ -348,13 +343,14 @@ public record AuthenticationResult(
 }
 ```
 
-**`MechanismConfig`** -- sealed interface for mechanism-specific configuration, using Jackson deduction-based polymorphism:
+**`MechanismConfig`** -- sealed interface for mechanism-specific configuration, using Jackson name-based polymorphism on the `mechanism` field:
 
 ```java
-@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "mechanism")
 @JsonSubTypes({
-        @JsonSubTypes.Type(ScramMechanismConfig.class),
-        @JsonSubTypes.Type(OauthBearerMechanismConfig.class)
+        @JsonSubTypes.Type(value = ScramMechanismConfig.class, name = "SCRAM-SHA-256"),
+        @JsonSubTypes.Type(value = ScramMechanismConfig.class, name = "SCRAM-SHA-512"),
+        @JsonSubTypes.Type(value = OauthBearerMechanismConfig.class, name = "OAUTHBEARER")
 })
 public sealed interface MechanismConfig
         permits ScramMechanismConfig, OauthBearerMechanismConfig {
