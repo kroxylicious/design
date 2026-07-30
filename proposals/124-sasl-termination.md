@@ -57,6 +57,8 @@ A key problem with any passthrough-based technique is that it depends on the ava
 This proposal aims to support the following SASL mechanisms: `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`.
 It also aims to be flexible, so as to allow other mechanisms to be supported in the future.
 
+Validation of legal compositions of SASL-related filters within a filter chain is not in scope for this proposal.
+
 The proposal is organized per-component. Each component section covers its summary, API surfaces, configuration, threats and mitigations, and known limitations.
 
 ### Component overview
