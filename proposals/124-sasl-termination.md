@@ -513,7 +513,7 @@ OAUTHBEARER is configured via `OauthBearerMechanismConfig`:
 
 - **No TLS configuration for the JWKS endpoint.** Kafka's `OAuthBearerValidatorCallbackHandler` uses an internal HTTP client with no TLS configuration surface. There is no way to configure custom trust stores or client certificates for HTTPS communication with the JWKS endpoint. The JVM's default trust store is used. This limitation is inherited from Kafka's callback handler and shared with the existing OAUTHBEARER validation filter.
 - **No rate limiting.** The handler does not implement rate limiting or brute-force protection for failed authentication attempts. The existing OAUTHBEARER validation filter has Caffeine-based rate limiting with exponential backoff that could serve as a reference for a future implementation.
-- **Hardcoded `BrokerJwtValidator`.** The handler hardcodes `BrokerJwtValidator` as the JWT validator. The existing OAUTHBEARER validation filter allows this to be overridden via `jwtValidatorClass` for custom claim validation logic.
+- **Hardcoded `BrokerJwtValidator`.** The handler hardcodes `BrokerJwtValidator` as the JWT validator. The existing OAUTHBEARER validation filter allows this to be overridden via `jwtValidatorClass` for custom claim validation logic. A `TokenValidator` SPI (analogous to the `ScramCredentialStore` SPI for SCRAM) would address this — the JWKS-based implementation would become the first-party provider, and the SPI would open the door to token introspection (RFC 7662) or custom claim validators. This is planned as future work.
 
 ---
 
