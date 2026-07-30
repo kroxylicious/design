@@ -157,6 +157,7 @@ Key features:
 - **State machine.** Per-connection authentication state is modelled as a sealed interface with four concrete states, preventing invalid transitions at compile time.
 - **Reauthentication (KIP-368).** When `maxTimeBeforeReauth` is configured, the filter includes a `sessionLifetimeMs` value in `SaslAuthenticateResponse` (v1+), informing the client when to reauthenticate. Sessions that expire without reauthentication are rejected and closed.
 - **Mechanism dispatch.** The filter delegates each authentication exchange to a `MechanismHandler` obtained from the appropriate `MechanismHandlerFactory` (see Component 2). The filter itself is mechanism-agnostic.
+- **Steady-state optimization.** Once a client is in the `Authenticated` state with no session expiry configured, the filter uses `shouldHandleRequest` to avoid deserializing subsequent requests, letting them pass through without filter overhead.
 
 #### State machine
 
