@@ -752,6 +752,8 @@ The implementation is organized into three modules, following the same pattern a
 
 ## Security model
 
+SASL termination fundamentally changes the proxy's trust level. Today the proxy does not hold authentication decision criteria — the broker holds SCRAM credentials, the IdP holds tokens, and the proxy passes bytes. With SASL termination, the proxy becomes the authentication boundary and the custodian of credential material: SCRAM credentials in memory and on disk, JWKS keys cached locally. This is a step change in what the proxy is responsible for protecting. The per-component mitigations below follow from this new role. A comprehensive threat model is recommended as a separate activity before production deployment.
+
 ### Credential storage
 
 - **KeyStore encryption:** Credentials are stored in Java KeyStore files, encrypted with the KeyStore password. File-system permissions and KeyStore passwords are the primary access controls.
