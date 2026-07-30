@@ -871,6 +871,10 @@ A single `CredentialStore` interface serving both SCRAM and OAUTHBEARER was cons
 
 Instead, each mechanism family manages its own resources. The `MechanismHandlerFactory` is the point where mechanism-specific resources (credential stores, JWKS handlers) are injected.
 
+### Credential store backed by Kafka's `__cluster_metadata` topic
+
+A `MetadataTopicScramCredentialStoreService` that consumes `UserScramCredentialRecord` from the `__cluster_metadata` topic was considered as a way to eliminate the credential island problem — the proxy could share the broker's own SCRAM credentials without separate provisioning. This was rejected because Kafka does not expose `__cluster_metadata` as a consumable topic, and the Admin API (`DescribeUserScramCredentials`) deliberately does not return the credential material (salt, serverKey, storedKey). This is by design: Kafka treats SCRAM credential material as write-only. There is no public API through which the proxy could obtain the credentials needed to perform SCRAM authentication.
+
 ### Using @Plugin for mechanism handlers
 
 Making `MechanismHandlerFactory` a user-facing plugin (with `@Plugin` annotation and plugin discovery) was considered. This was rejected because:
