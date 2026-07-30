@@ -30,6 +30,8 @@ With SASL termination, the proxy authenticates clients using credentials stored 
 - Different credential lifecycles are needed for client-facing and broker-facing authentication.
 - Compliance requirements mandate credential isolation between organizational boundaries.
 
+**Operational trade-off for SCRAM:** Because the proxy maintains its own credential store, existing Kafka credential management tooling (`KafkaUser` CRs, `kafka-configs.sh`, the Admin API's `AlterUserScramCredentials`) cannot be used to manage proxy credentials. Operators with existing SCRAM users on their brokers cannot migrate those credentials to the proxy — they must re-provision users in the proxy's credential store from scratch.
+
 ### Authentication protocol translation
 
 The proxy can authenticate clients using one SASL mechanism (e.g. `SCRAM-SHA-256`) while using an entirely different authentication mechanism to connect to the broker (e.g. mTLS, or `OAUTHBEARER`). This enables:
