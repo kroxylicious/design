@@ -231,6 +231,7 @@ The filter is configured via `SaslTerminationConfig`:
 | `mechanisms` | `Map<String, MechanismConfig>` | Yes | -- | Map of IANA-registered mechanism name to mechanism-specific configuration. At least one entry is required. |
 | `maxTimeBeforeReauth` | `Duration` | No | disabled | Maximum session lifetime before reauthentication is required (KIP-368). Uses golang-style duration syntax (e.g. `1h`, `30m`, `1h30m`). Omit or set to `0` to disable. |
 | `fixedAuthDelay` | `Duration` | No | `200ms` | Fixed delay applied to all authentication rounds to prevent timing side-channel attacks that could enable user enumeration. Set to `0` to disable if the deployment's threat model does not require user enumeration protection. |
+| `subjectBuilder` | `SaslSubjectBuilderService` | No | `DEFAULT_SUBJECT_BUILDER` | Plugin for constructing the `Subject` from authentication results. Defaults to `DEFAULT_SUBJECT_BUILDER`, consistent with the existing SASL inspection filter. |
 
 The `mechanisms` map values are polymorphic. Jackson deduction-based deserialization (`@JsonTypeInfo(use = JsonTypeInfo.Id.DEDUCTION)`) resolves the concrete type from the fields present:
 
