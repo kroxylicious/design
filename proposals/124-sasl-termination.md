@@ -348,12 +348,36 @@ public record AuthenticationResult(
 ```java
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "mechanism")
 @JsonSubTypes({
-        @JsonSubTypes.Type(value = ScramMechanismConfig.class, name = "SCRAM-SHA-256"),
-        @JsonSubTypes.Type(value = ScramMechanismConfig.class, name = "SCRAM-SHA-512"),
+        @JsonSubTypes.Type(value = ScramSha256MechanismConfig.class, name = "SCRAM-SHA-256"),
+        @JsonSubTypes.Type(value = ScramSha512MechanismConfig.class, name = "SCRAM-SHA-512"),
         @JsonSubTypes.Type(value = OauthBearerMechanismConfig.class, name = "OAUTHBEARER")
 })
 public sealed interface MechanismConfig
         permits ScramMechanismConfig, OauthBearerMechanismConfig {
+}
+```
+
+`ScramMechanismConfig` is an abstract base class whose constructor accepts the mechanism name. The per-variant subclasses contain only a default constructor:
+
+```java
+public abstract sealed class ScramMechanismConfig implements MechanismConfig
+        permits ScramSha256MechanismConfig, ScramSha512MechanismConfig {
+
+    private final String mechanism;
+
+    protected ScramMechanismConfig(String mechanism) {
+        this.mechanism = mechanism;
+    }
+
+    // credentialStore, credentialStoreConfig fields...
+}
+
+public final class ScramSha256MechanismConfig extends ScramMechanismConfig {
+    public ScramSha256MechanismConfig() { super("SCRAM-SHA-256"); }
+}
+
+public final class ScramSha512MechanismConfig extends ScramMechanismConfig {
+    public ScramSha512MechanismConfig() { super("SCRAM-SHA-512"); }
 }
 ```
 
@@ -401,15 +425,20 @@ The SCRAM handler factories use:
 
 #### Configuration
 
-SCRAM mechanisms are configured via `ScramMechanismConfig`:
+SCRAM mechanisms are configured via `ScramMechanismConfig` (see Component 2 for the `ScramSha256MechanismConfig` / `ScramSha512MechanismConfig` subclasses). The base class carries the credential store configuration:
 
 ```java
-public record ScramMechanismConfig(
-        @JsonProperty(required = true)
-        @PluginImplName(ScramCredentialStoreService.class) String credentialStore,
-        @JsonProperty(required = true)
-        @PluginImplConfig(implNameProperty = "credentialStore") Object credentialStoreConfig)
-    implements MechanismConfig { }
+public abstract sealed class ScramMechanismConfig implements MechanismConfig
+        permits ScramSha256MechanismConfig, ScramSha512MechanismConfig {
+
+    @JsonProperty(required = true)
+    @PluginImplName(ScramCredentialStoreService.class)
+    private String credentialStore;
+
+    @JsonProperty(required = true)
+    @PluginImplConfig(implNameProperty = "credentialStore")
+    private Object credentialStoreConfig;
+}
 ```
 
 | Option | Type | Required | Default | Description |
