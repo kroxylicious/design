@@ -3,7 +3,8 @@
 The Kroxylicious authorizer API provides a general-purpose abstraction for access control decisions, deliberately designed to be agnostic of specific `Principal` and `ResourceType` implementations.
 However, the API currently depends on `kroxylicious-api`, which transitively pulls in Kafka client libraries, Jackson, and compression codecs. 
 This makes it less appealing for non-Kroxylicious projects to reuse.
-This proposal extracts the `Subject` and `Principal` concepts into a new lightweight module, `kroxylicious-identity-api`, so that `kroxylicious-authorizer-api` can be consumed independently of `kroxylicious-api` module.
+This proposal extracts identity concepts into a new lightweight module, `kroxylicious-identity-api`, containing a `Principal` interface, a `Subject` record, a deprecated-at-birth `Identity` interface (to aid in the migration to the new module) and a `@SingularPrincipal` annotation.
+The existing types in `kroxylicious-api` will be deprecated and gain super-types from the new module, enabling a phased migration where only the `Authorizer` API breaks immediately while `FilterContext` and other consuming APIs remain unchanged until version 1.0.
 
 ## Current situation
 
@@ -45,7 +46,6 @@ Any non-Kroxylicious project that wants to implement or consume the `Authorizer`
 
 As detailed in [Current situation](#current-situation) section, the authorizer API's usage of `Subject` is narrow: implementations only call `principals()`, `name()`, and `getClass()`.
 Yet this narrow usage forces consumers to accept `kafka-clients`, `jackson-annotations`, and compression codec libraries as transitive dependencies.
-The relative cost of importing the dependency does not match the value consumed.
 
 ### Authentication concepts are misplaced in the module hierarchy
 
@@ -60,41 +60,57 @@ The project's pre-1.0 status does not justify the change on its own. It should b
 However, the 0.x window does significantly reduce the cost of making a change that is justified on its own merits.
 The authorizer API was introduced relatively recently, so external adoption is likely to be minimal.
 Post-1.0, this same change would require deprecation cycles, compatibility shims, and migration documentation.
-Given the demonstrated external demand and the narrow usage pattern, the migration cost is justified now in a way that would be harder to justify later.
+Given the demonstrated external demand and the narrow usage pattern, the migration cost seems justified now in a way that would be harder to justify later.
 
 ## Proposal
 
-Introduce a new module, `kroxylicious-identity-api`, containing the `Subject` and `Principal` interfaces and the `@Unique` annotation.
-The `Subject` interface defines one abstract method (`principals()`) and provides default convenience methods (`uniquePrincipalOfType`, `allPrincipalsOfType`, `isAnonymous`) and a static factory (`anonymous()`), giving any implementation full subject-querying capability without additional dependencies.
+Introduce a new module, `kroxylicious-identity-api`, containing four types: a `Principal` interface, a `@SingularPrincipal` annotation, a deprecated-at-birth `Identity` bridge interface, and a `Subject` record.
 
-The existing concrete `Subject` record in `kroxylicious-api` is renamed to `ProxySubject` and implements the new `Subject` interface.
-API surfaces that only consume subjects (`FilterContext.authenticatedSubject()`, `RouterContext.authenticatedSubject()`, `FilterContext.clientSaslAuthenticationSuccess()`) change their type to the `Subject` interface, while subject-constructing APIs (`TransportSubjectBuilder`, `SaslSubjectBuilder`) retain `ProxySubject`.
-`kroxylicious-authorizer-api` switches its dependency from `kroxylicious-api` to the new module.
+The existing `Subject` record and `Principal` interface in `kroxylicious-api` will remain.
+However, the existing `Principal` gains `extends io.kroxylicious.identity.Principal`, the existing `Subject` gains `implements io.kroxylicious.identity.Identity`, and both will be deprecated along with the existing `@Unique` annotation.
+
+`kroxylicious-authorizer-api` switches its dependency from `kroxylicious-api` to the new module and its method parameters change to use the `Identity` bridge interface.
+This is the only immediately breaking change.
+
+API surfaces in `kroxylicious-api` that consume subjects (`FilterContext.authenticatedSubject()`, `RouterContext.authenticatedSubject()`, `FilterContext.clientSaslAuthenticationSuccess()`) are unchanged because the existing `Subject` record now implements `Identity` and flows into `Authorizer.authorize(Identity)` without conversion.
+Subject-constructing APIs (`TransportSubjectBuilder`, `SaslSubjectBuilder`) are also unchanged.
+
+At 1.0, the deprecated bridge types are removed and all APIs migrate to using the new `Subject` record directly.
 
 ### New module: `kroxylicious-identity-api`
 
-A new module in the `io.kroxylicious.identity` package containing three types:
+We will create a new module in the `io.kroxylicious.identity` package containing four types:
 
 `Principal` interface: a single method, `String name()`.
 The Javadoc contract (implementations must override `hashCode`/`equals` based on class and name) is carried forward from the existing `Principal`.
 
-`Subject` interface: one abstract method, `Set<Principal> principals()`, plus default convenience methods and a static factory:
+`@SingularPrincipal` annotation: `@Retention(RUNTIME)`, `@Target(TYPE)`.
+This is a renamed version of the existing `@Unique` annotation, with a name that more clearly describes its purpose: marking `Principal` implementations that should have at most one instance in a subject.
+This annotation is co-located in the identity module because the `uniquePrincipalOfType` default method on `Identity` will directly depend on it: the method will check `@SingularPrincipal` at runtime to validate that the requested principal type supports the "at most one" invariant.
 
-- `<P extends Principal> Optional<P> uniquePrincipalOfType(Class<P> uniquePrincipalType)`: default method that returns the unique principal of a given `@Unique`-annotated type, or empty. Throws `IllegalArgumentException` if the type is not annotated with `@Unique`.
+`Identity` interface: a deprecated-at-birth bridge interface with one abstract method, `Set<? extends Principal> principals()`, plus default convenience methods and a static factory:
+
+- `<P extends Principal> Optional<P> uniquePrincipalOfType(Class<P> uniquePrincipalType)`: default method that returns the unique principal of a given `@SingularPrincipal`-annotated type, or empty. Throws `IllegalArgumentException` if the type is not annotated with `@SingularPrincipal`.
 - `<P extends Principal> Set<P> allPrincipalsOfType(Class<P> principalType)`: default method that returns all principals matching a given type.
 - `boolean isAnonymous()`: default method that returns `true` when the principals set is empty.
-- `static Subject anonymous()`: static factory method that returns a `Subject` with no principals.
+- `static Identity anonymous()`: static factory method that returns an `Identity` with no principals, backed by a lightweight private implementation.
 
-The interface retains the `@FunctionalInterface` annotation: default and static methods do not count toward the single abstract method requirement, so trivial implementations remain possible (`() -> myPrincipalSet`).
+The `Identity` interface is annotated `@Deprecated` from its introduction.
+It exists solely as a bridge type so that both the existing `Subject` record (in `kroxylicious-api`) and the new `Subject` record (in this module) can be passed to `Authorizer.authorize()`.
+The wildcard return type on `principals()` (`Set<? extends Principal>`) is necessary so the existing `Subject` record's `Set<io.kroxylicious.proxy.authentication.Principal>` accessor satisfies the interface through covariant return types, given that the existing `Principal` gains `extends io.kroxylicious.identity.Principal`.
+The `Identity` interface will be removed at 1.0.
 
-Placing these methods on the interface is motivated by evidence from [Apicurio Registry's prototype][apicurio-pr], which copied the Kroxylicious `Subject` and re-implemented equivalent convenience methods (`principalOfType`, `isAnonymous`, `anonymous()`) for their `GrantsAuthorizer`.
-This demonstrates that these methods are useful for working with `Subject`, not proxy-specific behaviour.
-Providing them as defaults means external consumers get full subject-querying capability without writing boilerplate or duplicating logic.
+Placing the convenience methods on `Identity` is motivated by evidence from [Apicurio Registry's prototype][apicurio-pr], which copied the Kroxylicious `Subject` and re-implemented equivalent convenience methods (`principalOfType`, `isAnonymous`, `anonymous()`) for their `GrantsAuthorizer`.
+This demonstrates that these methods are useful for working with subjects, not proxy-specific behaviour.
+Providing them as defaults means all implementations of `Identity`, including both the existing and new `Subject` types, get full subject-querying capability without writing boilerplate or duplicating logic.
 
-`@Unique` annotation: `@Retention(RUNTIME)`, `@Target(TYPE)`.
-Marks `Principal` implementations that should have at most one instance in a `Subject`.
-This annotation is moved from the main `kroxylicious-api` because the `uniquePrincipalOfType` default method on `Subject` directly depends on it: the method checks `@Unique` at runtime to validate that the requested principal type supports the "at most one" invariant.
-Co-locating the annotation with the method that enforces it keeps the module self-contained. If `@Unique` remained in `kroxylicious-api`, the identity module would depend on the proxy module, defeating the purpose of the extraction.
+`Subject` record: a concrete record implementing the `Identity` interface.
+Its constructor validates `@SingularPrincipal` uniqueness: if a `Principal` implementation is annotated with `@SingularPrincipal`, the constructor rejects any principal set containing more than one instance of that type.
+This is the intended final type for all consumers of the identity API.
+External consumers such as Apicurio should target this type directly.
+
+The `Subject` record has its own `static Subject anonymous()` factory method that returns a `Subject` with no principals.
+This is separate from `Identity.anonymous()` because static methods on interfaces are not inherited in Java — when `Identity` is removed at 1.0, `Subject.anonymous()` must already exist for code that has migrated to the new type.
 
 The module has no compile-scope dependencies beyond `spotbugs-annotations` (provided scope, for package-level null-safety annotations).
 This means the transitive dependency tree for consumers of the authorizer API, which imports from this new module, becomes:
@@ -117,74 +133,63 @@ They represent general identity concepts that any project can use.
 
 ### Changes to existing types in `kroxylicious-api`
 
-- `io.kroxylicious.proxy.authentication.Principal` is **deleted**.
-  This is a binary-incompatible change.
+- `io.kroxylicious.proxy.authentication.Principal` gains `extends io.kroxylicious.identity.Principal`.
+  This is both source- and binary-compatible: the existing `Principal` already declares `String name()`, matching the new super-interface's single method.
+  The existing `Principal` is deprecated.
 
-- `io.kroxylicious.proxy.authentication.Subject` is **renamed** to `io.kroxylicious.proxy.authentication.ProxySubject` and adds `implements io.kroxylicious.identity.Subject`.
-  The rename avoids ambiguity between the interface (`io.kroxylicious.identity.Subject`) and the concrete record when both are in scope.
-  Its `Set<Principal> principals` component and method type bounds change from the deleted proxy `Principal` to `io.kroxylicious.identity.Principal`.
-  The file is renamed from `Subject.java` to `ProxySubject.java`, the test from `SubjectTest.java` to `ProxySubjectTest.java`, and all references are updated: `Subject.anonymous()` becomes `ProxySubject.anonymous()`, `new Subject(...)` becomes `new ProxySubject(...)`, etc.
-  This is a binary and source incompatible change for all code referencing the concrete type by name.
+- `io.kroxylicious.proxy.authentication.Subject` gains `implements io.kroxylicious.identity.Identity`.
+  Adding the super-interface is binary-compatible, and the existing `principals()` accessor satisfies `Identity`'s `Set<? extends Principal> principals()` through covariant return types.
+  However, the existing `Subject`'s convenience methods (`uniquePrincipalOfType`, `allPrincipalsOfType`) must have their type parameter bounds widened from `<P extends io.kroxylicious.proxy.authentication.Principal>` to `<P extends io.kroxylicious.identity.Principal>`.
+  Without this change, the existing methods and the `Identity` default methods would have the same erasure but different type parameter bounds, producing a name clash compilation error (JLS §8.4.8.1 requires identical bounds for a valid override; a subtype relationship between bounds is not sufficient).
+  Widening the bounds is both source- and binary-compatible for callers: the erased method signature is unchanged, and any type argument that satisfied the narrower bound also satisfies the wider one.
+  `isAnonymous()` has no type parameters and overrides the `Identity` default cleanly.
+  The existing `Subject` is deprecated.
+  Its constructor will check both `@SingularPrincipal` and `@Unique` for the cardinality invariant, so that principals annotated with either annotation are validated during the transition period.
+  This avoids silently dropping enforcement for any external `Principal` implementations still annotated with `@Unique`.
+  The dual check is removed at 1.0 along with the rest of the deprecated `Subject` record; the new `Subject` in `kroxylicious-identity-api` only checks `@SingularPrincipal`.
+  The existing `Subject` also retains its `User`-principal validation.
 
-- Because `Subject` is an interface with default convenience methods, API surfaces that only *consume* subjects use the interface type directly, while surfaces that *construct* subjects retain `ProxySubject` to preserve the `User`-principal validation in its constructor. The following method signatures change:
-  - `FilterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` (the existing concrete record) to `io.kroxylicious.identity.Subject` (the new interface). Source code retains the name `Subject` — only the import changes.
-  - `RouterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
-  - `FilterContext.clientSaslAuthenticationSuccess(String, Subject)` parameter type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
-  - `TransportSubjectBuilder.buildTransportSubject(Context)` return type changes from `CompletionStage<Subject>` to `CompletionStage<ProxySubject>` — these construct subjects and need the concrete type's `User` validation.
-  - `SaslSubjectBuilder.buildSaslSubject(Context)` return type changes from `CompletionStage<Subject>` to `CompletionStage<ProxySubject>`.
+- `io.kroxylicious.proxy.authentication.Unique` is deprecated.
 
-  These are all binary-incompatible changes. For the consuming APIs (`FilterContext`, `RouterContext`), the source fix is a single import change — the type name `Subject` is preserved.
+- `User` and other types annotated with `@Unique` switch to the new `@SingularPrincipal` annotation from `io.kroxylicious.identity`.
 
-- The `@Unique` annotation is moved from `io.kroxylicious.proxy.authentication` to `io.kroxylicious.identity`.
-  The existing annotation is deleted.
-  This is a binary-incompatible change: code compiled against the existing annotation will not see it on types annotated with the new one.
-  This is mitigated by:
-  - The project being at version 0.x (pre-1.0 API stability).
-  - A `japicmp` exclusion documenting the intentional removal.
-  - The `@Unique` annotation having no known external consumers.
-
-- `User` and other types annotated with `@Unique` update their import to the new annotation.
-  `User`, `PrincipalFactory`, and test types (`FakeUniquePrincipal`, `FakeMultiplePrincipal`) add an explicit `import io.kroxylicious.identity.Principal` since the same-package type no longer exists.
-
-- The `japicmp` configuration is updated with:
-  - `<exclude>` entries for: the removed `Principal` class, the removed `Unique` annotation, the removed `Subject` class (renamed to `ProxySubject`), the changed `PrincipalFactory#newPrincipal` return type, and the changed method signatures in `TransportSubjectBuilder#buildTransportSubject`, `SaslSubjectBuilder#buildSaslSubject`, `FilterContext#clientSaslAuthenticationSuccess`, `FilterContext#authenticatedSubject`, and `RouterContext#authenticatedSubject`.
-  - An `<ignoreMissingClassesByRegularExpressions>` entry for `io.kroxylicious.proxy.authentication.Principal`, because `japicmp` cannot resolve old bytecode signatures that reference the deleted class without this.
-
-- The concrete `ProxySubject` record retains the `User`-principal validation and the `@Unique` cardinality check in its compact constructor. It inherits the `uniquePrincipalOfType`, `allPrincipalsOfType`, and `isAnonymous` default methods from the `Subject` interface. `ProxySubject.anonymous()` is retained as a static factory that returns a `ProxySubject` (with the constructor's validation invariants), while `Subject.anonymous()` is a separate static factory returning a lightweight anonymous `Subject` without proxy-specific validation.
+- API surfaces in `kroxylicious-api` that consume or produce the existing `Subject` (`FilterContext.authenticatedSubject()`, `RouterContext.authenticatedSubject()`, `FilterContext.clientSaslAuthenticationSuccess()`, `TransportSubjectBuilder.buildTransportSubject()`, and `SaslSubjectBuilder.buildSaslSubject()`) will remain unchanged.
+  Their signatures continue to use the existing `io.kroxylicious.proxy.authentication.Subject` record.
+  Since that record now implements `Identity`, returned subjects flow into `Authorizer.authorize(Identity)` without conversion, preserving existing contracts for filter and router plugin authors.
 
 ### Changes to `kroxylicious-authorizer-api`
 
-- `Authorizer.authorize()` and `AuthorizeResult`'s `subject` component change their type from `io.kroxylicious.proxy.authentication.Subject` (the existing concrete record, renamed to `ProxySubject`) to `io.kroxylicious.identity.Subject` (the new interface).
+- `Authorizer.authorize()` and `AuthorizeResult`'s `subject` component change their type from `io.kroxylicious.proxy.authentication.Subject` (the existing concrete record) to `io.kroxylicious.identity.Identity` (the new bridge interface).
 
 - The module's dependency on `kroxylicious-api` is replaced with a dependency on `kroxylicious-identity-api`.
-  A test-scope dependency on `kroxylicious-api` is retained for tests that construct concrete `ProxySubject` instances.
+  A test-scope dependency on `kroxylicious-identity-api` is sufficient for tests that construct `io.kroxylicious.identity.Subject` record instances.
 
-- This is a source-breaking change for `Authorizer` implementations: they must update the parameter type in their `authorize()` method from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
-  The fix is mechanical (change one import).
-  Callers of `authorize()` (such as `AuthorizationFilter`) are unaffected because the concrete `ProxySubject` implements the interface.
+- This is a binary-incompatible change.
+  However, it is source-compatible for callers: since the existing `Subject` record now implements `Identity`, code that passes an existing `Subject` to `authorize()` compiles without changes.
+  `Authorizer` implementations must update the parameter type in their `authorize()` method from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Identity`.
+  The fix is mechanical (change one import and the parameter type).
 
 ### Changes to downstream modules
 
-Downstream changes follow three patterns:
+The only downstream modules that need source changes are those containing `Authorizer` implementations, which must update their `authorize()` method signature from the existing `Subject` to `Identity`.
+Two such implementations exist in the codebase.
 
-- **Re-import (Subject)**: code that references `Subject` in consuming positions (filter implementations reading `FilterContext.authenticatedSubject()`, router implementations reading `RouterContext.authenticatedSubject()`, authorizer implementations receiving a `Subject` parameter) updates the import from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`. The type name in source code remains `Subject` — only the import statement changes.
-- **Rename**: code that *constructs* subjects updates from `new Subject(...)` to `new ProxySubject(...)` and from `Subject.anonymous()` to `ProxySubject.anonymous()`. This affects subject builders, test setup code, and the runtime authentication pipeline.
-- **Re-import (Principal and @Unique)**: code referencing `Principal` or `@Unique` updates imports from `io.kroxylicious.proxy.authentication` to `io.kroxylicious.identity`.
+Additionally, the existing `Subject`'s `uniquePrincipalOfType()` method checks `isAnnotationPresent(Unique.class)` at runtime.
+Since `User` switches from `@Unique` to `@SingularPrincipal`, this method must be updated to accept both annotations during the transition period, mirroring the dual check described for the constructor.
 
-Because `FilterContext.authenticatedSubject()` and `RouterContext.authenticatedSubject()` return `Subject` (the interface) rather than `ProxySubject`, most filter and router code only needs a re-import rather than a type-name change.
-This reduces the blast radius of the rename: only code that constructs `ProxySubject` instances needs to use the new name.
+`PrincipalEntityNameMapper` in `kroxylicious-entity-isolation` also checks `isAnnotationPresent(Unique.class)` in its constructor to validate that a principal type supports the "at most one" invariant.
+This check must be updated to accept both `@Unique` and `@SingularPrincipal`, otherwise passing `User` (which now carries `@SingularPrincipal`) as the principal type would be rejected.
+
+All other modules (including those that use `FilterContext.authenticatedSubject()`, `RouterContext.authenticatedSubject()`, or any other API surface in `kroxylicious-api`) require no immediate source changes.
+These modules will see deprecation warnings for usages of the existing `Subject`, `Principal`, and `@Unique`, encouraging migration to the new types, but compilation is unaffected.
 
 #### Notable implications
 
-- **`kroxylicious-runtime` gains a direct dependency on `kroxylicious-identity-api`**: its source directly references the identity-api `Principal` type, so this must be an explicit compile-scope dependency.
-
-- **Maven dependency analyzer false positive**: some modules need `kroxylicious-identity-api` on the classpath to resolve `ProxySubject`'s super-interface or `Subject` return types, but their bytecode may not directly reference identity-api types.
-  This triggers Maven's analyzer.
-  Because several API surfaces (e.g. `FilterContext.authenticatedSubject()`) directly reference `io.kroxylicious.identity.Subject`, some modules will have genuine bytecode references that make the dependency required rather than a false positive. The exact set of modules needing an `ignoredNonTestScopedDependencies` override will be determined during implementation.
-
 - **Dependency enforcer allowlists**: `kroxylicious-identity-api` must be added to `bannedDependencies` allowlists in the `kroxylicious-filters`, `kroxylicious-kms-providers`, and `kroxylicious-kubernetes` parent POMs.
 
-- **`@Unique` FQN in error message assertions**: tests that assert on the fully-qualified annotation name in error messages (e.g. in `ProxySubjectTest`, `AclAuthorizerServiceTest`) must update from `io.kroxylicious.proxy.authentication.Unique` to `io.kroxylicious.identity.Unique`.
+- **`PrincipalEntityNameMapper` dual annotation check**: `PrincipalEntityNameMapper` in `kroxylicious-entity-isolation` validates principal types at construction time using `isAnnotationPresent(Unique.class)`.
+  Since `User` now carries `@SingularPrincipal` instead of `@Unique`, this check must accept both annotations during the transition period.
+  The dual check is removed at 1.0 when `@Unique` is deleted.
 
 ### Modules not affected
 
@@ -205,6 +210,9 @@ The following modules require no source or dependency changes:
 - `kroxylicious-openmessaging-benchmarks`
 - `kroxylicious-systemtests`
 
+Additionally, all filter and router modules that only consume `Subject` through `FilterContext.authenticatedSubject()` or `RouterContext.authenticatedSubject()` are unaffected.
+The exact set of affected modules beyond the `Authorizer` implementations will be confirmed during implementation.
+
 ## Affected/not affected projects
 
 ### Affected
@@ -222,63 +230,80 @@ This proposal includes the following breaking changes:
 
 | Change | Kind | Impact |
 |--------|------|--------|
-| `io.kroxylicious.proxy.authentication.Principal` deleted | Binary-incompatible | Code compiled against the existing interface must be recompiled. All implementations change to `io.kroxylicious.identity.Principal`. |
-| `@Unique` moved from `io.kroxylicious.proxy.authentication` to `io.kroxylicious.identity` | Binary-incompatible | Code compiled against the existing annotation must be recompiled. No known external consumers. |
-| `Subject` renamed to `ProxySubject` | Binary- and source-incompatible | All code referencing the concrete `Subject` type by name must be updated. |
-| `ProxySubject` constructor and `PrincipalFactory` return type change from proxy `Principal` to identity-api `Principal` | Binary-incompatible | Callers must be recompiled. The type bound is strictly widened so no source changes are needed at call sites. |
-| `FilterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject` | Binary-incompatible | Filter implementations and callers must be recompiled. Source fix is mechanical: change one import. |
-| `RouterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject` | Binary-incompatible | Router implementations and callers must be recompiled. Source fix is mechanical: change one import. |
-| `FilterContext.clientSaslAuthenticationSuccess()` parameter changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject` | Binary-incompatible | Filter implementations calling or implementing this method must be recompiled. Source fix is mechanical: change one import. |
-| `TransportSubjectBuilder.buildTransportSubject()` return type changes from `CompletionStage<Subject>` to `CompletionStage<ProxySubject>` | Binary-incompatible | Transport subject builder implementations must be recompiled. |
-| `SaslSubjectBuilder.buildSaslSubject()` return type changes from `CompletionStage<Subject>` to `CompletionStage<ProxySubject>` | Binary-incompatible | SASL subject builder implementations must be recompiled. |
-| `Authorizer.authorize()` parameter type changes from `io.kroxylicious.proxy.authentication.Subject` (now renamed to `ProxySubject`) to `io.kroxylicious.identity.Subject` (the new interface) | Binary- and source-incompatible | `Authorizer` implementations must be recompiled and must update one import. Two implementations exist in the codebase; the fix is mechanical. |
-| `AuthorizeResult`'s `subject` component type changes from `io.kroxylicious.proxy.authentication.Subject` (now renamed to `ProxySubject`) to `io.kroxylicious.identity.Subject` (the new interface) | Binary- and source-incompatible | Code creating or deconstructing `AuthorizeResult` instances must be recompiled. The record's canonical constructor and `subject()` accessor change type. Source fix is mechanical (change one import). |
+| `Authorizer.authorize()` parameter type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Identity` | Binary- and source-incompatible | `Authorizer` implementations must update their method signature. Two implementations exist in the codebase. Callers are unaffected because the existing `Subject` record implements `Identity`. |
+| `AuthorizeResult`'s `subject` component type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Identity` | Binary- and source-incompatible | Code creating or deconstructing `AuthorizeResult` instances must be recompiled. Source fix is mechanical (change one import). |
+| `User` annotation changes from `@Unique` to `@SingularPrincipal` | Binary-incompatible | Code compiled against `@Unique` on `User` must be recompiled. No source changes required at call sites since the annotation is not referenced directly by consumers. |
 
-All other changes (adding a new module, adding dependency allowlist entries) are source- and binary-compatible.
+The following changes are source- and binary-compatible:
+
+- Adding `extends io.kroxylicious.identity.Principal` to the existing `Principal` interface.
+- Adding `implements io.kroxylicious.identity.Identity` to the existing `Subject` record, together with widening the type parameter bounds on its `uniquePrincipalOfType` and `allPrincipalsOfType` methods from `<P extends io.kroxylicious.proxy.authentication.Principal>` to `<P extends io.kroxylicious.identity.Principal>` (required to avoid a name clash with the `Identity` default methods; see [Changes to existing types](#changes-to-existing-types-in-kroxylicious-api)).
+- Introducing the new `kroxylicious-identity-api` module.
+
+The existing `Subject`, `Principal`, and `@Unique` are deprecated.
+This generates compiler warnings but requires no immediate source changes.
+
+## 1.0 cleanup
+
+At 1.0, the deprecated bridge types are removed and all APIs migrate to the types in `kroxylicious-identity-api`:
+
+- The deprecated `Identity` interface is removed from `kroxylicious-identity-api`.
+- The deprecated `Subject` record, `Principal` interface, and `@Unique` annotation are removed from `kroxylicious-api`.
+- `Authorizer.authorize()` parameter type changes from `io.kroxylicious.identity.Identity` to `io.kroxylicious.identity.Subject` (the record).
+- `AuthorizeResult`'s `subject` component type changes from `io.kroxylicious.identity.Identity` to `io.kroxylicious.identity.Subject`.
+- `FilterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
+- `RouterContext.authenticatedSubject()` return type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
+- `FilterContext.clientSaslAuthenticationSuccess()` parameter type changes from `io.kroxylicious.proxy.authentication.Subject` to `io.kroxylicious.identity.Subject`.
+- `TransportSubjectBuilder.buildTransportSubject()` return type changes from `CompletionStage<io.kroxylicious.proxy.authentication.Subject>` to `CompletionStage<io.kroxylicious.identity.Subject>`.
+- `SaslSubjectBuilder.buildSaslSubject()` return type changes from `CompletionStage<io.kroxylicious.proxy.authentication.Subject>` to `CompletionStage<io.kroxylicious.identity.Subject>`.
+
+By this point, the deprecated types will have been available for at least one release cycle, giving consumers time to migrate.
+The deprecation warnings serve as documentation of the migration path.
 
 ## Rejected alternatives
 
 ### Extract concrete types into the new module
 
-Moving the concrete `Subject` record, `Principal` interface, `User`, `Unique`, `PrincipalFactory`, `UserFactory`, and `SubjectBuildingException` into a new module while keeping the existing package name `io.kroxylicious.proxy.authentication` would create a split package: two Maven artifacts contributing types to the same Java package.
+Moving the concrete `Subject` record, `Principal` interface, `User`, `@Unique`, `PrincipalFactory`, `UserFactory`, and `SubjectBuildingException` into a new module while keeping the existing package name `io.kroxylicious.proxy.authentication` would create a split package: two Maven artifacts contributing types to the same Java package.
 Split packages block JPMS adoption, confuse build tooling, and are considered bad practice.
-The interface extraction approach avoids this entirely by using a new package.
-
-### Include a concrete `Subject` implementation in the new module
-
-Providing a ready-made `Subject` implementation (e.g. `DefaultSubject`) in `kroxylicious-identity-api` was considered so that external consumers wouldn't need to write their own.
-This was deferred because:
-
-- The interface is a functional interface (`Subject` has one abstract method), so anonymous implementations are trivial: `() -> myPrincipalSet`. The default methods (`uniquePrincipalOfType`, `allPrincipalsOfType`, `isAnonymous`) and static factory (`Subject.anonymous()`) provide the most commonly needed querying behaviour to any implementation, reducing the incentive for a concrete type.
-- External consumers building production systems will likely want their own implementation with domain-specific validation or immutability guarantees.
-- Adding a concrete implementation can be done later without breaking changes if there is demand.
+The current approach avoids this entirely by using a new package (`io.kroxylicious.identity`) for the new types while keeping the existing types in their original package until they are removed at 1.0.
 
 ### Generalise the existing `Subject` record and ship it in `identity-api`
 
-Rather than introducing a `Subject` interface (with default convenience methods) and renaming the existing concrete record to `ProxySubject`, an alternative would be to remove the `User`-principal validation from the existing `Subject` record and move it directly into `kroxylicious-identity-api` as a general-purpose concrete type.
-This would avoid the rename (no `ProxySubject`, no source-incompatible change for downstream code referencing `Subject` by name) and give external consumers a ready-made implementation.
+Rather than introducing a new `Subject` record in `kroxylicious-identity-api` and keeping the existing record in `kroxylicious-api` (deprecated), an alternative would be to remove the `User`-principal validation from the existing `Subject` record and move it directly into `kroxylicious-identity-api` as a general-purpose concrete type.
 
 This was rejected for several reasons:
 
 1. **Split package or forced package rename for all consumers.**
    If the record kept its `io.kroxylicious.proxy.authentication` package, two Maven artifacts would contribute types to the same package — a split package that blocks JPMS and confuses tooling.
-   If it moved to `io.kroxylicious.identity`, every downstream reference would still need updating (the same source-incompatible cost as the rename to `ProxySubject`), but with the additional confusion of a type called `Subject` silently losing its proxy-specific validation.
+   If it moved to `io.kroxylicious.identity`, every downstream reference would need updating immediately, with no deprecation path.
 
 2. **The `User` validation is load-bearing within the proxy.**
    The proxy's authentication pipeline relies on non-anonymous subjects containing exactly one `User` principal.
-   Removing this validation from the concrete type would push enforcement responsibility to every call site that constructs a subject within the proxy, creating a class of bugs where subjects without a `User` principal silently propagate through the pipeline.
-   The `ProxySubject` approach keeps this invariant co-located with the type, where it is easiest to maintain and hardest to forget.
+   Removing this validation from the existing record would push enforcement responsibility to every call site that constructs a subject within the proxy, creating a class of bugs where subjects without a `User` principal silently propagate through the pipeline.
+   The existing `Subject` retains this invariant while the new `Subject` record in `kroxylicious-identity-api` uses the more general `@SingularPrincipal` validation, which is appropriate for external consumers with different principal types.
 
-3. **It conflates two concerns with different stability requirements.**
-   The identity-api module is intended to be a stable dependency for external consumers.
-   While the convenience methods (`uniquePrincipalOfType`, `allPrincipalsOfType`, `isAnonymous`) are default methods on the `Subject` interface, the proxy-specific `User`-principal validation and construction logic remain on `ProxySubject` in `kroxylicious-api`, where they may evolve with the proxy.
-   Shipping a concrete implementation with proxy-specific validation in the stable module would lock in that behaviour and constrain future changes.
-   The interface approach decouples the identity contract (what external consumers depend on, including standard querying behaviour via defaults) from the proxy-specific implementation (construction-time validation rules).
+### Subject-as-interface with `ProxySubject` rename
 
-4. **External consumers gain little beyond what the interface already provides.**
-   The `Subject` interface is a functional interface, so external consumers can implement it trivially (`() -> myPrincipalSet`), and the default methods provide the querying convenience (`uniquePrincipalOfType`, `allPrincipalsOfType`, `isAnonymous`) that any implementation needs.
-   A generalized concrete record in the stable module would add construction convenience at the cost of the issues above.
-   If demand for a concrete implementation materialises, it can be added later without breaking changes — the interface approach keeps this option open.
+The original version of this proposal used a `Subject` interface (rather than a record) as the primary type in `kroxylicious-identity-api`, renamed the existing `Subject` record to `ProxySubject`, and changed the return types of `FilterContext.authenticatedSubject()`, `RouterContext.authenticatedSubject()`, and other API surfaces to use the new interface.
+All breaking changes were applied in a single release with no deprecation period.
+
+This was rejected for several reasons:
+
+1. **Larger blast radius.**
+   Changing `FilterContext.authenticatedSubject()` and `RouterContext.authenticatedSubject()` to return a new interface type would break every filter and router plugin that references the return type.
+   `FilterContext` has real external adoption, and this is a higher bar than the authorizer API.
+
+2. **`ProxySubject` rename forces source-incompatible changes across all downstream modules.**
+   Every module that constructs a `Subject` would need to change to `new ProxySubject(...)` and `ProxySubject.anonymous()`, increasing the migration cost and the size of the diff.
+
+3. **An interface is harder to make safe for authorizer implementations.**
+   Making `Subject` an interface requires every consumer to provide their own implementation, making it harder to enforce `equals`/`hashCode`/`toString` contracts and `@SingularPrincipal` uniqueness invariants.
+   A concrete record with constructor validation ensures that all `Authorizer` implementations receive subjects with consistent, tested behaviour — particularly important given that [broken access control is #1 on the OWASP top ten](https://owasp.org/Top10/2025/A01_2025-Broken_Access_Control/).
+
+4. **The phased deprecation approach achieves the same end state with lower immediate migration cost.**
+   The `Identity` bridge interface is deprecated at birth and carries the compatibility cost for one release cycle.
+   The end state (a concrete `Subject` record as the primary type, no bridge interface) is the same, but the migration path avoids breaking widely-adopted API surfaces until 1.0.
 
 [prop-9]: https://github.com/kroxylicious/design/blob/main/proposals/009-authorizer.md
 [apicurio-pr]: https://github.com/Apicurio/apicurio-registry/pull/7829
