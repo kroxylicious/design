@@ -343,6 +343,7 @@ The OAUTHBEARER mechanism is configured within the filter's `mechanisms` list wi
 |--------|------------|
 | Token from wrong audience or issuer -- a JWT issued for a different service or identity provider is presented to the proxy. | Both `expectedAudience` and `expectedIssuer` are required fields. Tokens that do not match are rejected. |
 | JWKS endpoint compromise -- an attacker controls the JWKS endpoint and supplies signing keys for forged tokens. | Mitigated operationally: the JWKS endpoint URL is set by the proxy administrator, not by clients. TLS protects the endpoint in transit (using the JVM's default trust store). |
+| Leaking the reason for validation failure to the client, enabling probing by attackers. | On authentication failure, the filter returns a generic `"Authentication failed"` error message to the client, identical to the SCRAM approach. Detailed validation failure reasons are logged server-side for operator diagnostics but not included in the client-facing error response. |
 
 #### Known limitations
 
