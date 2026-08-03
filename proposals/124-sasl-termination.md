@@ -59,6 +59,8 @@ It also aims to be flexible, so as to allow other mechanisms to be supported in 
 
 Validation of legal compositions of SASL-related filters within a filter chain is not in scope for this proposal.
 
+Because SASL termination places the proxy in the authentication decision path, this proposal adopts current security guidance (NIST SP 800-63B, OWASP) rather than matching Apache Kafka's historical defaults. This means, for example, higher PBKDF2 iteration counts for SCRAM and minimum password lengths that exceed Kafka's requirements, and not supporting SASL PLAIN at this time.
+
 The proposal is organized per-component. Each component section covers its summary, API surfaces, configuration, threats and mitigations, and known limitations.
 
 ### Component overview
