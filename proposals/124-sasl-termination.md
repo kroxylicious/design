@@ -502,7 +502,7 @@ Create a new, empty KeyStore file.
 | `-t`, `--type` | No | `PKCS12` | KeyStore type (`PKCS12`, `JKS`). |
 
 ```
-keystore-credential-tool add-user -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>]
+keystore-credential-tool add-user -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>] [-i <iterations>]
 ```
 
 Add a SCRAM credential for a user. If the user already exists, their credential is replaced.
@@ -514,6 +514,7 @@ Add a SCRAM credential for a user. If the user already exists, their credential 
 | `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
 | `-w`, `--user-password` | No | interactive prompt | User's password. Requires `--unlock-insecure-options`. |
 | `-m`, `--mechanism` | No | `SCRAM_SHA_256` | SCRAM mechanism (`SCRAM_SHA_256`, `SCRAM_SHA_512`). |
+| `-i`, `--iterations` | No | `10000` | PBKDF2 iteration count. Minimum 4,096 ([RFC 5802][rfc5802]). Higher values increase brute-force resistance but also increase client-side authentication latency. |
 
 ```
 keystore-credential-tool remove-user -k <path> -u <username> [-p <password>]
@@ -528,7 +529,7 @@ Remove a user's credential from the KeyStore.
 | `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
 
 ```
-keystore-credential-tool update-password -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>]
+keystore-credential-tool update-password -k <path> -u <username> [-p <password>] [-w <password>] [-m <mechanism>] [-i <iterations>]
 ```
 
 Update a user's password. Recomputes the SCRAM credential with a new salt.
@@ -540,12 +541,13 @@ Update a user's password. Recomputes the SCRAM credential with a new salt.
 | `-p`, `--password` | No | interactive prompt | KeyStore password. Requires `--unlock-insecure-options`. |
 | `-w`, `--new-password` | No | interactive prompt | New password for the user. Requires `--unlock-insecure-options`. |
 | `-m`, `--mechanism` | No | `SCRAM_SHA_256` | SCRAM mechanism (`SCRAM_SHA_256`, `SCRAM_SHA_512`). |
+| `-i`, `--iterations` | No | `10000` | PBKDF2 iteration count. Minimum 4,096 ([RFC 5802][rfc5802]). Higher values increase brute-force resistance but also increase client-side authentication latency. |
 
 ```
 keystore-credential-tool list-users -k <path> [-p <password>]
 ```
 
-List all usernames in the KeyStore.
+List all credentials in the KeyStore. Output includes the username, SCRAM mechanism, and PBKDF2 iteration count for each entry, enabling operators to audit existing credentials.
 
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
@@ -557,7 +559,7 @@ List all usernames in the KeyStore.
 **Security measures:**
 - Passwords are read via interactive console prompts by default because passing secrets via CLI arguments is insecure (they appear in shell history and process listings). Command-line password arguments are supported but gated behind an `--unlock-insecure-options` flag that displays security warnings.
 - A 12-character minimum password length is enforced, following [NIST SP 800-63B][nist-sp800-63b] guidance.
-- SCRAM credentials are generated with 10,000 PBKDF2 iterations and 20 bytes of random salt. The [RFC 5802][rfc5802] minimum is 4,096 (which is also the Kafka broker default). The [OWASP Password Storage Cheat Sheet][owasp-password-storage] currently recommends 600,000 iterations for PBKDF2-HMAC-SHA256, but that guidance targets password storage hashing where derivation happens once at write time. In SCRAM, the client performs the derivation on every authentication, so the iteration count directly affects authentication latency. 10,000 provides a reasonable balance between brute-force resistance and authentication performance for Kafka's typically long-lived connections.
+- SCRAM credentials are generated with a configurable PBKDF2 iteration count (default 10,000, minimum 4,096) and 20 bytes of random salt. The [RFC 5802][rfc5802] minimum is 4,096 (which is also the Kafka broker default). The [OWASP Password Storage Cheat Sheet][owasp-password-storage] currently recommends 600,000 iterations for PBKDF2-HMAC-SHA256, but that guidance targets password storage hashing where derivation happens once at write time. In SCRAM, the client performs the derivation on every authentication, so the iteration count directly affects authentication latency. The default of 10,000 provides a reasonable balance between brute-force resistance and authentication performance for Kafka's typically long-lived connections. Operators can increase the iteration count for higher-security environments at the cost of longer client authentication times.
 - On POSIX systems, newly created KeyStore files are set to owner-only permissions (`rw-------`). When loading an existing KeyStore for modification (`add-user`, `remove-user`, `update-password`, `list-users`), the tool checks that the file does not have group or world read/write permissions and refuses to proceed if it does.
 
 #### Threats and mitigations
