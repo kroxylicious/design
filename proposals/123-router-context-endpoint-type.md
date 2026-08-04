@@ -1,7 +1,7 @@
-# 123 - Router API: `ClientAddressing` sealed interface
+# 123 - Router API: `ClientDestination` sealed interface
 
 This proposal refines the Router API introduced in [Proposal 070](070-routing-api.md)
-by introducing a `ClientAddressing` sealed interface that replaces the opaque
+by introducing a `ClientDestination` sealed interface that replaces the opaque
 `VirtualNode` marker with domain-typed alternatives: `Bootstrap` for connections to the
 virtual cluster's bootstrap address and `Broker` for broker-specific connections.
 
@@ -83,13 +83,13 @@ domain distinction between "a specific Kafka broker" and "a proxy discovery addr
 
 ## Proposal
 
-### `ClientAddressing` sealed interface
+### `ClientDestination` sealed interface
 
 ```java
-public sealed interface ClientAddressing permits Bootstrap, Broker {}
+public sealed interface ClientDestination permits Bootstrap, Broker {}
 ```
 
-`ClientAddressing` represents how the client addressed the proxy — either via a
+`ClientDestination` represents how the client addressed the proxy — either via a
 bootstrap discovery address or via a specific broker. The name reflects that this is
 determined by the client's choice of address, not by the router's decision.
 
@@ -97,7 +97,7 @@ determined by the client's choice of address, not by the router's decision.
 not a Kafka domain concept. There is no specific node and no node ID:
 
 ```java
-public record Bootstrap() implements ClientAddressing {}
+public record Bootstrap() implements ClientDestination {}
 ```
 
 `Bootstrap` is intentionally empty. Adding fields later (e.g. for observability) is
@@ -107,7 +107,7 @@ source-compatible for routers that pattern-match on `Bootstrap`.
 opaque `VirtualNode` marker with a domain-typed record carrying the virtual node ID:
 
 ```java
-public record Broker(int id) implements ClientAddressing {}
+public record Broker(int id) implements ClientDestination {}
 ```
 
 The `id` is the virtual (client-facing) node ID assigned by the proxy — it is not the
@@ -116,17 +116,17 @@ integers, so `brokerFor(int)` bridges from protocol messages into the typed hand
 `id` provides the reverse when routers need the integer form. The Router API still
 prefers working in terms of `Broker` instances rather than raw integers.
 
-### Replace `virtualNode()` with `clientAddressed()`
+### Replace `virtualNode()` with `clientDestination()`
 
 ```java
 // Replaces Optional<VirtualNode> virtualNode()
-ClientAddressing clientAddressed();
+ClientDestination clientDestination();
 ```
 
 Router authors use pattern matching:
 
 ```java
-switch (ctx.clientAddressed()) {
+switch (ctx.clientDestination()) {
     case Bootstrap b   -> /* discovery path — forward to any broker on a route */
     case Broker broker -> /* broker-specific path — forward to that broker */
 }
@@ -167,14 +167,14 @@ CompletionStage<ApiMessage> sendToRoute(String route, RequestHeaderData header, 
 ```
 
 `sendRequest(Broker, ...)` is retained for the broker-specific case, where the caller
-already holds a `Broker` from `clientAddressed()` or `brokerFor(int)`.
+already holds a `Broker` from `clientDestination()` or `brokerFor(int)`.
 
 ### Migration
 
 | 0.22 pattern | 0.23 equivalent |
 |---|---|
-| `ctx.virtualNode().isEmpty()` | `ctx.clientAddressed() instanceof Bootstrap` |
-| `ctx.virtualNode().get()` | `ctx.clientAddressed()` as `Broker` via pattern match |
+| `ctx.virtualNode().isEmpty()` | `ctx.clientDestination() instanceof Bootstrap` |
+| `ctx.virtualNode().get()` | `ctx.clientDestination()` as `Broker` via pattern match |
 | `VirtualNode` (type references) | `Broker` |
 | `TopologyService.brokerInfo(VirtualNode)` | `TopologyService.brokerInfo(Broker)` |
 | `ctx.anyNode(route)` + `ctx.sendRequest(node, ...)` | `ctx.sendToRoute(route, ...)` |
@@ -186,9 +186,9 @@ When KRaft controller-specific connections are needed, `Controller` can be added
 peer alongside `Broker`:
 
 ```java
-public sealed interface ClientAddressing permits Bootstrap, Broker, Controller {}
+public sealed interface ClientDestination permits Bootstrap, Broker, Controller {}
 
-public record Controller(int id) implements ClientAddressing {}
+public record Controller(int id) implements ClientDestination {}
 ```
 
 If router code needs to handle `Broker` and `Controller` uniformly (e.g. for
@@ -197,8 +197,8 @@ If router code needs to handle `Broker` and `Controller` uniformly (e.g. for
 ```java
 public interface VirtualNode { int id(); }
 
-public record Broker(int id) implements ClientAddressing, VirtualNode {}
-public record Controller(int id) implements ClientAddressing, VirtualNode {}
+public record Broker(int id) implements ClientDestination, VirtualNode {}
+public record Controller(int id) implements ClientDestination, VirtualNode {}
 ```
 
 This reserves `VirtualNode` for its natural role — "a node in the virtual cluster" — as
@@ -207,11 +207,11 @@ type demands it.
 
 ## Affected/not affected projects
 
-* `kroxylicious-api` — new `ClientAddressing` sealed interface, `Bootstrap` and `Broker`
+* `kroxylicious-api` — new `ClientDestination` sealed interface, `Bootstrap` and `Broker`
   records added to `io.kroxylicious.proxy.router`; `VirtualNode` deprecated; `RouterContext`
-  gains `clientAddressed()`, `sendToRoute()`, `brokerFor(int)`, and a
+  gains `clientDestination()`, `sendToRoute()`, `brokerFor(int)`, and a
   `sendRequest(Broker, ...)` overload.
-* `kroxylicious-runtime` — internal implementations updated to provide `ClientAddressing`
+* `kroxylicious-runtime` — internal implementations updated to provide `ClientDestination`
   instances through `RouterContext`.
 * Not affected: filters, KMS, authoriser API, operator CRDs.
 
@@ -226,7 +226,7 @@ minor release.
 | Deprecated | Replacement | Mechanism |
 |---|---|---|
 | `VirtualNode` type | `Broker` | `Broker` extends `VirtualNode` during deprecation |
-| `virtualNode()` | `clientAddressed()` | Default implementation delegates to `clientAddressed()` |
+| `virtualNode()` | `clientDestination()` | Default implementation delegates to `clientDestination()` |
 | `anyNode(route)` | `sendToRoute(route, ...)` | Default implementation delegates to runtime |
 | `nodeForId(int)` | `brokerFor(int)` | Default implementation delegates to `brokerFor(int)` |
 | `sendRequest(VirtualNode, ...)` | `sendRequest(Broker, ...)` | Deprecated overload retained |
@@ -236,8 +236,8 @@ period so that existing code consuming `VirtualNode` instances continues to comp
 Router authors migrate type references from `VirtualNode` to `Broker` at their own
 pace. `VirtualNode` is removed when the deprecation cycle completes.
 
-**`virtualNode()`** is given a default implementation that delegates to `clientAddressed()` —
-returns `Optional.of(broker)` when `clientAddressed()` is a `Broker`, `Optional.empty()` for
+**`virtualNode()`** is given a default implementation that delegates to `clientDestination()` —
+returns `Optional.of(broker)` when `clientDestination()` is a `Broker`, `Optional.empty()` for
 `Bootstrap`. Source- and behaviour-compatible.
 
 **`anyNode()`** is given a default implementation that delegates to the runtime's
@@ -293,7 +293,7 @@ misleading.
 ### Two-level hierarchy with `VirtualNode` as sealed parent of `Broker` and `Controller`
 
 An earlier draft used a two-level hierarchy where `VirtualNode` was a sealed interface
-extending `ClientAddressing`, with `Broker` and `Controller` as its subtypes. This made
+extending `ClientDestination`, with `Broker` and `Controller` as its subtypes. This made
 the `id()` contract explicit on `VirtualNode` and allowed pattern matching at two levels
 of granularity.
 
@@ -333,10 +333,10 @@ the proxy exposes a discovery address with no corresponding cluster node.
 
 ### Addressing as a framing
 
-The connection's `ClientAddressing` can be understood through a networking lens: bootstrap
+The connection's `ClientDestination` can be understood through a networking lens: bootstrap
 connections are _anycast_ (the runtime selects a node), while broker connections are
 _directed_ (the client chose a specific node). This framing influenced the type name —
-`ClientAddressing` communicates that the distinction is determined by how the client
+`ClientDestination` communicates that the distinction is determined by how the client
 addressed the proxy, not by a routing decision the router makes.
 
 ### Independent convergence
