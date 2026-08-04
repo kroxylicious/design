@@ -17,7 +17,7 @@ Kroxylicious depends directly on classes from `kafka-clients` across its public 
 
 Kroxylicious's `ByteBufAccessor` currently `implements Readable, Writable` from Kafka, bridging Netty's `ByteBuf` to Kafka's I/O abstraction. Any namespace change requires updating this bridge.
 
-The `kroxylicious-krpc-plugin` already parses the JSON IDL specs independently using Jackson (without depending on Kafka's generator) and drives FreeMarker templates to generate filter interfaces, invokers, and decoders. Its only Kafka dependency is `ApiKeys`, used in 3 places.
+The `kroxylicious-krpc-plugin` already parses the JSON IDL specs independently using Jackson (without depending on Kafka's generator) and drives FreeMarker templates to generate filter interfaces, invokers, and decoders.
 
 ## Motivation
 
@@ -42,8 +42,6 @@ Kafka's `MessageGenerator` (~35 files in `generator/src/main/java/org/apache/kaf
 The generated `*Data` classes and the non-generated Kafka classes are folded into the existing `kroxylicious-api` module. `kroxylicious-api` uses `exec-maven-plugin` to invoke `MessageGenerator`'s main class during the `generate-sources` phase, with `kroxylicious-kafka-message-generator` on the classpath, producing `*Data` source files under the Kroxylicious Java package (`io.kroxylicious.kafka.*`). This mirrors how Kafka's own Gradle build runs the generator (a plain `JavaExec`) and requires no custom Maven plugin. The non-generated classes - protocol infrastructure, record classes, and scattered `common.*` types - are similarly copied into `kroxylicious-api` as source under the same Java package, retaining their original Apache Software Foundation copyright headers.
 
 This gives full source ownership from day one. Every upstream change is a deliberate choice - review it, absorb it, or skip it. Generator enhancements (type-safe request-response pairing, Javadoc from IDL, `aliases`) are first-class commits to the in-repo generator, not patches layered on top. And when the time comes to replace buffer/record classes with Netty-native implementations, there is no bytecode transformation to unwind - we already own the source.
-
-The `kroxylicious-krpc-plugin` currently depends on `kafka-clients` solely for `ApiKeys`. After this change it depends on `kroxylicious-api` instead (or we could codegen an `ApiKeys` from the RPC definitions themselves). Its role in generating filter interfaces, invokers, and decoders is otherwise unchanged.
 
 ### What gets copied and generated
 
@@ -175,7 +173,7 @@ Phases 1 and 2 can proceed in parallel. Phase 3 must not begin until the fidelit
 **Phase 4 - Migrate the Kroxylicious core**
 - Update `kroxylicious-api`: `ByteBufAccessor` bridge updated to implement the new `Readable`/`Writable` interfaces; filter interface signatures updated to reference `io.kroxylicious.kafka.*`
 - Update `kroxylicious-runtime`: codec and Kafka exception mapper updated for the new Java package
-- Update `kroxylicious-krpc-plugin`: FreeMarker templates updated to reference the new Java package; `ApiKeys` dependency replaced by `kroxylicious-api`
+- Update `kroxylicious-krpc-plugin`: FreeMarker templates updated to reference the new Java package
 
 **Phase 5 - Migrate filters and test support**
 - Import updates across `kroxylicious-filters`, `kroxylicious-filter-test-support`, `kroxylicious-integration-test-support`
@@ -189,7 +187,7 @@ All modules that directly reference `org.apache.kafka.*` classes require import 
 
 - `kroxylicious-api` - `ByteBufAccessor` updated to implement the new `Readable`/`Writable` interfaces; filter interface signatures updated to reference the new namespace
 - `kroxylicious-runtime` - codec and Kafka exception mapper updated for the new namespace
-- `kroxylicious-krpc-plugin` - FreeMarker templates updated to reference the new namespaces; `ApiKeys` dependency replaced by the new artifact
+- `kroxylicious-krpc-plugin` - FreeMarker templates updated to reference the new Java package
 
 Modules requiring import updates only: `kroxylicious-filters`, `kroxylicious-filter-test-support`, `kroxylicious-integration-test-support`.
 
