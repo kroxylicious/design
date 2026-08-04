@@ -107,7 +107,7 @@ Together, `japicmp` catches API-level divergence and the fidelity tests catch wi
 
 #### Type-safe request-response pairing
 
-This is an API design decision that must be made before the namespace is first published as stable - it cannot be added later without a breaking change.
+This enhancement is delivered as a separate phase (see Phase 6 in the [Implementation plan](#implementation-plan)). It is an API design decision that must be made before the namespace is first published as stable - it cannot be added later without a breaking change.
 
 Since the generator knows the request/response pairing (via `ApiKeys`), it can emit typed interfaces:
 
