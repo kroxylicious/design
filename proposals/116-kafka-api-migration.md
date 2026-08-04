@@ -39,26 +39,26 @@ Every type that appears in Kroxylicious's public API should live in a Kroxylicio
 
 Kafka's `MessageGenerator` (~35 files in `generator/src/main/java/org/apache/kafka/message/`) is copied into the Kroxylicious repo as a new module (`kroxylicious-kafka-message-generator`).
 
-A second new module, `kroxylicious-kafka-common`, generates `*Data` source files under the Kroxylicious Java package (`io.kroxylicious.kafka.*`) by using `exec-maven-plugin` to invoke `MessageGenerator`'s main class during the `generate-sources` phase, with `kroxylicious-kafka-message-generator` on the classpath. This mirrors how Kafka's own Gradle build runs the generator (a plain `JavaExec`) and requires no custom Maven plugin. The non-generated classes - protocol infrastructure, record classes, and scattered `common.*` types - are similarly copied into `kroxylicious-kafka-common` as source under the same Java package, retaining their original Apache Software Foundation copyright headers. The module mirrors the structure of Kafka's own `org.apache.kafka.common` package.
+The generated `*Data` classes and the non-generated Kafka classes are folded into the existing `kroxylicious-api` module. `kroxylicious-api` uses `exec-maven-plugin` to invoke `MessageGenerator`'s main class during the `generate-sources` phase, with `kroxylicious-kafka-message-generator` on the classpath, producing `*Data` source files under the Kroxylicious Java package (`io.kroxylicious.kafka.*`). This mirrors how Kafka's own Gradle build runs the generator (a plain `JavaExec`) and requires no custom Maven plugin. The non-generated classes - protocol infrastructure, record classes, and scattered `common.*` types - are similarly copied into `kroxylicious-api` as source under the same Java package, retaining their original Apache Software Foundation copyright headers.
 
 This gives full source ownership from day one. Every upstream change is a deliberate choice - review it, absorb it, or skip it. Generator enhancements (type-safe request-response pairing, Javadoc from IDL, `aliases`) are first-class commits to the in-repo generator, not patches layered on top. And when the time comes to replace buffer/record classes with Netty-native implementations, there is no bytecode transformation to unwind - we already own the source.
 
-The `kroxylicious-krpc-plugin` currently depends on `kafka-clients` solely for `ApiKeys`. After this change it depends on `kroxylicious-kafka-common` instead (or we could codegen an `ApiKeys` from the RPC definitions themselves). Its role in generating filter interfaces, invokers, and decoders is otherwise unchanged.
+The `kroxylicious-krpc-plugin` currently depends on `kafka-clients` solely for `ApiKeys`. After this change it depends on `kroxylicious-api` instead (or we could codegen an `ApiKeys` from the RPC definitions themselves). Its role in generating filter interfaces, invokers, and decoders is otherwise unchanged.
 
 ### What gets copied and generated
 
 | Component                                   | Source                                    | Approach                                               |
 |---------------------------------------------|-------------------------------------------|--------------------------------------------------------|
 | `MessageGenerator` + friends (~35 files)    | `kafka/generator/src/`                    | Copied into `kroxylicious-kafka-message-generator`     |
-| `*Data` classes (~198)                      | IDL specs + copied `MessageGenerator`     | Generated into `kroxylicious-kafka-common`             |
-| Protocol infrastructure (~16 classes)       | `kafka-clients` `common.protocol.*`       | Copied into `kroxylicious-kafka-common`                |
-| Record classes (~35 classes)                | `kafka-clients` `common.record.*`         | Copied into `kroxylicious-kafka-common`                |
+| `*Data` classes (~198)                      | IDL specs + copied `MessageGenerator`     | Generated into `kroxylicious-api`             |
+| Protocol infrastructure (~16 classes)       | `kafka-clients` `common.protocol.*`       | Copied into `kroxylicious-api`                |
+| Record classes (~35 classes)                | `kafka-clients` `common.record.*`         | Copied into `kroxylicious-api`                |
 | `ApiKeys`                                   | `kafka-clients` `common.protocol.ApiKeys` | Generated from IDL specs, or copied as source          |
-| `Uuid`, `UnsupportedVersionException`, etc. | `kafka-clients` `common.*`                | Copied into `kroxylicious-kafka-common`                |
+| `Uuid`, `UnsupportedVersionException`, etc. | `kafka-clients` `common.*`                | Copied into `kroxylicious-api`                |
 
-`ByteBufAccessor` is Kroxylicious-owned and is updated separately: it is changed to implement the new `Readable`/`Writable` interfaces from `kroxylicious-kafka-common` rather than Kafka's.
+`ByteBufAccessor` is Kroxylicious-owned and already lives in `kroxylicious-api`: it is updated to implement the new `Readable`/`Writable` interfaces from the Kroxylicious Java package rather than Kafka's.
 
-The Kafka source files copied into `kroxylicious-kafka-common` and `kroxylicious-kafka-message-generator` will not conform to Kroxylicious coding conventions. Checkstyle and ErrorProne checks should be suppressed for the copied file locations, with a separate task to bring them into conformance.
+The Kafka source files copied into `kroxylicious-api` and `kroxylicious-kafka-message-generator` will not conform to Kroxylicious coding conventions. Checkstyle and ErrorProne checks should be suppressed for the copied file locations, with a separate task to bring them into conformance.
 
 ### Verification strategy
 
@@ -70,7 +70,7 @@ For every spec and every supported protocol version: serialise a message with ou
 
 Exploratory work on the [`piotrpdev/kroxylicious#refactor/generate-data-class`](https://github.com/piotrpdev/kroxylicious/tree/refactor/generate-data-class) branch built a prototype of this infrastructure covering all 198 specs: parameterised fidelity tests at every valid version, randomised field-value tests (including explicit coverage of `null` for nullable fields), jqwik property-based tests for full-depth message instances, and a compile-time spec count guard. That prototype was designed around the FreeMarker template approach (see ["Rejected Alternatives"](#rejected-alternatives)), where generated classes were compiled at test time via `ToolProvider.getSystemJavaCompiler()` and loaded via `URLClassLoader`. With the source-ownership approach the classes are already on the classpath at build time, so only the class-loading mechanism changes - the verification logic itself carries over unchanged.
 
-These tests live in a dedicated `kroxylicious-kafka-common-tests` module, with `kroxylicious-kafka-common` and `kafka-clients` as dependencies. Keeping them separate ensures `kroxylicious-kafka-common` carries no `kafka-clients` dependency. They run as part of the normal CI pipeline - when `kafka-clients` is bumped, they immediately report any incompatibility.
+These tests live in a dedicated `kroxylicious-kafka-common-tests` module, with `kroxylicious-api` and `kafka-clients` as dependencies. Keeping them separate ensures `kroxylicious-api` carries no `kafka-clients` dependency. They run as part of the normal CI pipeline - when `kafka-clients` is bumped, they immediately report any incompatibility.
 
 #### Spec drift detection
 
@@ -156,7 +156,7 @@ The work is split into sequential phases. Each phase produces a reviewable unit 
 
 **Phase 1 - Scaffold the new modules**
 - Create `kroxylicious-kafka-message-generator` and copy the `MessageGenerator` source (~35 files) into it
-- Create `kroxylicious-kafka-common`, copy the non-generated classes (`protocol.*`, `record.*`, scattered `common.*` types) into it, and configure `exec-maven-plugin` to invoke the generator and produce `*Data` classes into the module during `generate-sources`
+- Copy the non-generated classes (`protocol.*`, `record.*`, scattered `common.*` types) into `kroxylicious-api` and configure `exec-maven-plugin` to invoke the generator and produce `*Data` classes into the module during `generate-sources`
 - Suppress Checkstyle and ErrorProne for copied file locations
 
 **Phase 2 - Build the verification harness**
@@ -175,7 +175,7 @@ Phases 1 and 2 can proceed in parallel. Phase 3 must not begin until the fidelit
 **Phase 4 - Migrate the Kroxylicious core**
 - Update `kroxylicious-api`: `ByteBufAccessor` bridge updated to implement the new `Readable`/`Writable` interfaces; filter interface signatures updated to reference `io.kroxylicious.kafka.*`
 - Update `kroxylicious-runtime`: codec and Kafka exception mapper updated for the new Java package
-- Update `kroxylicious-krpc-plugin`: FreeMarker templates updated to reference the new Java package; `ApiKeys` dependency replaced by `kroxylicious-kafka-common`
+- Update `kroxylicious-krpc-plugin`: FreeMarker templates updated to reference the new Java package; `ApiKeys` dependency replaced by `kroxylicious-api`
 
 **Phase 5 - Migrate filters and test support**
 - Import updates across `kroxylicious-filters`, `kroxylicious-filter-test-support`, `kroxylicious-integration-test-support`
@@ -193,7 +193,7 @@ All modules that directly reference `org.apache.kafka.*` classes require import 
 
 Modules requiring import updates only: `kroxylicious-filters`, `kroxylicious-filter-test-support`, `kroxylicious-integration-test-support`.
 
-Three new modules are added: `kroxylicious-kafka-message-generator` houses the copied `MessageGenerator` source; `kroxylicious-kafka-common` houses the generated `*Data` classes and all copied non-generated classes; and `kroxylicious-kafka-common-tests` houses the wire-level fidelity tests. `kroxylicious-docs` requires a migration guide.
+Two new modules are added: `kroxylicious-kafka-message-generator` houses the copied `MessageGenerator` source, and `kroxylicious-kafka-common-tests` houses the wire-level fidelity tests. The generated `*Data` classes and all copied non-generated classes are folded into the existing `kroxylicious-api` module. `kroxylicious-docs` requires a migration guide.
 
 ## Compatibility
 
