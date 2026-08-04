@@ -112,7 +112,7 @@ public record Broker(int id) implements ClientAddressing {}
 
 The `id` is the virtual (client-facing) node ID assigned by the proxy — it is not the
 upstream (target-cluster) node ID. The Kafka wire protocol serializes node identity as
-integers, so `nodeForId(int)` bridges from protocol messages into the typed handle and
+integers, so `brokerFor(int)` bridges from protocol messages into the typed handle and
 `id` provides the reverse when routers need the integer form. The Router API still
 prefers working in terms of `Broker` instances rather than raw integers.
 
@@ -176,6 +176,7 @@ already holds a `Broker` from `clientAddressed()` or `brokerFor(int)`.
 | `ctx.virtualNode().isEmpty()` | `ctx.clientAddressed() instanceof Bootstrap` |
 | `ctx.virtualNode().get()` | `ctx.clientAddressed()` as `Broker` via pattern match |
 | `VirtualNode` (type references) | `Broker` |
+| `TopologyService.brokerInfo(VirtualNode)` | `TopologyService.brokerInfo(Broker)` |
 | `ctx.anyNode(route)` + `ctx.sendRequest(node, ...)` | `ctx.sendToRoute(route, ...)` |
 | `ctx.nodeForId(id)` | `ctx.brokerFor(id)` |
 
