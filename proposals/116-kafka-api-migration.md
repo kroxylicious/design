@@ -51,6 +51,9 @@ This gives full source ownership from day one. Every upstream change is a delibe
 | Protocol infrastructure (~16 classes)       | `kafka-clients` `common.protocol.*`       | Copied into `kroxylicious-api`                |
 | Record classes (~35 classes)                | `kafka-clients` `common.record.*`         | Copied into `kroxylicious-api`                |
 | `Uuid`, `UnsupportedVersionException`, etc. | `kafka-clients` `common.*`                | Copied into `kroxylicious-api`                |
+| `*DataJsonConverter` classes (~198)         | IDL specs + copied `MessageGenerator`     | Generated into `kroxylicious-filter-test-support` |
+
+Kafka's `MessageGenerator` also produces `*DataJsonConverter` classes for JSON serialisation/deserialisation of protocol messages. These are not part of the production API but are used by existing test infrastructure (`KafkaApiMessageConverter` in `kroxylicious-filter-test-support`, used by authorization, entity-isolation, and multi-tenant filter tests). The generator is invoked a second time to produce these converters into `kroxylicious-filter-test-support` as test API only.
 
 `ByteBufAccessor` is Kroxylicious-owned and already lives in `kroxylicious-api`: it is updated to implement the new `Readable`/`Writable` interfaces from the Kroxylicious Java package rather than Kafka's.
 
@@ -153,6 +156,7 @@ The work is split into sequential phases. Each phase produces a reviewable unit 
 **Phase 1 - Scaffold the new modules**
 - Create `kroxylicious-kafka-message-generator` and copy the `MessageGenerator` source (~35 files) into it
 - Copy the non-generated classes (`protocol.*`, `record.*`, scattered `common.*` types) into `kroxylicious-api` and configure `exec-maven-plugin` to invoke the generator and produce `*Data` classes into the module during `generate-sources`
+- Configure a second generator invocation to produce `*DataJsonConverter` classes into `kroxylicious-filter-test-support` (test API only)
 - Suppress Checkstyle and ErrorProne for copied file locations
 
 **Phase 2 - Build the verification harness**
