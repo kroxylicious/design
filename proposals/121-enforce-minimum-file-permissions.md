@@ -209,6 +209,14 @@ The change in defaults should be documented in the `CHANGELOG` as a breaking cha
 
 ## Compatibility
 
+### Non-POSIX filesystems (Windows)
+
+On non-POSIX filesystems (e.g. NTFS on Windows), `Files.getPosixFilePermissions()` throws
+`UnsupportedOperationException`. The validator catches this, logs a one-time WARN
+("File permission validation is not supported on this filesystem"), and silently passes - no
+files are rejected regardless of the configured policy. This is a deliberate design choice:
+POSIX permissions do not exist on NTFS, so there is nothing meaningful to check.
+
 ### Backward compatibility
 
 The default policy for all categories in Stage 1 is `DISABLED`, so existing deployments are
