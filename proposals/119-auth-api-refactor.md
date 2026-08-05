@@ -216,10 +216,14 @@ In `kroxylicious-api`:
 ```java
 package io.kroxylicious.proxy.authentication;
 
-// Subject record: removed
-// Principal interface: removed
-// @Unique annotation: removed
-// User switches from using @Unique to @SingularPrincipal
+// Subject record, Principal interface, @Unique annotation: removed
+
+@SingularPrincipal // was: @Unique
+record User(String name) implements io.kroxylicious.identity.Principal { } // was: Principal
+
+interface PrincipalFactory<P extends io.kroxylicious.identity.Principal> { // was: Principal
+    P newPrincipal(String name);
+}
 ```
 
 In `kroxylicious-authorizer-api`:
@@ -250,6 +254,12 @@ SaslSubjectBuilder.buildSaslSubject()           // returns CompletionStage<io.kr
 All types migrate to `io.kroxylicious.identity`.
 Filter, router and authorizer plugin authors update imports.
 By this point, the deprecated types will have been available for at least one release cycle, giving consumers time to migrate.
+An [OpenRewrite](https://docs.openrewrite.org/) recipe should be shipped alongside the 1.0 release to automate the mechanical import changes for external plugin authors.
+
+## Testing
+
+At Phase 1, the `kroxylicious-authorizer-api` test suite should verify that `AuthorizeResult` can be constructed with both the existing `io.kroxylicious.proxy.authentication.Subject` (via its `Identity` implementation) and the new `io.kroxylicious.identity.Subject`.
+This confirms that the bridge interface allows both subject types to flow through the authorizer API.
 
 ## Rejected alternatives
 
