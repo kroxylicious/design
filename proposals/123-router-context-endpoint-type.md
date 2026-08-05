@@ -104,17 +104,32 @@ public record Bootstrap() implements ClientDestination {}
 source-compatible for routers that pattern-match on `Bootstrap`.
 
 **`Broker`** — the client connected to a broker-specific address. `Broker` replaces the
-opaque `VirtualNode` marker with a domain-typed record carrying the virtual node ID:
+opaque `VirtualNode` marker with a domain-typed class. Construction is controlled by the
+runtime; router authors receive `Broker` instances but cannot instantiate them directly:
 
 ```java
-public record Broker(int id) implements ClientDestination {}
+public final class Broker implements ClientDestination {
+    private final int id;
+
+    // package-private constructor — only the runtime creates Broker instances
+    Broker(int id) { this.id = id; }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof Broker other && this.id == other.id;
+    }
+
+    @Override
+    public int hashCode() {
+        return Integer.hashCode(id);
+    }
+}
 ```
 
-The `id` is the virtual (client-facing) node ID assigned by the proxy — it is not the
-upstream (target-cluster) node ID. The Kafka wire protocol serializes node identity as
-integers, so `brokerFor(int)` bridges from protocol messages into the typed handle and
-`id` provides the reverse when routers need the integer form. The Router API still
-prefers working in terms of `Broker` instances rather than raw integers.
+The internal node ID is not exposed as a public accessor. `Broker` is an opaque,
+equality-comparable handle — router authors use it to key maps (e.g. correlating
+`METADATA` responses with routing decisions) and pass it to `sendRequest(Broker, ...)`.
+`brokerFor(int)` remains the sole bridge from wire-protocol integers into `Broker` handles.
 
 ### Replace `virtualNode()` with `clientDestination()`
 
