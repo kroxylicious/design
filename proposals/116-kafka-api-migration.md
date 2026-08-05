@@ -88,19 +88,17 @@ Not all spec changes are equal. Reviewers should evaluate by risk:
 
 #### Proactive early warning
 
-Dependabot opens a PR bumping `kafka-clients` to a new version on release automatically. CI runs on the PR - regenerating `*Data` classes and running the fidelity tests and `japicmp` comparison against the new `kafka-clients` (see section below for details on tests).
+Dependabot opens a PR bumping `kafka-clients` to a new version on release automatically. CI runs on the PR - regenerating `*Data` classes and running the fidelity tests against the new `kafka-clients` (see section below for details on tests).
 
 If CI passes, the PR can be reviewed and merged with minimal effort. If CI fails, the PR surfaces exactly what broke - a fidelity test failure identifies a wire incompatibility; an `EXPECTED_SPEC_COUNT` failure flags a spec change requiring review. Either way, the problem is visible and actionable immediately, before anyone has to manually discover the new release.
 
 #### Drift in source-copied classes
 
-The non-generated classes (`MemoryRecords`, `RecordBatch`, protocol infrastructure, etc.) are copied source that may diverge from upstream over time as Kafka evolves. Drift is detected through two complementary mechanisms:
+The non-generated classes (`MemoryRecords`, `RecordBatch`, protocol infrastructure, etc.) are copied source that will diverge from upstream over time as Kafka evolves. Once copied, these are our classes - if Kafka refactors their API (adds, removes, or renames methods), we are not obligated to follow.
 
-1. **`japicmp` API comparison:** `japicmp-maven-plugin` compares by fully-qualified class name, so we cannot point it directly at our jar and `kafka-clients` - the package names do not match. Instead, we shade `kafka-clients` with the same `org.apache.kafka` → `io.kroxylicious.kafka` relocation into a throwaway reference artifact, then run `japicmp` comparing our source-built jar against that reference. Both jars now have matching package names, and `japicmp` reports exactly which APIs have diverged from upstream - method renames, signature changes, removed types. Kroxylicious already uses `japicmp` in the main build, so the plugin infrastructure is in place.
+Wire-format drift is caught by the fidelity tests: any change to serialisation behaviour surfaces as a test failure. These tests serialise with our classes and deserialise with the original `kafka-clients` classes (and vice versa), so any divergence in the binary format is caught immediately.
 
-2. **Wire-level fidelity tests:** Any change to serialisation behaviour surfaces as a test failure. These tests serialise with our classes and deserialise with the original `kafka-clients` classes (and vice versa), so any divergence in the binary format is caught immediately.
-
-Together, `japicmp` catches API-level divergence and the fidelity tests catch wire-format divergence. Non-wire behavioural changes - validation logic, error handling - require reviewing the `kafka-clients` changelog when bumping the version, which is part of the standard upgrade process.
+**Known limitation:** Non-wire behavioural changes in copied source - for example, a bug fix inside a method body in `MemoryRecords`, or a security patch in the record format - are not detectable by automated tooling. `japicmp` was considered but only catches signature-level changes (method renames, removed types), not logic fixes. A scheduled diff against upstream breaks down the moment we deliberately skip a change, because every subsequent diff is permanently dirty. This is an inherent trade-off of source ownership: we accept responsibility for monitoring upstream changelogs and cherry-picking relevant fixes on a case-by-case basis.
 
 ### Enhancements to the generator
 
@@ -140,13 +138,12 @@ When Kafka releases a new version:
 
 1. Bump `kafka-clients` in the POM.
 2. Re-run the generator - any new specs, new fields, or new versions are picked up automatically in the generated `*Data` classes.
-3. Run `japicmp` - any upstream changes to the non-generated source-copied classes that differ from our in-repo copies are reported.
-4. Run fidelity tests - wire compatibility is verified.
-5. Review the `japicmp` report and decide which upstream changes to absorb into the in-repo source copies.
-6. Update `EXPECTED_SPEC_COUNT` if the spec count changed.
-7. Publish updated artifacts and bump their versions in the Kroxylicious repo.
+3. Run fidelity tests - wire compatibility is verified.
+4. Review the `kafka-clients` changelog for relevant bug fixes or security patches in the non-generated classes and cherry-pick as appropriate.
+5. Update `EXPECTED_SPEC_COUNT` if the spec count changed.
+6. Publish updated artifacts and bump their versions in the Kroxylicious repo.
 
-The key distinction from a naive fork: we are not obligated to track every upstream change. As long as wire compatibility holds (proven by fidelity tests), we can defer or skip upstream changes to the non-generated classes. The `japicmp` report makes the divergence visible and auditable, but the decision to absorb is deliberate.
+The key distinction from a naive fork: we are not obligated to track every upstream change. As long as wire compatibility holds (proven by fidelity tests), we can defer or skip upstream changes to the non-generated classes. The decision to absorb is deliberate, based on changelog review.
 
 
 ## Implementation plan
@@ -161,7 +158,6 @@ The work is split into sequential phases. Each phase produces a reviewable unit 
 
 **Phase 2 - Build the verification harness**
 - Create `kroxylicious-kafka-common-tests` with the wire-level fidelity tests (parameterised across all specs and versions, randomised field-value tests, compile-time spec count guard)
-- Configure the `japicmp` comparison (throwaway shaded reference artifact) and wire it into CI
 - Add the proactive early-warning GitHub workflow that runs on Dependabot PRs that bump `kafka-clients`
 
 Phases 1 and 2 can proceed in parallel. Phase 3 must not begin until the fidelity tests in Phase 2 are green.
