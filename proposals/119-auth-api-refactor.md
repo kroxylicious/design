@@ -111,7 +111,11 @@ interface Principal {
 @Deprecated(since = "0.x.0", forRemoval = true)
 interface Identity {
     Set<? extends Principal> principals();
-    default <P extends Principal> Optional<P> uniquePrincipalOfType(Class<P> type) { /* checks @SingularPrincipal */ }
+    default <P extends Principal> Optional<P> uniquePrincipalOfType(Class<P> type) {
+        // Throws IllegalArgumentException if type does not carry @SingularPrincipal.
+        // Does NOT check the old @Unique annotation.
+        // Returns the single principal of the given type, or empty if none.
+    }
     default <P extends Principal> Set<P> allPrincipalsOfType(Class<P> type) { ... }
     default boolean isAnonymous() { ... }
     static Identity anonymous() { ... }
@@ -121,7 +125,10 @@ interface Identity {
 // Has its own anonymous() factory because static methods on interfaces
 // are not inherited. Subject.anonymous() must exist before Identity is removed in 1.0.
 record Subject(Set<? extends Principal> principals) implements Identity {
-    Subject { /* validates @SingularPrincipal uniqueness */ }
+    Subject {
+        // Validates that at most one principal of each @SingularPrincipal-annotated
+        // type is present. Throws IllegalArgumentException on violation.
+    }
     static Subject anonymous() { ... }
 }
 ```
@@ -140,7 +147,9 @@ interface Principal extends io.kroxylicious.identity.Principal {
 /** @deprecated Use {@link io.kroxylicious.identity.Subject} instead. */
 @Deprecated(since = "0.x.0", forRemoval = true)
 record Subject(Set<Principal> principals) implements Identity {
-    // These methods originally had bounds <P extends old.Principal>.
+    // Constructor continues to validate @Unique (not the new @SingularPrincipal).
+
+    // The methods below originally had bounds <P extends old.Principal>.
     // Identity's defaults have bounds <P extends new.Principal>.
     // Both erase to the same JVM signature, but Java requires identical
     // bounds for a valid override (JLS §8.4.8.1), not just a subtype
@@ -148,6 +157,9 @@ record Subject(Set<Principal> principals) implements Identity {
     // a name clash. The change is safe: since old.Principal extends
     // new.Principal, any type that satisfied the old bound also satisfies
     // the new one, so callers are unaffected.
+
+    // Overrides still check @Unique (not the new @SingularPrincipal), 
+    // matching the constructor's validation.
     @Override <P extends io.kroxylicious.identity.Principal> Optional<P> uniquePrincipalOfType(Class<P> type) { ... }
     @Override <P extends io.kroxylicious.identity.Principal> Set<P> allPrincipalsOfType(Class<P> type) { ... }
 }
@@ -251,9 +263,12 @@ SaslSubjectBuilder.buildSaslSubject()           // returns CompletionStage<io.kr
 
 #### Impact
 
-All types migrate to `io.kroxylicious.identity`.
-Filter, router and authorizer plugin authors update imports.
-By this point, the deprecated types will have been available for at least one release cycle, giving consumers time to migrate.
+`Authorizer` implementations must update their method signatures from `Identity` to `Subject`. 
+This is a type change, not just an import change.
+Code that stored or referenced the `Identity` type from `AuthorizeResult.subject()` must also switch to `Subject`.
+Filter and router plugin authors need only update imports so that `io.kroxylicious.proxy.authentication.Subject` becomes `io.kroxylicious.identity.Subject`.
+
+By this point, the deprecation warnings and new types will have been available for at least one release cycle, giving consumers time to migrate.
 An [OpenRewrite](https://docs.openrewrite.org/) recipe should be shipped alongside the 1.0 release to automate the mechanical import changes for external plugin authors.
 
 ## Testing
