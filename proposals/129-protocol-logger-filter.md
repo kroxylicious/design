@@ -1,7 +1,7 @@
-# 129 - Protocol logging filter
+# 129 - Protocol logger filter
 
 Add a first-party filter that logs Kafka requests and responses passing through the proxy as a
-readable, wire-level protocol trace, for use in debugging and demonstrations.
+readable, wire-level protocol log, for use in debugging and demonstrations.
 
 ## Current situation
 
@@ -24,6 +24,13 @@ Kafka brokers have their own request logging. That is a different vantage point:
 traffic as the proxy sees it, before or after other filters in the chain have transformed it, and
 it is not available to someone running the proxy who does not administer the broker.
 
+## Non-goals
+
+This filter is a development and debugging tool. Production audit logging is explicitly not an
+intended use case: an always-on filter recording all traffic for compliance purposes would need
+sampling, back-pressure handling, a stable machine-readable schema and retention design, none of
+which are proposed here. Framing that as out of scope now avoids the feature drifting into it.
+
 ## Motivation
 
 Three audiences benefit:
@@ -31,10 +38,14 @@ Three audiences benefit:
 - **Debugging.** Seeing the exact requests a client sends, the versions it negotiates, and the
   errors it receives is often the fastest route to a diagnosis. This is particularly true for
   problems that only appear in the presence of the proxy.
-- **Filter development.** Contributors writing filters currently have no convenient way to see
-  what the messages they are handling actually contain.
-- **Demonstration and learning.** The Kafka protocol is not widely understood in detail. A trace
-  showing a client connecting, negotiating versions, authenticating, joining a group and fetching
+- **Filter and router development.** Contributors writing filters or routers currently have no
+  convenient way to see what the messages they are handling actually contain.
+- **Seeing what the proxy itself does.** Placing an instance at each end of the filter chain
+  shows the effect of the filters in between — that a topic policy filter really is rejecting
+  `CreateTopics` for `rf=1`, or what a record encryption filter actually transmits. This is a
+  view of proxy behaviour rather than client behaviour, and nothing else provides it.
+- **Demonstration and learning.** The Kafka protocol is not widely understood in detail. A protocol
+  log showing a client connecting, negotiating versions, authenticating, joining a group and fetching
   makes the protocol concrete in a way documentation does not.
 
 The proxy is unusually well placed to provide this. It already decodes the protocol, it sits
@@ -43,14 +54,14 @@ controls.
 
 ## Proposal
 
-Add a `ProtocolLogging` filter to `kroxylicious-filters`, shipped in the distribution.
+Add a `ProtocolLogger` filter to `kroxylicious-filters`, shipped in the distribution.
 
-### Scope: a wire-level trace, not a curated view
+### Scope: a wire-level protocol log, not a curated view
 
 The filter emits what was on the wire for the configured API keys, rather than a summarised or
 interpreted view of client behaviour. This is a deliberate choice. A curated view — of the kind
 the Connect filter proof of concept produces — is more readable but requires per-API code and
-editorial judgement about which fields matter. A trace is complete, generic, and useful for
+editorial judgement about which fields matter. A protocol log is complete, generic, and useful for
 problems nobody anticipated.
 
 A consequence is that the filter should be version-aware: a field that did not exist at the
@@ -58,6 +69,21 @@ negotiated API version must not appear in the output. For a tool whose purpose i
 was actually transmitted, a field appearing at a default value when the client never sent it is
 misleading, and version negotiation problems are exactly the kind of thing someone would use this
 filter to investigate.
+
+### Record contents are not logged
+
+The filter logs protocol structure, not the data being carried. For the four message types with
+records-typed fields, the record batch — keys, values and headers — does not appear in the output.
+
+This falls out of the implementation: Kafka's generated JSON converters emit an empty byte array
+for records-typed fields regardless of content. It is also the intended behaviour. Record contents
+are user data, potentially personal or regulated, and the value of this filter is in showing
+message flow rather than message content.
+
+Note this does not mean the output is small. Only four message types carry records at all, and
+protocol structure alone can be substantial — a `Metadata` response describing ten thousand
+partitions, or a `Produce` request spanning many partitions, contains no record data and is still
+large. That is what `maxPayloadChars` bounds.
 
 ### Implementation approach
 
@@ -76,51 +102,119 @@ lands.
 
 ### Output format
 
-Each entry is a human-readable envelope line followed by the message body as indented JSON:
+Each entry is a single JSON object with the envelope nested alongside the message:
 
-```
-REQUEST  METADATA v13  corr=1  client=producer-1
+```json
 {
-  "topics" : [ {
-    "topicId" : "AAAAAAAAAAAAAAAAAAAAAA",
-    "name" : "test-logging"
-  } ],
-  "allowAutoTopicCreation" : true,
-  "includeTopicAuthorizedOperations" : false
+  "header": {
+    "type": "REQUEST",
+    "apiKey": "METADATA",
+    "apiVersion": 13,
+    "correlationId": 1,
+    "clientId": "producer-1"
+  },
+  "payload": {
+    "topics": [ { "topicId": "AAAAAAAAAAAAAAAAAAAAAA", "name": "test-logging" } ],
+    "allowAutoTopicCreation": true,
+    "includeTopicAuthorizedOperations": false
+  }
 }
 ```
 
-The envelope comes first so that the output can be scanned and grepped by API key. Proxy-side
-context — notably the session identifier — is emitted as structured key-values rather than in the
-envelope, since it is proxy state rather than protocol. Requests are paired with responses on
-session identifier plus correlation identifier; correlation identifiers are only unique within a
-connection, so the session is required to pair correctly.
+Emitting the whole entry as JSON rather than a plaintext envelope followed by a JSON body means
+the output can be processed directly:
+
+```
+jq -c 'select(.header.apiKey == "PRODUCE")'
+```
+
+It also keeps the format extensible. A positional, space-separated envelope is frozen as soon as
+anyone parses it, so adding a field later is a breaking change; adding a key to `header` is not.
+Fields such as authenticated principal, client IP, or the header's unknown tagged fields can be
+added without disturbing existing consumers.
+
+The header is constructed rather than serialised from `RequestHeaderData`/`ResponseHeaderData`.
+Kafka response headers carry only a correlation id — no API key or version — so serialising them
+directly would make `.header.apiKey` unusable on responses, which is exactly the filter people
+would want.
+
+Note that the entry is JSON, but a log *line* is not: the backend's timestamp, level and logger
+prefix surround it. Piping to `jq` requires an appender emitting only the message, or a JSON
+layout for the whole event. The README will cover this.
+
+Proxy-side context that is not part of the protocol — notably the session identifier — is emitted
+as structured key-values rather than inside `header`.
+
+### Correlation identifiers
+
+Correlation identifiers in the output are not necessarily client correlation identifiers. Filters
+and routers can dispatch out-of-band requests upstream via `FilterContext#sendRequest` and
+`RouterContext#sendRequest`, and these carry synthetic (negative) correlation identifiers.
+Depending on its position in the chain, this filter may observe them, and has no reliable way to
+distinguish them from client traffic.
+
+This is not considered a blocker — the entries are still accurate — but it means that pairing
+requests to responses on correlation identifier may produce entries with no counterpart, and
+consumers of the output should expect that.
 
 ### Configuration
 
 ```yaml
-- type: ProtocolLogging
-  config:
-    logLevel: DEBUG                                        # default
-    apiKeyNames: [METADATA, FIND_COORDINATOR, JOIN_GROUP]  # absent or empty = all
-    maxBodyChars: 8192                                     # default, must be > 0
+filterDefinitions:
+  - name: trace-downstream
+    type: ProtocolLogger
+    config:
+      logLevel: DEBUG                                        # default
+      loggerName: protocol.downstream                        # optional
+      apiKeyNames: [METADATA, FIND_COORDINATOR, JOIN_GROUP]  # absent or empty = all
+      maxPayloadChars: 8192                                  # default, must be > 0
 ```
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `logLevel` | SLF4J level | `DEBUG` | Level at which entries are emitted, and the level the backend must be enabled at |
+| `loggerName` | string | the filter class name | Logger to emit under; distinguishes multiple instances in one chain |
 | `apiKeyNames` | list of `ApiKeys` names | all | Which API keys to log |
-| `maxBodyChars` | integer | 8192 | Truncation limit for the body; the envelope is never truncated |
+| `maxPayloadChars` | integer | 8192 | Truncation limit for `payload`; `header` is never truncated |
 
-Invalid API key names and a non-positive `maxBodyChars` are rejected at startup rather than
+`maxPayloadChars` bounds the serialised `payload` only. Record contents are never included, but
+message structure can still be substantial. When the limit is exceeded, `payload` is replaced with
+a truncated representation and flagged, so the entry as a whole remains valid JSON.
+
+Invalid API key names and a non-positive `maxPayloadChars` are rejected at startup rather than
 discovered at log time.
+
+### Multiple instances in one chain
+
+Placing an instance at each end of the chain shows the effect of the filters between them. That
+requires telling their output apart, and filters currently have no identity of their own — no
+unique name, no knowledge of their position in the chain or which router they are attached to.
+
+Rather than introduce filter identity here, which is a wider filter and router API question,
+`loggerName` lets the user distinguish instances themselves:
+
+```yaml
+filterDefinitions:
+  - name: log-downstream
+    type: ProtocolLogger
+    config:
+      loggerName: protocol.downstream
+  - name: log-upstream
+    type: ProtocolLogger
+    config:
+      loggerName: protocol.upstream
+```
+
+The logger name already appears in the log line, so no addition to the entry itself is needed.
+Each instance also becomes independently controllable from the logging backend, so one end of the
+chain can be enabled without the other. The value is not validated.
 
 ### Enabling and disabling at runtime
 
 The filter emits nothing unless the logging backend is also enabled at `logLevel` for the
 filter's logger. Because `shouldHandleRequest` and `shouldHandleResponse` are consulted per
 message, this check is live: an operator can deploy the same configuration everywhere and switch
-tracing on or off by changing the logging backend on a running proxy, without a restart and
+protocol logging on or off by changing the logging backend on a running proxy, without a restart and
 without a configuration change. With Log4j 2 this requires `monitorInterval` in the logging
 configuration.
 
@@ -147,22 +241,25 @@ deliberately not configurable:
 - `DescribeDelegationToken`
 
 For these keys the converter is not invoked at all; the body is structurally withheld rather than
-filtered after the fact. The envelope is still emitted, so an operator can see that a handshake
-occurred and correlate it, without the credential material appearing:
+filtered after the fact. The header is still emitted, so an operator can see that a handshake
+occurred and correlate it, while the body never reaches the converter at all:
 
-```
-REQUEST  SASL_AUTHENTICATE v2  corr=2147483642  client=producer-1
-<body withheld: credential-bearing API>
+```json
+{
+  "header": {
+    "type": "REQUEST",
+    "apiKey": "SASL_AUTHENTICATE",
+    "apiVersion": 2,
+    "correlationId": 2147483642,
+    "clientId": "producer-1"
+  },
+  "payload": null,
+  "payloadWithheld": "credential-bearing API"
+}
 ```
 
 Making this list configurable was considered and rejected. A user with a concrete need can raise
 an issue; the default should not be something an operator can accidentally weaken.
-
-Record payloads are not logged. Kafka's generated JSON converters emit an empty byte array for
-records-typed fields regardless of their contents, so the payload does not reach the output at
-all. This is the desired behaviour independently: record contents are user data, potentially
-personal or regulated, and the value of this filter lies in showing message flow rather than
-message content.
 
 ## Affected/not affected projects
 
@@ -183,8 +280,9 @@ message content.
 ## Compatibility
 
 The plugin configuration YAML introduced here becomes public API and must remain compatible with
-existing configurations. The surface is deliberately small: three keys, all optional, all with
-defaults, so a configuration specifying only `type: ProtocolLogging` is valid and remains so.
+existing configurations. The surface is deliberately small: four keys, all optional, all with
+defaults, so a configuration specifying only `type: ProtocolLogger` is valid and remains so.
+`loggerName` is intentionally free-form and not validated.
 
 The output format is not proposed as a compatibility surface. It is intended for human reading
 and ad-hoc grepping, not for machine parsing, and should be free to improve. If a stable
