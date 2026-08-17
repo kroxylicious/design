@@ -27,11 +27,11 @@ manage their own authentication infrastructure.
 (assuming offset-preserving topic mirroring such as KIP-1279), the cluster administrator
 can re-route individual subjects to the new cluster incrementally, without requiring
 application configuration changes. Remaining subjects continue on the old cluster.
+Note, however, that Subject-based routing does not address the cluster migration use case _in general_: When client applications with different Subjects have topic(s) in common they cannot be migrated individually. In the worst case, all the applications are connected by such topics and phased migration using a Subject-based approach cannot work.
 
 Both patterns share a common property: the routing decision is per-connection (not
 per-request) and is determined by the authenticated identity of the client. The subject
-router is the simplest concrete router — it does not decompose requests, fan out, or
-recompose responses. Every request on a connection follows the same route.
+router is a relatively simple concrete router — apart from `API_VERSIONS`, it does not decompose requests, fan out, or recompose responses. Every other request on a connection follows the route established once authentication has succeeded.
 
 ### Why (Subject, clientId) pairs
 
@@ -41,11 +41,14 @@ routing too: an organisation might route most traffic for a user to one cluster,
 redirect specific client IDs (e.g. batch processors, monitoring tools) to a different
 cluster.
 
-The Kroxylicious `Subject` extends the Kafka model. Where Kafka has a single "user",
-Kroxylicious `Subject` contains a set of `Principal` instances of different types. The
-subject router generalises the Kafka user to match on any principal type — the
-`java.lang.Class` of the principal is a parameter of the selector, following the model
-established by the ACL authorizer.
+The Kroxylicious `Subject` is more general than the Kafka model. Where Kafka has a 
+single principal, Kroxylicious's `Subject` contains a set of `Principal` instances of different types. The subject router generalises the Kafka user to match on any 
+principal type — the `java.lang.Class` of the principal is a parameter of the selector. 
+This is the same model that was used for the ACL authorizer.
+Assuming a suitable `SubjectBuilder` which populates `Subjects` with a `Team` 
+principal in addition to per-applications `User` principels, it would allow for 
+convenient `Team`-based routing, rather than forcing routing policies to be 
+always expressed in tersmf of `Users`.
 
 ## Proposal
 
@@ -54,10 +57,21 @@ established by the ACL authorizer.
 A routing rule specifies zero or more **principal selectors** and an optional **clientId**
 constraint. All principal selectors must match (AND semantics) for the rule to apply.
 
+```yaml
+principals: 
+  - type: User
+    name: alice
+  - type: com.example.Role
+    name: admin
+clientId: producer-1
+route: cluster-a
+```
+
 Each principal selector has:
 - A **type** — the `java.lang.Class<? extends Principal>` to match against, specified as a
-  class name in configuration. A built-in short-name map resolves `User` to
-  `io.kroxylicious.proxy.authentication.User`; custom principal types use their
+  class name in configuration. For built-in principals (currently only `User`), it's 
+  allowed to use an unqualified name which is resolved in package
+  `io.kroxylicious.proxy.authentication`; custom principal types use their
   fully-qualified name.
 - An optional **name** — an exact string to match against `Principal.name()`. If omitted,
   the selector matches any principal of the given type.
@@ -70,11 +84,6 @@ validated to implement `Principal`. At runtime, `subject.principals()` are check
 #### First-match-wins evaluation
 
 Rules are evaluated in **configuration order**. The first matching rule wins.
-
-This is the standard model for ordered rule lists — used by firewalls, nginx, and most
-rule-based routing systems. The administrator controls precedence explicitly by ordering
-rules. There is no implicit reordering.
-
 Typical convention is to place more specific rules before broader ones:
 
 ```yaml
@@ -175,6 +184,10 @@ lifetime of the connection. The resolved route is cached on the per-connection `
 instance after first resolution, and reused for all subsequent requests without
 re-evaluation.
 
+Note that the assumption that the whole set of `Principals` in each `Subject` is 
+stable, even after reauthentication, is in conflict with the contract currently 
+offered by `FilterContext#clientSaslAuthenticationSuccess()`.
+
 #### `API_VERSIONS` handling
 
 The Kafka protocol sends an `API_VERSIONS` request before SASL authentication begins.
@@ -186,18 +199,17 @@ learn the version ranges of that cluster, but might later be routed to a differe
 with different version support. The client would then use an unsupported version, causing
 failures.
 
-The approach: the router **fans out** the `API_VERSIONS` request to **all** routes
-concurrently, collects the responses, and computes the **intersection** of supported
+To avoid this, the router fans out the `API_VERSIONS` request to all routes
+concurrently, collects the responses, and computes the intersection of supported
 version ranges for each API key. For each API key present in every response, the
 intersected range is `[max(minVersions), min(maxVersions)]`. API keys with no common
 range, or absent from any response, are excluded from the result.
-
 This guarantees that the client negotiates versions compatible with every cluster it could
 be routed to.
 
 For any non-`API_VERSIONS` request that arrives before authentication (which should not
 happen in normal protocol flow), the router forwards to the first available route without
-caching.
+caching. Note that this situation is not possible when the `SaslTermination` filter is configured on the VC filter chain.
 
 #### Static vs dynamic routing
 
