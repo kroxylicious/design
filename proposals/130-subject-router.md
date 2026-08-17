@@ -1,4 +1,4 @@
-# 000 - Subject Router
+# 130 - Subject Router
 
 A concrete `Router` implementation that routes all Kafka traffic for a connection to a
 single upstream cluster based on the authenticated subject's identity and the Kafka client ID.
