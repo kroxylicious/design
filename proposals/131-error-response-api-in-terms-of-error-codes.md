@@ -1,15 +1,4 @@
-<!--
-PROPOSAL WORKFLOW:
-1. Copy this template to: proposals/000-<descriptive-name>.md
-2. Fill in your proposal content
-3. Open a PR on GitHub
-4. Rename the file to use your PR number: proposals/<PR#>-<descriptive-name>.md
-   Example: git mv proposals/000-my-feature.md proposals/105-my-feature.md
-5. Update the heading below to include your PR number: # <PR#> - <Title>
-6. Push the rename and updated title to your PR
--->
-
-# 000 - Express the error-response API in terms of error codes, not client exceptions
+# 131 - Express the error-response API in terms of error codes, not client exceptions
 
 > [!NOTE]
 > This proposal is based on [kroxylicious#4756](https://github.com/kroxylicious/kroxylicious/issues/4756) and complements
