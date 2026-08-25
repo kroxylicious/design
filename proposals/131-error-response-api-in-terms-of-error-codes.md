@@ -32,23 +32,23 @@ context.requestFilterResultBuilder()
         .completed();
 ```
 
-Internally the runtime immediately reverses that: `KafkaProxyExceptionMapper` derives an error
-**code** (`Errors.forException`) and a **message** (`Throwable.getMessage()`) from the exception, and
-feeds them to Kafka's `AbstractRequest.getErrorResponse(Throwable)`. So the caller constructs an
-exception purely so the runtime can map it back to the code the caller already had in mind.
+This is inconsistent with the rest of the API, which already speaks in terms of error **codes**:
+everywhere else an error is conveyed — including the error codes a filter reads off a response — the
+vocabulary is the `Errors` code, not a client exception. These two entry points are the odd ones out,
+requiring the caller to reach for the `kafka-clients` exception hierarchy to say something the API
+otherwise expresses as a code.
 
-This is the last of the concerns identified in proposal 116: the `*Data` message classes, protocol
-infrastructure, record classes and scattered `common.*` types are all addressed there, but the
-`ApiException` hierarchy on these two entry points is a distinct API-shape problem — it is not a
+They are also the last of the concerns identified in proposal 116: the `*Data` message classes,
+protocol infrastructure, record classes and scattered `common.*` types are all addressed there, but
+the `ApiException` hierarchy on these two entry points is a distinct API-shape problem — it is not a
 namespace move, it is the wrong abstraction — and is called out separately in #4756.
 
 ## Motivation
 
-- **Wrong abstraction.** The concept a caller wants to express is an error *code* (optionally with a
-  human-readable message). Requiring an exception forces the caller to pick a subclass from Kafka's
-  ~150-strong `ApiException` hierarchy and trust that `Errors.forException` maps it back to the code
-  they intended. The round-trip is lossy and non-obvious: two different exception subclasses can map
-  to the same code, and constructing the "wrong" exception silently yields a different code.
+- **Inconsistent with the rest of the API.** Errors are conveyed as `Errors` codes everywhere else
+  in the API. These two methods are the exception — literally — forcing the caller to pick a subclass
+  from Kafka's ~150-strong `ApiException` hierarchy to express what the API elsewhere expresses as a
+  code. That inconsistency is a papercut for filter authors and an obstacle to a coherent 1.0 API.
 - **Keeps `kafka-clients` on the API surface.** Proposal 116 removes the generated `*Data` classes
   and protocol infrastructure from the API. If these two methods keep taking `ApiException`, the
   `kafka-clients` exception classes remain a compile-time dependency of every filter that
@@ -99,19 +99,13 @@ an exception now binds to the deprecated `Throwable` overload. Overload resoluti
 `Errors` is not a `Throwable`, so a call passing an `Errors` binds to the new overloads and a call
 passing an exception binds to the deprecated one.
 
-### The runtime is unchanged
+### No runtime churn
 
-Because both new paths ultimately construct `error.exception(message)` — a `kafka-clients`
-`ApiException`; `Errors.exception(String)` returns the default-message instance when `message` is
-`null` — they hand `KafkaProxyExceptionMapper` exactly what it consumes today. That the proxy still
-materialises an `ApiException` internally to shape the response is an implementation detail:
-`KafkaProxyExceptionMapper`, the `RouterResponseImpl.RespondWithError` record, `RouterDispatchHandler`,
-and all the existing special-casing (`LIST_OFFSETS`, `END_TXN`, `LEAVE_GROUP`, the api-key-match
-invariant, etc.) are preserved untouched.
-
-- The deprecated `Throwable` overload validates `throwable instanceof ApiException` (throwing
-  `IllegalArgumentException` otherwise), casts, and calls the existing mapper.
-- The `Errors` overloads construct `error.exception(message)` and call the same mapper.
+How the runtime turns the request into an error response is an implementation detail and is
+unchanged: the new `Errors` overloads feed the existing response-shaping engine exactly what it
+consumes today, so no downstream signatures or behaviour change. The deprecated `Throwable` overload
+performs the `instanceof ApiException` check that the compiler used to enforce, and otherwise behaves
+as before.
 
 ### Migration
 
