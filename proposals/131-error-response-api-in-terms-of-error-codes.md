@@ -167,11 +167,7 @@ deprecated overload, no `Throwable` widening, no runtime type-check to maintain.
   minimising the inconvenience.
 - **Binary compatibility:** the exception-typed overloads are removed at the bytecode level. A
   pre-compiled plugin linked against `errorResponse(..., ApiException)` would fail at link time
-  (`NoSuchMethodError`) until recompiled. This is an accepted, deliberate break and is recorded as an
-  explicit `japicmp` exclusion. Recompilation against the new API is transparent. (A future runtime
-  enhancement could catch `LinkageError`/`NoSuchMethodError` in the safe invoker and emit a targeted
-  "compiled against a different API version" diagnostic; that is out of scope here and belongs with
-  the API-versioning work.)
+  (`NoSuchMethodError`) until recompiled. This is an accepted.
 - **Behavioural parity:** for an equivalent input the new `Errors` overload produces the identical
   response (same error code, same message) the exception overload produced before; unit tests assert
   this parity.
