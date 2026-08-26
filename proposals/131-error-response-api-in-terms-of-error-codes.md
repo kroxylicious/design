@@ -34,20 +34,20 @@ context.requestFilterResultBuilder()
 
 This is not especially *hard* — `Errors` even offers a shortcut,
 `Errors.INVALID_REQUEST.exception("no topic id tag")`, so the caller need not pick the subclass by
-hand — but it is *inconsistent*. Everywhere else the API conveys an error as an `Errors` code,
-including the error codes a filter reads off a response. These two entry points are the odd ones out,
-forcing the caller to materialise a `kafka-clients` exception instance to say something the API
-otherwise expresses as a code, only for the runtime to unwrap that exception straight back to the code
-it started from.
+hand — but it is *inconsistent*. Everywhere else the API conveys an error as an error code (a `short`
+or the `Errors` enum). These two entry points are the odd ones out, forcing the caller to materialise
+a `kafka-clients` exception instance to say something the API otherwise expresses as a code and
+optional message.
 
-They are also the last of the concerns identified in proposal 116: the `*Data` message classes,
-protocol infrastructure, record classes and scattered `common.*` types are all addressed there, but
-the `ApiException` hierarchy on these two entry points is a distinct API-shape problem — it is not a
-namespace move, it is the wrong abstraction — and is called out separately in #4756.
+[Proposal 116](https://github.com/kroxylicious/design/blob/main/proposals/116-kafka-api-migration.md) had agreed that
+the `ApiException` class would be vendored into the `kroxylicious-api` source tree, but did not fully
+appreciate the gravity of that decision:
+* it would also entail vendoring more than one hundred `ApiException` subclasses; and
+* Kroxylicious would inherit Kafka's large exception model into its public API.
 
 ## Motivation
 
-- **Inconsistent with the rest of the API.** Errors are conveyed as `Errors` codes everywhere else
+- **Inconsistent with the rest of the API.** Errors are conveyed as `Errors` codes (or shorts) everywhere else
   in the API. These two methods are the exception — literally — forcing the caller to route through
   Kafka's `ApiException` hierarchy to express what the API elsewhere expresses as a code. That
   inconsistency is a papercut for filter authors and an obstacle to a coherent 1.0 API.
@@ -73,7 +73,7 @@ proposal 116 — moving off Kafka's `*Data` classes onto Kroxylicious's own, in 
 migration event, and the alternative deprecate-and-widen machinery buys little in return (see
 [Rejected alternatives](#deprecate-and-widen-the-exception-overloads-to-throwable)).
 
-### New overloads
+### New API
 
 On both `RequestFilterResultBuilder.errorResponse` and `RouterContext.respondWithError`:
 
@@ -89,7 +89,7 @@ errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error,
 internally, and consistent with the rest of the API surface on `main` today. When the owned `Errors`
 enum lands, this single type is swapped for the owned one; call sites are otherwise unchanged.
 
-### Removed overloads
+### Removed API
 
 ```java
 // removed — no deprecated replacement
@@ -110,18 +110,21 @@ passes is the code the engine already worked with; the exception was only ever a
 ## Non-goals
 
 - **Removing `kafka-clients` from the runtime.** The `kroxylicious-runtime` continues to depend on
-  `kafka-clients`; that dependency's eventual removal is part of the wider own-the-protocol work
-  (proposal 116, #4752/#4755), not this proposal. This change adjusts the *public API* shape only and
-  leaves the runtime free to keep using `Errors`/`ApiException` internally.
-- **Redefining how thrown exceptions are mapped to responses.** Today a filter that *throws* an
-  `ApiException` from a filter method has it mapped back to an error response by
-  `KafkaProxyExceptionMapper`; that behaviour is untouched here. It is worth being explicit about the
-  contract, though: the supported way to short-circuit with a protocol error is the `Errors`-based
-  `errorResponse`/`respondWithError`. Relying on throwing a `kafka-clients` exception and having the
-  runtime recover the code is not a guarantee this proposal strengthens — and it cannot survive
-  `kafka-clients` eventually leaving the runtime (a reflective code-recovery shim could bridge that
-  transition, but that is future work under 116). Firming up the `Filter` error contract in full is
-  out of scope here and tracked with the own-the-protocol effort.
+  `kafka-clients` for now; that dependency's eventual removal is part of the wider own-the-protocol work
+  (proposal 116, #4752/#4755), not this proposal. This change adjusts the *public API* shape only.
+- **Vendoring the `Errors` class.** The new API delivered by this proposal is expressed in terms of
+  Kafka's `org.apache.kafka.common.protocol.Errors` — the enum the runtime and the rest of the API
+  surface already use today. Vendoring an owned `Errors` class into `kroxylicious-api` is delivered
+  separately (the follow-on to #4752/#4755, proposal 116); at that point this single type is swapped
+  for the Kroxylicious-owned one, and call sites are otherwise unchanged.
+- **Redefining how error responses are created.** Today the `KafkaProxyExceptionMapper` uses the
+  `ApiException` to generate an error response. The public API is expressed in terms of the
+  `*RequestData`/`*ResponseData` message classes, but internally the mapper reconstructs the
+  corresponding `*Request` object from the `*RequestData` and calls
+  `AbstractRequest#getErrorResponse(java.lang.Throwable)` on it to produce a correctly shaped error
+  response. For the scope of this proposal, this behaviour is unchanged. Separate work (being
+  delivered by [kroxylicious#4748](https://github.com/kroxylicious/kroxylicious/issues/4748)) will
+  eliminate the dependency on the `*Request` object.
 
 ## Migration
 
