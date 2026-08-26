@@ -39,10 +39,10 @@ or the `Errors` enum). These two entry points are the odd ones out, forcing the 
 a `kafka-clients` exception instance to say something the API otherwise expresses as a code and
 optional message.
 
-[Proposal 116](https://github.com/kroxylicious/design/blob/main/proposals/116-kafka-api-migration.md) had agreed that
-the `ApiException` class would be vendored into the `kroxylicious-api` source tree, but did not fully
-appreciate the gravity of that decision:
-* it would also entail vendoring more than one hundred `ApiException` subclasses; and
+[Proposal 116](https://github.com/kroxylicious/design/blob/main/proposals/116-kafka-api-migration.md) had agreed to
+vendor the `ApiException` class into the `kroxylicious-api` source tree. The full weight of that
+decision only became apparent later:
+* it would also entail vendoring the ~150 `ApiException` subclasses; and
 * Kroxylicious would inherit Kafka's large exception model into its public API.
 
 ## Motivation
@@ -55,11 +55,14 @@ appreciate the gravity of that decision:
   and protocol infrastructure from the API. If these two methods keep taking `ApiException`, the
   `kafka-clients` exception classes remain a compile-time dependency of every filter that
   short-circuits, undermining the goal of a self-contained, Kroxylicious-owned API surface for 1.0.
-- **Enables the owned-`Errors` payoff.** Once the API speaks in `Errors` codes rather than exception
-  instances, the `Errors` type itself can later be swapped for a Kroxylicious-owned enum (the follow
-  on to #4752/#4755). That swap is what ultimately allows the ~150 vendored `ApiException` subclasses
-  to be dropped from the owned surface entirely — the real payoff described in #4756. It is only
-  reachable once the *shape* of the API no longer demands an exception.
+- **Enables the owned-`Errors` payoff.** Removing `ApiException` from these two signatures takes the
+  exception hierarchy off the public API *shape*, but it does not by itself drop the ~150 subclasses
+  from the owned surface: the API now speaks in Kafka's `Errors` enum, and that enum still references
+  the exception subclasses (each constant can instantiate its exception via `Errors.exception()`), so
+  they are pulled in transitively. Dropping them entirely needs the further step of swapping `Errors`
+  for a Kroxylicious-owned enum that does not reference the Kafka exceptions (the follow-on to
+  #4752/#4755) — the real payoff described in #4756. That swap only becomes *reachable* once the shape
+  of the API no longer demands an exception, which is what this proposal delivers.
 
 ## Proposal
 
@@ -85,6 +88,8 @@ errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error)
 errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error, @Nullable String message);
 ```
 
+`RouterContext.respondWithError` gains the same two overloads.
+
 `Errors` is `org.apache.kafka.common.protocol.Errors` — the same enum the runtime already uses
 internally, and consistent with the rest of the API surface on `main` today. When the owned `Errors`
 enum lands, this single type is swapped for the owned one; call sites are otherwise unchanged.
@@ -99,13 +104,6 @@ respondWithError(RequestHeaderData header, ApiMessage requestMessage, ApiExcepti
 
 With these gone, no `kafka-clients` exception type appears anywhere in the public API signature — no
 deprecated overload, no `Throwable` widening, no runtime type-check to maintain.
-
-### No runtime churn
-
-How the runtime turns the request into an error response is an implementation detail and is
-unchanged: the new `Errors` overloads feed the existing response-shaping engine exactly what it
-consumes today, so no downstream signatures or behaviour change. Internally the code the caller now
-passes is the code the engine already worked with; the exception was only ever an envelope for it.
 
 ## Non-goals
 
@@ -176,9 +174,6 @@ passes is the code the engine already worked with; the exception was only ever a
 - **Behavioural parity:** for an equivalent input the new `Errors` overload produces the identical
   response (same error code, same message) the exception overload produced before; unit tests assert
   this parity.
-- **Forward compatibility:** the `Errors` type in the new signatures is the single point that will be
-  swapped for the Kroxylicious-owned `Errors` enum in a later change, at which point the vendored
-  `ApiException` subclasses can be dropped from the owned surface.
 
 ## Rejected alternatives
 
@@ -216,10 +211,11 @@ safety and discoverability: an `int` or `String` invites invalid values and give
 whereas the `Errors` enum is exhaustive, self-documenting, and already the runtime's own vocabulary.
 Rejected.
 
-### Introduce a Kroxylicious-owned error-code type now
+### Introduce the Kroxylicious-owned `Errors` enum now
 
-Define a new Kroxylicious error-code abstraction as part of this change rather than reusing
-`org.apache.kafka.common.protocol.Errors`. This couples this focused API-shape change to the larger
-owned-protocol effort (#4752/#4755, proposal 116) and would land an owned type on `main` ahead of
-that work. Reusing the existing `Errors` enum keeps this change small and consistent with the current
-surface; the swap to an owned enum is a clean, mechanical follow-up once the owned protocol lands.
+Vendor the Kroxylicious-owned `Errors` enum as part of this change, rather than reusing Kafka's
+`org.apache.kafka.common.protocol.Errors` for now. This couples this focused API-shape change to the
+larger owned-protocol effort (#4752/#4755, proposal 116) and would land the owned enum on `main` ahead
+of that work. Reusing Kafka's `Errors` enum keeps this change small and consistent with the current
+surface; vendoring the owned `Errors` enum is a clean, mechanical follow-up once the owned protocol
+lands.
