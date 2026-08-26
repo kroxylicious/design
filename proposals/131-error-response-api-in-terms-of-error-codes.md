@@ -83,10 +83,10 @@ On both `RequestFilterResultBuilder.errorResponse` and `RouterContext.respondWit
 
 ```java
 // code only — uses the Errors default message
-errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error);
+errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors errorCode);
 
 // code plus an explicit message
-errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error, @Nullable String message);
+errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors errorCode, @Nullable String message);
 ```
 
 `RouterContext.respondWithError` gains the same two overloads.
@@ -94,6 +94,17 @@ errorResponse(RequestHeaderData header, ApiMessage requestMessage, Errors error,
 `Errors` is `org.apache.kafka.common.protocol.Errors` — the same enum the runtime already uses
 internally, and consistent with the rest of the API surface on `main` today. When the owned `Errors`
 enum lands, this single type is swapped for the owned one; call sites are otherwise unchanged.
+
+### Validation
+
+The `errorCode` must denote an actual error. It carries the package's default `@NonNull` annotation
+(inherited from `package-info.java`), so a `null` code is already a documented contract violation.
+Beyond that, `Errors.NONE` — the sentinel for the *absence* of an error — is rejected at call time
+with `IllegalArgumentException`: asking for an error response that carries no error is a programming
+error. This is a genuinely new constraint. The removed exception-based overloads could not express
+"no error" (there is no `ApiException` for `NONE`), so nothing that compiled before is affected, and
+the check fails fast rather than letting a filter emit a response that claims success on an error
+path.
 
 ### Removed API
 
@@ -171,6 +182,10 @@ deprecated overload, no `Throwable` widening, no runtime type-check to maintain.
 - **Behavioural parity:** for an equivalent input the new `Errors` overload produces the identical
   response (same error code, same message) the exception overload produced before; unit tests assert
   this parity.
+- **Runtime contract:** the new overloads reject `Errors.NONE` with `IllegalArgumentException`, and
+  the `errorCode` parameter is `@NonNull` (the package default), so a `null` code is a contract
+  violation too. The removed exception overloads had no equivalent input, so no existing caller is
+  affected.
 
 ## Rejected alternatives
 
