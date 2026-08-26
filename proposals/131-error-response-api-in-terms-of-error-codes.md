@@ -51,10 +51,11 @@ decision only became apparent later:
   in the API. These two methods are the exception — literally — forcing the caller to route through
   Kafka's `ApiException` hierarchy to express what the API elsewhere expresses as a code. That
   inconsistency is a papercut for filter authors and an obstacle to a coherent 1.0 API.
-- **Keeps `kafka-clients` on the API surface.** Proposal 116 removes the generated `*Data` classes
-  and protocol infrastructure from the API. If these two methods keep taking `ApiException`, the
-  `kafka-clients` exception classes remain a compile-time dependency of every filter that
-  short-circuits, undermining the goal of a self-contained, Kroxylicious-owned API surface for 1.0.
+- **Forces Kafka's exception hierarchy into the owned API.** Proposal 116 makes the API surface
+  Kroxylicious-owned, vendoring the Kafka protocol types it keeps. If these two methods continue to
+  take `ApiException`, that type has to be vendored too — dragging in its ~150 subclasses — so the
+  owned API inherits Kafka's entire exception model just to let a filter name an error, at odds with
+  the goal of a small, self-contained API surface for 1.0.
 - **Enables the owned-`Errors` payoff.** Removing `ApiException` from these two signatures takes the
   exception hierarchy off the public API *shape*, but it does not by itself drop the ~150 subclasses
   from the owned surface: the API now speaks in Kafka's `Errors` enum, and that enum still references
