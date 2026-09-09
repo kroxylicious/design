@@ -1,4 +1,4 @@
-# 000 - Dedicated ServiceAccount for KafkaProxy pods
+# 135 - Dedicated ServiceAccount for KafkaProxy pods
 
 Add an optional `KafkaProxy.spec.serviceAccountName` field so users can define a dedicated,
 user-managed Kubernetes ServiceAccount for proxy pods.
