@@ -1,14 +1,14 @@
-# Proposal 134 - Configuring the shared LoadBalancer Service from KafkaProxyIngress
+# Proposal 134 - Configuring the LoadBalancer Service from KafkaProxyIngress
 
 > **DRAFT for discussion.**
 > The direction described here (implicit grouping) has been proposed on
 > [kroxylicious/kroxylicious#4161](https://github.com/kroxylicious/kroxylicious/issues/4161)
 > but is **not yet agreed by maintainers**.
 
-This proposal adds the ability to configure the shared LoadBalancer Service
-from `KafkaProxyIngress`. It does so by partitioning LoadBalancer ingresses on
-a proxy into groups by their Service-level configuration —
-`externalTrafficPolicy`, `allocateLoadBalancerNodePorts`, and
+This proposal adds the ability to configure the LoadBalancer Services the
+operator creates, from `KafkaProxyIngress`. It does so by partitioning
+LoadBalancer ingresses on a proxy into groups by their Service-level
+configuration — `externalTrafficPolicy`, `allocateLoadBalancerNodePorts`, and
 `infrastructure.annotations` — and materialising one Service per group.
 Ingresses wanting the same infrastructure continue to share a load balancer
 while ingresses wanting different infrastructure get their own.
@@ -163,26 +163,31 @@ Normalise to semantic values so explicit-default and unset produce the same key.
 
 ### Behaviour when configuration changes
 
-- **Target config already has a Service and the old group retains other members**
-  → two annotation patches; nothing created or deleted; the ingress moves onto
-  an existing load balancer.
-- **Old group is left empty** → its Service drops out of the desired set and
-  that load balancer is destroyed.
-- **Target config is one no group has yet** → a Service is created and a load
-  balancer provisions.
+There is one Service per distinct configuration in use. So when you edit an
+ingress, what happens depends on two questions: does another group already use
+the new configuration, and was this ingress the last member of its old group?
 
-In all cases the edited ingress ends up behind a different load balancer at a
-different address, and `loadBalancerIngressPoints` changes accordingly. Small
-setups are the exposed ones: an ingress that is the only member of its group
-hits create-and-delete on every edit, while a group with several members is only
-patched.
+**Nothing is created or destroyed.** Both Services already exist. The operator
+just moves the ingress's entry from one Service's bootstrap-servers annotation
+to the other's. This is the common case when several ingresses share a
+configuration.
 
-`BulkDependentResourceReconciler.reconcile()` in JOSDK 5.5.1 calls
-`deleteExtraResources()` first, then iterates `desiredResources`, sequentially,
-with no readiness gate. A rename is therefore delete-then-create: the old cloud
-load balancer is destroyed before the replacement begins provisioning, so a
-rename is a guaranteed outage for the affected ingress for the duration of cloud
-provisioning.
+**One Service is created, or one destroyed.** Created if the ingress moves to a
+configuration nothing else uses. Destroyed if it was the last member of its old
+group and moves to a configuration that already has a Service.
+
+**One is destroyed and another created.** The ingress was alone in its group and
+moves to a configuration nothing else uses. JOSDK deletes before it creates,
+with no readiness gate, so the old load balancer is torn down before the new one
+starts provisioning — the ingress has no working address until the cloud
+finishes, not merely a changed one.
+
+Either way, the ingress ends up behind a different load balancer at a different
+address, and `loadBalancerIngressPoints` changes to match.
+
+Counter-intuitively, small deployments are the exposed ones: an ingress that is
+the only member of its group hits the worst case on every edit, while one that
+shares a configuration with others only ever hits the first.
 
 ### Status
 
@@ -222,6 +227,9 @@ becomes visible to users.
 `BulkDependentResource<Service, KafkaProxy, String>` with `desiredResources()`,
 `getSecondaryResources()` and `deleteTargetResource()` implemented, so emitting
 N Services and cleaning up emptied groups needs no new machinery.
+`BulkDependentResourceReconciler.reconcile()` in JOSDK 5.5.1 calls
+`deleteExtraResources()` first, then iterates `desiredResources` sequentially
+with no readiness gate, so a group rename is delete-then-create.
 
 Two things need **no** work:
 
@@ -311,14 +319,15 @@ since the annotations gap requires the same mechanism.
 
 3. **Explicit grouping** — an optional `group:` field naming the group, Service
    named after it. Gives stable identity, in-place patches on edit, and visible
-   cost. This draft proposes implicit grouping instead because it is the more
-   reversible choice: `group:` can be added later as an optional override if
-   the address change on edit proves painful, but a grouping concept users have
-   adopted cannot be removed. The implicit-vs-explicit decision is pending the
-   discussion requested on
-   [#4161](https://github.com/kroxylicious/kroxylicious/issues/4161). Both
-   shapes were considered: config alongside the group name on the ingress, and
-   the group declared once on `KafkaProxy` with ingresses referencing it.
+   cost. Not currently proposed, but considered in two shapes: config alongside
+   the group name on the ingress, and the group declared once on `KafkaProxy`
+   with ingresses referencing it. Adding `group:` later is not free — JOSDK
+   deletes before it creates with no readiness gate, so introducing the field
+   would rename existing Services and replace every affected load balancer,
+   costing an outage per proxy rather than a clean API addition. The broader
+   naming decision (config-derived hash vs adoption by recorded membership) is
+   tracked in Open questions; see also the discussion on
+   [#4161](https://github.com/kroxylicious/kroxylicious/issues/4161).
 
 4. **Merging annotations within a group.** Semantically wrong — the Service IS
    the load balancer, so every annotation configures the whole load balancer.
