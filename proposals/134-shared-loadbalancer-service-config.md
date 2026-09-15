@@ -112,21 +112,34 @@ ingress, because SNI lets one Service serve many clusters.
 The existing `loadBalancerIngressPoints` status field is populated from the
 ingress's own Service.
 
+Networking models are per `(cluster, ingress)` — `ClusterIngressNetworkingModel`
+requires both — so a `KafkaProxyIngress` that no `VirtualKafkaCluster`
+references produces no model and therefore no Service. This is also the
+behaviour we want on cost grounds: no load balancer for an ingress serving
+nothing. The `VirtualKafkaCluster` CRD enforces a CEL rule that bounds ingress
+name length:
+
+  self.spec.ingresses.all(ingress,
+    (ingress.ingressRef.name.size() + self.metadata.name.size()) <= 51)
+
+so any ingress referenced by a VKC has a name of at most 50 characters, well
+within the 63-character Service name limit.
+
 ### Service naming
 
-Name: `<ingress>-sni` (`KafkaProxyIngress` name plus the `-sni` suffix).
-Unique because `KafkaProxyIngress` names are unique within a namespace, and
-each ingress references exactly one proxy. No hash, no canonicalisation.
+Name: the `KafkaProxyIngress` name. Unique because `KafkaProxyIngress` names
+are unique within a namespace and each ingress produces at most one Service.
+
+No collision with the ClusterIP and Route Services, which are named
+`<cluster>-<ingress>-bootstrap`.
+
+Provenance is covered by the owner reference plus the LoadBalancer label (see
+Implementation outline), so no suffix is needed to identify the Service or
+trace it back.
 
 Identity is stable by construction: the name derives from the ingress name,
 which is the ingress's identity. Editing any field patches the Service in
-place; the Service is never renamed.
-
-Length: the `KafkaProxyIngress` name must leave room for the `-sni` suffix
-within the 63-character Service name limit. How to handle an existing
-`loadBalancer` ingress whose name is already too long is an open question — a
-CEL rule would be breaking, truncation loses the uniqueness guarantee, and a
-status condition is probably the right approach.
+place.
 
 ### Annotations
 
@@ -149,49 +162,40 @@ address changes. The two patches are separate API calls, so `buildIngressStatus`
 (`findFirst` over an unordered `Set`) may briefly report either; self-corrects
 on the next reconcile.
 
-`allocateLoadBalancerNodePorts`: Kubernetes only honours this field at
-allocation time, so flipping `true` to `false` on a live Service leaves
-existing NodePorts allocated. The operator should clear `spec.ports[].nodePort`
-when the field transitions to `false`. This needs maintainer confirmation.
+`allocateLoadBalancerNodePorts`: when the field is `false` and the live
+Service still reports a `nodePort`, the operator applies `nodePort: 0` to
+release it. Omitting the field is not enough under server-side apply, since the
+operator does not own it. This is a one-time transition; once released, the
+operator omits the field again and the port stays released.
+
+`healthCheckNodePort` is allocated by a separate allocator and is unaffected by
+`allocateLoadBalancerNodePorts: false`. It is allocated precisely when
+`externalTrafficPolicy: Local` is set. So a user setting `Local` for source-IP
+preservation and `false` to close NodePorts still gets a health-check NodePort
+open on every node. Given that attack surface is part of the motivation in
+[#4161](https://github.com/kroxylicious/kroxylicious/issues/4161), this
+interaction must be documented. Exposing `healthCheckNodePort` as a
+configuration field is out of scope here.
 
 ### Migration from the shared Service
 
-Today every LoadBalancer ingress on a proxy shares `<proxy>-sni`. Renaming it
-is delete-then-create (`BulkDependentResourceReconciler.reconcile()` in JOSDK
-5.5.1 calls `deleteExtraResources()` before creating, with no readiness gate),
-which is an outage for the length of cloud provisioning. So upgrade must not
-rename.
+On upgrade, the per-proxy `<proxy>-sni` Service is deleted and one Service per
+`loadBalancer` ingress is created, named after the ingress.
 
-The new operator labels every LoadBalancer Service it creates (see
-Implementation outline). The legacy Service `<proxy>-sni` was created by an
-older operator and therefore does not carry this label. Its absence is the
-legacy marker.
+There is a brief interruption while the new load balancers provision; clients
+reconnect. `BulkDependentResourceReconciler.reconcile()` in JOSDK 5.5.1 calls
+`deleteExtraResources()` before creating, so the old load balancer is destroyed
+before the replacement is ready.
 
-Proposed rule:
-
-- On reconcile, if a Service named `<proxy>-sni` exists, is owned by the
-  proxy, and lacks the LoadBalancer label, it is a legacy Service.
-- If the proxy has exactly one `loadBalancer` ingress, that ingress adopts
-  `<proxy>-sni` permanently: the Service is patched (gaining the label), not
-  replaced. Upgrade is a no-op for this case, which is expected to be the
-  overwhelming majority.
-- If the proxy has several `loadBalancer` ingresses, one adopts `<proxy>-sni`
-  — prefer an ingress whose natural name `<ingress>-sni` already equals
-  `<proxy>-sni` if one exists, otherwise the lexicographically smallest
-  ingress name — and the rest get new `<ingress>-sni` Services.
-- Once adopted, the Service carries the label and is no longer legacy, so the
-  rule never fires again. Ingresses added later cannot change the assignment.
-
-The alternative — accept the rename with a release note — was rejected because
-the outage is avoidable. A Service retaining its existing name is not a problem
-in itself, and avoiding the rename avoids an outage.
+This is a one-time event at upgrade, not something that recurs — config edits
+patch in place and never rename (see Behaviour when configuration changes). It
+must be called out in the release note.
 
 ### Implementation outline
 
 - **`sniLoadbalancerServices()`** — group the LoadBalancer networking models by
   ingress (not all together), emit one Service per ingress with that ingress's
-  ports, bootstrap entries and infrastructure annotations. Apply the legacy
-  naming rule.
+  ports, bootstrap entries and infrastructure annotations.
 - **`SharedLoadBalancerServiceRequirements`** — its sharing scope narrows from
   per-proxy to per-ingress; it must expose the ingress's Service-level config
   and annotations. Alternatively, fold it into the model — leave that to
@@ -199,26 +203,23 @@ in itself, and avoiding the rename avoids an outage.
 - **`getLoadBalancerServiceBootstrapServers()`** — per-ingress rather than one
   aggregate.
 - **`VirtualKafkaClusterPrimaryToKubernetesServiceSecondaryMapper`** — currently
-  hardcodes `proxyRef + "-sni"`; must compute `<ingress>-sni` per referenced
-  ingress, plus the legacy name.
+  hardcodes `proxyRef + "-sni"`; must compute the ingress name per referenced
+  ingress.
 
 `ClusterServiceDependentResource` is already a
 `BulkDependentResource<Service, KafkaProxy, String>` with `desiredResources()`,
 `getSecondaryResources()` and `deleteTargetResource()` implemented, so emitting
 N Services and cleanup need no new machinery.
 
-The operator should label the LoadBalancer Services it creates so they can be
+The operator labels the LoadBalancer Services it creates so they can be
 identified as a set. `Labels.standardLabels(proxy)` currently returns four
 labels (`app.kubernetes.io/managed-by`, `name`, `component=proxy`,
-`instance=<proxy>`) and is applied identically to the SNI Service and the
-per-cluster ClusterIP Services, so nothing distinguishes a LoadBalancer Service
-today. Since `getSecondaryResources` returns every Service owned by the proxy,
-a label is what lets the code reason about the LoadBalancer subset without
-inferring from names. The exact label key is left to implementation; it must be
-under a `kroxylicious.io/` or `app.kubernetes.io/` prefix consistent with
-existing labels. The set-difference reconcile loop is already provided by
-`BulkDependentResource` (`getSecondaryResources` plus `deleteExtraResources` in
-JOSDK), so the label is the addition, not the loop.
+`instance=<proxy>`) and is applied identically to all Services, so nothing
+distinguishes a LoadBalancer Service today. Since `getSecondaryResources`
+returns every Service owned by the proxy, a label is what lets the code reason
+about the LoadBalancer subset without inferring from names. The exact label key
+is left to implementation; it must be under a `kroxylicious.io/` or
+`app.kubernetes.io/` prefix consistent with existing labels.
 
 Two things need **no** work:
 
@@ -233,18 +234,17 @@ ingress.
 
 ### Testing
 
-- **Unit:** per-ingress Service generation; legacy naming rule (single ingress
-  keeps `<proxy>-sni`; multiple ingresses produce a deterministic choice);
-  adding a smaller-named ingress to a proxy that has an adopted legacy Service
-  does not rename it.
+- **Unit:** per-ingress Service generation; `allocateLoadBalancerNodePorts`
+  transition (when `false` and a `nodePort` is still allocated, the operator
+  applies `nodePort: 0`).
 - **Integration:** config edit is an in-place patch with the Service name
-  unchanged; upgrade from a `<proxy>-sni` deployment keeps the Service;
-  annotations reach the Service.
+  unchanged; annotations reach the Service.
 - **System:** expected number of Services per proxy with correct spec fields
-  and annotations.
-- CI runs Minikube with the docker driver and no tunnel or MetalLB, so
-  LoadBalancer Services stay Pending and real load balancer behaviour cannot be
-  verified.
+  and annotations; assert real LoadBalancer behaviour. System tests skip on
+  environments that cannot provision a load balancer, so they run on real
+  Kubernetes environments. The established pattern is `@EnabledIf` for
+  integration tests and `@Disabled` for excluded system tests (see
+  `KroxyliciousAppST`).
 
 ## Affected/not affected projects
 
@@ -272,25 +272,26 @@ since the annotations gap requires the same mechanism.
 
 - All new fields are optional and additive to `v1alpha1`; existing resources
   stay valid.
-- Upgrade is inert for proxies with one `loadBalancer` ingress: the legacy
-  naming rule keeps `<proxy>-sni` and patches the Service in place.
+- Upgrade replaces the shared `<proxy>-sni` Service with per-ingress Services,
+  causing a brief interruption while the new load balancers provision. This is
+  a one-time event, to be release-noted.
 - For proxies with several `loadBalancer` ingresses, upgrade moves from one
-  load balancer to one per ingress. One ingress adopts `<proxy>-sni` via the
-  label-based legacy rule (see Migration); the others get new `<ingress>-sni`
-  Services and their clusters change address once. The adoption is sticky:
-  ingresses added later cannot change it. This has a cost implication: more load
-  balancers means higher cloud spend. We accepted this on the grounds
-  that cross-cluster sharing via `$(virtualClusterName)` covers the common
-  case and cross-ingress sharing can be revisited on user feedback.
+  load balancer to one per ingress. This has a cost implication: more load
+  balancers means higher cloud spend. We accepted this on the grounds that
+  cross-cluster sharing via `$(virtualClusterName)` covers the common case and
+  cross-ingress sharing can be revisited on user feedback.
 - Downgrade: an older operator computes only `<proxy>-sni` and its
   `getSecondaryResources` returns every owned Service, so it would delete the
   per-ingress Services and recreate `<proxy>-sni` — an outage. This must be
   documented.
-- `allocateLoadBalancerNodePorts`: Kubernetes only honours it at allocation
-  time. Flipping `true` to `false` on a live Service requires the operator to
-  clear `spec.ports[].nodePort` to release the NodePorts.
-- Future Service-level fields are added under `spec.loadBalancer.service` and
-  apply to that ingress's Service; no grouping decision is involved.
+- `allocateLoadBalancerNodePorts`: the operator clears `spec.ports[].nodePort`
+  when the field transitions to `false` (see Behaviour when configuration
+  changes).
+- This proposal establishes `spec.loadBalancer.service` as where Service-level
+  fields go if they are added individually; no grouping decision is involved.
+  Whether to continue adding them one at a time or to externalise infrastructure
+  configuration behind a reference is an open direction and deferred to a separate 
+  proposal (see Rejected alternatives).
 
 ## Rejected alternatives
 
@@ -326,15 +327,12 @@ since the annotations gap requires the same mechanism.
 5. **Explicit grouping via a `group:` field.** More API surface than needed
    once the ingress itself is the unit of infrastructure.
 
-6. **Accepting the `<proxy>-sni` rename on upgrade with a release note.**
-   Rejected because the outage is avoidable with the legacy naming rule.
-
-## Open questions
-
-- The legacy naming rule — pending maintainer confirmation.
-- NodePort clearing on transition to `false` — pending maintainer confirmation.
-- Handling of existing `loadBalancer` ingresses whose names are too long for
-  `<ingress>-sni` within the 63-character Service name limit. Preferred
-  approach: report the condition on status rather than truncating or adding a
-  CEL rule, because truncation adds conditional logic and bug surface, and a
-  CEL rule would be breaking for existing resources.
+6. **Externalising infrastructure configuration behind a reference** — rather
+   than adding named fields one at a time, the ingress could reference a
+   resource holding infrastructure configuration, as Gateway API does with
+   `parametersRef`. This would let configuration be shared across resources and
+   split ownership between infrastructure admins and application teams, which
+   isn't possible today. It would need a curated subset rather than a free-form
+   `ServiceSpec`, since `ports`, `selector` and `type` must stay
+   operator-owned. Deferred to a separate proposal; the design here doesn't
+   foreclose it.
