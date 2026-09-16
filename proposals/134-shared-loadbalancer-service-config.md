@@ -133,9 +133,10 @@ are unique within a namespace and each ingress produces at most one Service.
 No collision with the ClusterIP and Route Services, which are named
 `<cluster>-<ingress>-bootstrap`.
 
-Provenance is covered by the owner reference plus the LoadBalancer label (see
-Implementation outline), so no suffix is needed to identify the Service or
-trace it back.
+The Service carries owner references to the `KafkaProxy` and the
+`KafkaProxyIngress`, with no `VirtualKafkaCluster` reference since one ingress
+serves many clusters. Deletion is operator-driven: when an ingress goes, its
+Service leaves `desiredResources()` and is deleted.
 
 Identity is stable by construction: the name derives from the ingress name,
 which is the ingress's identity. Editing any field patches the Service in
@@ -180,16 +181,20 @@ configuration field is out of scope here.
 ### Migration from the shared Service
 
 On upgrade, the per-proxy `<proxy>-sni` Service is deleted and one Service per
-`loadBalancer` ingress is created, named after the ingress.
+`loadBalancer` ingress is created, named after the ingress. The new Services get
+new external addresses, so DNS records pointing at the old load balancer must be
+re-pointed at the new ones. The interruption therefore lasts until re-pointing
+has happened and propagated, not just until a Kafka client retries. How long
+depends on whether the records are managed automatically (e.g. external-dns
+watching the new Service) or updated by hand, and on the TTLs in play.
 
-There is a brief interruption while the new load balancers provision; clients
-reconnect. `BulkDependentResourceReconciler.reconcile()` in JOSDK 5.5.1 calls
+`BulkDependentResourceReconciler.reconcile()` in JOSDK 5.5.1 calls
 `deleteExtraResources()` before creating, so the old load balancer is destroyed
 before the replacement is ready.
 
 This is a one-time event at upgrade, not something that recurs — config edits
 patch in place and never rename (see Behaviour when configuration changes). It
-must be called out in the release note.
+must be called out in the release note, with the re-pointing step described.
 
 ### Implementation outline
 
@@ -203,23 +208,18 @@ must be called out in the release note.
 - **`getLoadBalancerServiceBootstrapServers()`** — per-ingress rather than one
   aggregate.
 - **`VirtualKafkaClusterPrimaryToKubernetesServiceSecondaryMapper`** — currently
-  hardcodes `proxyRef + "-sni"`; must compute the ingress name per referenced
-  ingress.
+  derives the Service name as `proxyRef.getName() + "-sni"`; it should instead
+  read `ingressRef.getName()` from each entry in the cluster's `spec.ingresses`,
+  since the Service name is the ingress name. This matches the shape of the
+  existing ClusterIP and Route handling in the same mapper, minus the name
+  construction.
 
 `ClusterServiceDependentResource` is already a
 `BulkDependentResource<Service, KafkaProxy, String>` with `desiredResources()`,
 `getSecondaryResources()` and `deleteTargetResource()` implemented, so emitting
-N Services and cleanup need no new machinery.
-
-The operator labels the LoadBalancer Services it creates so they can be
-identified as a set. `Labels.standardLabels(proxy)` currently returns four
-labels (`app.kubernetes.io/managed-by`, `name`, `component=proxy`,
-`instance=<proxy>`) and is applied identically to all Services, so nothing
-distinguishes a LoadBalancer Service today. Since `getSecondaryResources`
-returns every Service owned by the proxy, a label is what lets the code reason
-about the LoadBalancer subset without inferring from names. The exact label key
-is left to implementation; it must be under a `kroxylicious.io/` or
-`app.kubernetes.io/` prefix consistent with existing labels.
+N Services and cleanup need no new machinery. The operator filters owned
+Services on `spec.type == LoadBalancer` when it needs to identify the
+LoadBalancer subset.
 
 Two things need **no** work:
 
@@ -272,9 +272,11 @@ since the annotations gap requires the same mechanism.
 
 - All new fields are optional and additive to `v1alpha1`; existing resources
   stay valid.
-- Upgrade replaces the shared `<proxy>-sni` Service with per-ingress Services,
-  causing a brief interruption while the new load balancers provision. This is
-  a one-time event, to be release-noted.
+- Upgrade replaces the shared `<proxy>-sni` Service with per-ingress Services.
+  The new Services get new external addresses, so DNS records must be
+  re-pointed. The interruption lasts until re-pointing has happened and
+  propagated. This is a one-time event, to be release-noted with the
+  re-pointing step described.
 - For proxies with several `loadBalancer` ingresses, upgrade moves from one
   load balancer to one per ingress. This has a cost implication: more load
   balancers means higher cloud spend. We accepted this on the grounds that
