@@ -154,7 +154,7 @@ spec:
             kubernetes.io/metadata.name: my-other-kafka-app-ns
         podSelector: 
           matchLabels:
-          app.kubernetes.io/name: my-kafka-app
+            app.kubernetes.io/name: my-kafka-app
 ```
 
 Those selectors will be copied verbatim to a generated `NetworkPolicy`, so the above example would generate a policy like this:
@@ -174,7 +174,10 @@ spec:
   policyTypes:
     - Ingress # The policy type will always be ingress
   ingress:
-    - from: # The rules will be copied verbatim
+    - ports:  # for each port
+        protocol: TCP
+        port: <PORT_NUM>
+      from: # The rules will be copied verbatim
       - namespaceSelector: 
           matchLabels:
             kubernetes.io/metadata.name: my-kafka-app-ns
@@ -183,7 +186,7 @@ spec:
             kubernetes.io/metadata.name: my-other-kafka-app-ns
         podSelector: 
           matchLabels:
-          app.kubernetes.io/name: my-kafka-app
+            app.kubernetes.io/name: my-kafka-app
 ```
 
 #### The `loadBalancer` case
@@ -199,8 +202,8 @@ ipBlock:
 Again, the operator will reject `KafkaProxyNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
 
 To enforce this correctly some changes will also be needed to the loadBalancer `Service` the operator generates.
-We can use `Service.spec.loadBalancerSourceRanges` so that the service only accepts connections from the IP ranges given in the `KafkaProxyIngressPolicies` targeting 
-the `KafkaProxyIngress`.
+`Service.spec.loadBalancerSourceRanges` is a best-effort declaration of the source IPs which should be allowed through the load balance.
+In practice enforcement is cloud-provider-dependent, and this can be igored. 
 We will also need to set `Service.spec.externalTrafficPolicy: Local` to preserve the client's source IP address, so that it can be enforced by the
 machinery underpinning the generated `NetworkPolicy`.
 
@@ -212,9 +215,9 @@ metadata:
   name: my-proxy-cr-my-ingress
 spec:
   type: LoadBalancer
-  loadBalancerSourceRanges: # <-------------------- Defense in depth
+  loadBalancerSourceRanges:
     - 203.0.113.0/24
-  externalTrafficPolicy: Local # <-------------------- Preserves client source IP
+  externalTrafficPolicy: Local
   # ...
 ```
 
@@ -238,8 +241,26 @@ spec:
     - from:
         - ipBlock:
             cidr: 203.0.113.0/24
-        port: <PORT_NUM> # for each port
+      ports:  # for each port
+        protocol: TCP
+        port: <PORT_NUM>
 ```
+
+We currently share a single loadbalancer between all the SNI ingresses.
+Sharing amortizes the cost associated with cloud load balancers. 
+But sharing means the apparent segregation IP range segration given by multiple `KafkaProxyNetworkPolicies` targetting different `KafkaProxyIngresses` would not actually be honoured. 
+
+Splitting the shared `Service` using a `Service`-per-shared-CIDR-groups would be possible, but significant drawbacks:
+
+* the cost implication of using multiple services. 
+* only the cloud LB layer gets finer-grained rules
+* a pod-level `NetworkPolicy` still can't differentiate traffic once it reaches the shared port (it doesn't know which Service/LB a packet arrived through), so the `NetworkPolicy` itself would still need to allow the union of all groups' CIDRs. 
+
+Instead it is proposed to keep the single loadbalancer `Service`.
+The operator will construct the union of the CIDRs from all `KafkaProxyNetworkPolicys` targeting any ingress sharing that proxy's SNI Service, and apply that single union to both `loadBalancerSourceRanges` and the pod-level `NetworkPolicy`.
+
+As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBloc rules from the `KafkaProxyNetworkPolicy`.
+Crucially this could be done one the SNI host name is known, thus recovering the per-virtual-cluster network isolation on shared load balancers semantic implied by the CR API.
 
 #### The `openShiftRoute` case
 
@@ -280,14 +301,14 @@ spec:
         app.kubernetes.io/instance: my-proxy-cr
   policyTypes:
     - Ingress # The policy type will always be ingress
-ingress: # The rules target the pod running the Router network proxy.
-  - from:
-      - namespaceSelector:
-          matchLabels:
-            network.openshift.io/policy-group: ingress
-    ports:
-      - protocol: TCP
-        port: 9092
+  ingress: # The rules target the pod running the Router network proxy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 9092
 ```
 
 
@@ -341,10 +362,10 @@ metadata:
 spec:
   strimziKafkaRef: 
     kind: Kafka
-    group: 
+    group: kafka.strimzi.io
     name: my-kafka-cluster
     namespace: my-strimzi-namespace
-    listener: my-listener
+    listenerName: my-listener
 ---
 # Example egress policy restricting access to the given namespaces and pods
 kind: KafkaProxyNetworkPolicy
@@ -373,17 +394,20 @@ spec:
         app.kubernetes.io/instance: my-proxy-cr
   policyTypes:
     - Egress
-egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          io.kubernetes.metadata.name: my-strimzi-namespace
-    - podSelector:
-        matchLabels:
-          role: frontend   #### TODO whatever labels strimzi uses for brokers
-    ports:
-    - protocol: TCP
-      port: 9092
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 9092
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: my-strimzi-namespace
+        - podSelector:
+            matchLabels:
+              strimzi.io/cluster: my-kafka-cluster
+              strimzi.io/kind: Kafka 
+              strimzi.io/broker-role: "true"
+
 ```
 
 #### The `bootstrapServers` case
@@ -475,7 +499,7 @@ This default `NetworkPolicy` will have a name like `default-allow-filter-${kafka
 **TODO** this would be, without policies lots of access, is that right/defensible?
 
 When one or more `KafkaProxyNetworkPolicy` target a given `KafkaProtocolFilter` a single `NetworkPolicy` will be generated for each.
-The `NetworkPolicy` names will follow the pattern `allow-egress-${policy-name}`.
+The `NetworkPolicy` names will follow the pattern `allow-filter-${policy-name}`.
 
 Here's an example for the `RecordEncryption` filter:
 
@@ -500,7 +524,7 @@ spec:
 # egress policy attached to the protocol filter
 kind: KafkaProxyNetworkPolicy
 metadata:
-  name: kafka-proxy-my-proxy-ingress-thru-my-loadbalancer
+  name: encryption-connect-to-vault
 spec:
   targetRef:
     group: io.kroxylicious
@@ -510,10 +534,35 @@ spec:
     to: 
       - namespaceSelector:
           matchLabels:
-            io.kubernetes.metadata.name: vault
+            kubernetes.io/metadata.name: vault
     ports:
     - protocol: TCP
       port: 8200
+```
+
+And the resulting `NetworkPolicy`:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-filter-encryption-connect-to-vault
+spec:
+  podSelector:
+    matchLabels:
+        app.kubernetes.io/name: kroxylicious
+        app.kubernetes.io/component: proxy
+        app.kubernetes.io/instance: my-proxy-cr
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 8200
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vault
 ```
 
 
@@ -601,6 +650,12 @@ A use case for `prohibitedAttachments` is where `NetworkPolicy` resource generat
 For example perhaps the operating organisation's processes require that `NetworkPolicies` are maintained manually. 
 In this case it might be confusing to have a `KafkaProxyNetworkPolicy` targeting a resource which is actually ignored by the operator. 
 Using `prohibitedAttachments` to prevent the attachment of any `KafkaProxyNetworkPolicy` would avoid this.
+
+### Operator RBAC changes
+
+The operator will need to be allowed to CRUD `NetworkPolicy` resources via its dependent resources `ClusterRole`.
+
+It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyNetworkPolicy` and `KafkaProxyOperatorConfig` in the "watched resources" `ClusterRole`.
 
 
 ## Affected/not affected projects
