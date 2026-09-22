@@ -1,4 +1,4 @@
-# <PR-NUMBER> - Kubernetes NetworkPolicies
+# 138 - Kubernetes `NetworkPolicies`
 
 Add support for opererator-generated [`NetworkPolicy`](https://kubernetes.io/docs/concepts/services-networking/network-policies/) to limit network ingress to, and egress from, proxy instances running on Kubernetes.
 
