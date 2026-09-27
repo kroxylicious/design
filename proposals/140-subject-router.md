@@ -1,4 +1,4 @@
-# 000 - Subject Router
+# 140 - Subject Router
 
 This proposal describes a `Router` implementation that selects a single upstream route based on the authenticated identity of the client. All traffic from a given subject reaches one upstream cluster (and one filter chain), so operators can steer different clients to different backends, or apply different per-route filters per client, without the client being aware of it.
 
