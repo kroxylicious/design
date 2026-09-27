@@ -27,7 +27,7 @@ A dedicated Subject Router delivers these with a small implementation that is ea
 
 ### Overview
 
-The Subject Router is a `@Plugin`-annotated `RouterFactory` in a new `kroxylicious-router-subject` module. It maps the client's authenticated `Subject` to exactly one route and forwards every request to that route unchanged. It performs no request decomposition, no fan-out, no response recomposition, and no protocol rewriting.
+The Subject Router is a `@Plugin`-annotated `RouterFactory` in a new `kroxylicious-router-subject` module. It maps the client's authenticated `Subject` to exactly one route and forwards every request to that route unchanged. It delegates the subject-to-route decision to a pluggable `RouteSelector`; the module ships one built-in selector that matches on the client's `User` principal name, and operators can supply their own. It performs no request decomposition, no fan-out, no response recomposition, and no protocol rewriting.
 
 ```
                                          route "team-a"  (subject: alice, carol)
@@ -47,7 +47,9 @@ The router keeps a connection on a single cluster by construction: if a subject 
 
 #### Subject resolution
 
-The router reads the client's identity from `RouterContext.authenticatedSubject()`. It routes on the unique `User` principal:
+The router reads the client's identity from `RouterContext.authenticatedSubject()` and passes the `Subject` to the configured `RouteSelector` (see [Route selection SPI](#route-selection-spi)). The router never inspects credentials or performs authentication itself; it consumes the `Subject` that authentication components have already established.
+
+The built-in selector routes on the unique `User` principal:
 
 ```java
 subject.uniquePrincipalOfType(User.class).map(User::name)
@@ -59,18 +61,34 @@ The `User` principal name is established upstream of the router by the virtual c
 * **SASL termination** (proposal [124][proposal-124]) — the principal derives from the SASL authorized id, established after the `SASL_HANDSHAKE`/`SASL_AUTHENTICATE` exchange that the `SaslTermination` filter processes on the virtual cluster chain.
 * **SASL passthrough inspection** (proposal [004][proposal-004]) — the principal is inferred as SASL messages pass through. This works only for mechanisms the proxy can introspect, and the identity is not established until the exchange completes on the backend, so it is a weaker fit; see [Security model](#security-model).
 
-The router never inspects credentials or performs authentication itself. It consumes the `Subject` that authentication components have already established.
+#### Route selection SPI
+
+Route selection is a plugin. The router passes the authenticated `Subject` to a configured `RouteSelector`, which returns the name of a declared route:
+
+```java
+@Plugin(configType = ...)
+public interface RouteSelector {
+    /** Return the name of a declared route for this subject, or empty if it maps to none. */
+    CompletionStage<Optional<String>> selectRoute(Subject subject, RouteSelectorContext context);
+}
+```
+
+The signature returns a `CompletionStage` so the SPI stays forward compatible with selectors that consult a network source. In v1 the contract is synchronous: an implementation must return an already-completed stage and must not block or perform I/O. The runtime calls the selector on the connection's Netty event-loop thread and reads the result inline; it asserts the returned stage is already complete and fails the connection closed if it is not. Genuinely asynchronous selection, and the pending-request handling it requires, is deferred (see [Future work](#future-work)).
+
+A selector chooses among the routes declared in the router's `routes` block; it cannot invent targets. The runtime rejects a returned name that is not a declared route, fail-closed. The `RouteSelectorContext` exposes the declared route names for the selector to choose from.
+
+The module ships one built-in selector, `UserNameMatch`, which matches the `User` principal name against a static map. It performs a single map lookup and is trivially synchronous.
 
 #### Route selection
 
-Configuration maps subject names to route names. Resolution for a request:
+The router resolves a request's route by authentication state, delegating the authenticated case to the selector:
 
-1. **Authenticated and mapped** — the subject's `User` name matches a configured mapping. Route to the mapped route.
-2. **Authenticated but unmapped** — the subject is non-anonymous but appears in no mapping. Route to `defaultRoute` if configured; otherwise reject the request fail-closed (see below).
-3. **Anonymous, `API_VERSIONS`** — answered from the cross-route version intersection, not routed to a single cluster. See [API version negotiation](#api-version-negotiation). This exposes only protocol version ranges, no data.
-4. **Anonymous, any other request** — reject fail-closed.
+1. **Anonymous, `API_VERSIONS`** — answered from the cross-route version intersection, not routed to a single cluster. See [API version negotiation](#api-version-negotiation). This exposes only protocol version ranges, no data. The selector is not consulted.
+2. **Anonymous, any other request** — reject fail-closed. The selector only ever sees authenticated subjects.
+3. **Authenticated, selector returns a route** — forward to that route.
+4. **Authenticated, selector returns empty** — the subject maps to no route. Reject fail-closed.
 
-A given subject may appear in at most one mapping. The factory rejects configurations that assign one subject to two routes, at startup, with a clear error.
+The built-in `UserNameMatch` selector returns the route mapped to the subject's `User` name, or `defaultRoute` when configured. A `User` name may appear in at most one mapping; the factory rejects a configuration that assigns one name to two routes at startup, with a clear error.
 
 #### Fail-closed rejection
 
@@ -93,7 +111,7 @@ For a routed request the router forwards to the broker the client is addressing 
 
 The runtime translates node IDs in `METADATA` (and other node-bearing) responses into the route's virtual node ID space, exactly as it does for a single-cluster virtual cluster. The client sees a consistent set of virtual node IDs for its route and opens broker-specific connections against them; those connections resolve back through the same route because the subject, and therefore the route, is unchanged.
 
-Every API key is dynamically routed (`staticRoutes()` returns empty), because the route depends on the per-connection subject and cannot be expressed as the connection-independent, per-API-key map that `staticRoutes()` requires. The per-request work is a single map lookup plus one `sendRequest`; there is no decomposition cost. A future runtime optimisation could collapse a connection to a static forwarding path once its route is established, provided it re-evaluates on a subject change; that is out of scope here (see [Future work](#future-work)).
+Every API key is dynamically routed (`staticRoutes()` returns empty), because the route depends on the per-connection subject and cannot be expressed as the connection-independent, per-API-key map that `staticRoutes()` requires. The per-request work is a single selector call (a map lookup in the built-in selector) plus one `sendRequest`; there is no decomposition cost. A future runtime optimisation could collapse a connection to a static forwarding path once its route is established, provided it re-evaluates on a subject change; that is out of scope here (see [Future work](#future-work)).
 
 #### API version negotiation
 
@@ -126,12 +144,15 @@ routerDefinitions:
   - name: subject-router
     type: SubjectRouter
     config:
-      defaultRoute: team-a           # optional; authenticated-but-unmapped subjects route here
-      mappings:
-        - route: team-a
-          subjects: [alice, carol]
-        - route: team-b
-          subjects: [bob]
+      selector:
+        type: UserNameMatch       # built-in RouteSelector; swap for a custom plugin
+        config:
+          defaultRoute: team-a         # optional; authenticated-but-unmapped principals route here
+          mappings:
+            - route: team-a
+              principals: [alice, carol]
+            - route: team-b
+              principals: [bob]
     routes:
       - name: team-a
         id: 0
@@ -153,19 +174,28 @@ virtualClusters:
       - sasl-termination             # establishes the authenticated Subject before routing
 ```
 
-Configuration options in `config`:
+The `SubjectRouter` `config` takes a single `selector` block naming a `RouteSelector` plugin and its configuration:
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `mappings` | list | Yes | — | Each entry has a `route` (a route name declared in the router's `routes`) and a `subjects` list of `User` principal names locked to that route. |
-| `defaultRoute` | string | No | none | Route for authenticated subjects that appear in no mapping. If omitted, unmapped authenticated subjects are rejected fail-closed. |
+| `selector.type` | string | Yes | — | Name of a `RouteSelector` plugin. `UserNameMatch` is the built-in selector. |
+| `selector.config` | object | Yes | — | Configuration for the named selector. |
+
+The built-in `UserNameMatch` selector takes:
+
+| Option | Type | Required | Default | Description |
+|--------|------|----------|---------|-------------|
+| `mappings` | list | Yes | — | Each entry has a `route` (a route name declared in the router's `routes`) and a `principals` list of `User` principal names locked to that route. |
+| `defaultRoute` | string | No | none | Route for authenticated principals that appear in no mapping. If omitted, unmapped authenticated principals are rejected fail-closed. |
 
 Pre-authentication `API_VERSIONS` needs no route configuration: it is served from the cross-route version intersection (see [API version negotiation](#api-version-negotiation)), which spans every route in the router.
 
-The factory validates at startup, using `RouterFactoryContext.routeNames()`:
+The built-in selector validates at startup, using `RouterFactoryContext.routeNames()`:
 
 * Every route name referenced by `mappings` and `defaultRoute` exists in the router's `routes`.
-* No subject name appears in more than one mapping.
+* No `User` name appears in more than one mapping.
+
+A custom selector that resolves route names dynamically cannot be checked up front; the runtime instead validates each returned name against the declared routes per request and rejects an unknown route fail-closed.
 
 #### Same cluster, different filters
 
@@ -180,13 +210,13 @@ A `Router` instance is created per client connection and runs on a single Netty 
 The connection progresses through phases:
 
 1. **Pre-authentication.** With SASL termination, the first requests are `API_VERSIONS` and the SASL exchange. The SASL exchange is handled by the `SaslTermination` filter on the virtual cluster chain and never reaches the router. `API_VERSIONS` does reach the router while the subject is still anonymous; the router answers it by fanning out live to all routes and intersecting the responses (see [API version negotiation](#api-version-negotiation)). With client mTLS the subject is non-anonymous from the first request and this phase does not occur.
-2. **Authenticated steady state.** Once authentication completes, `authenticatedSubject()` returns the client's subject on every subsequent `onRequest`. The router resolves the route (a map lookup) and forwards each request to the addressed broker on that route.
+2. **Authenticated steady state.** Once authentication completes, `authenticatedSubject()` returns the client's subject on every subsequent `onRequest`. The router calls the selector and forwards each request to the addressed broker on the resolved route.
 
-The router resolves the route per request rather than caching it at connection start. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). Resolution is a single lookup, so recomputing it per request is cheap.
+The router resolves the route per request and caches nothing. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). Because the v1 selector is a synchronous map lookup, recomputing per request is cheap and needs no cache, and an in-place change to the subject's identity is picked up on the next request with no staleness. A selector that consults a network source could not afford a call per RPC and would need to cache the route for the life of the subject; that path, and its cache-invalidation contract, is deferred (see [Future work](#future-work)).
 
 #### Subject changes mid-connection
 
-The router remembers the route currently in use on a connection (the route it last forwarded to). On each request it resolves the route from the current subject and compares:
+The router remembers the route currently in use on a connection (the route it last forwarded to). On each request it calls the selector for the current subject and compares:
 
 * **Same route** — forward as normal. This covers the overwhelmingly common cases: the subject is unchanged, or reauthentication renewed the same identity, or a claim changed in a way that does not alter the mapping (v1 maps on the `User` principal name, so only a change to that name can change the route).
 * **Different route** — the resolved route no longer matches the route the connection has been using. The router closes the connection fail-closed with a clear error rather than re-routing live.
@@ -273,7 +303,7 @@ Following the project logging rules, the router logs the authenticated subject u
 
 ## Affected/not affected projects
 
-* **New module `kroxylicious-router-subject`** — the `SubjectRouter` `RouterFactory`, its `Router`, and configuration types. A new top-level module.
+* **New module `kroxylicious-router-subject`** — the `SubjectRouter` `RouterFactory`, its `Router`, the `RouteSelector` SPI and the built-in `UserNameMatch` selector, and configuration types. A new top-level module.
 * **`kroxylicious-bom`** — version management for the new module.
 * **`kroxylicious-integration-tests`** — integration tests exercising subject-to-route selection, fail-closed rejection, and per-route filter application, behind both mTLS and SASL termination.
 * **`kroxylicious-docs`** — user documentation for configuring and operating the router.
@@ -292,7 +322,7 @@ Following the project logging rules, the router logs the authenticated subject u
 
 * **Extend the `Filter` API to select an upstream.** Identity-based upstream selection could be bolted onto the filter chain instead of the `Router` API. This was rejected: the `Router` API (proposal [070][proposal-070]) exists precisely to own upstream selection, node-ID mapping, and per-route filter chains. Reimplementing that in a filter would duplicate the runtime machinery the `Router` API already provides and bypass its addressing guarantees.
 
-* **Route on group or role principals.** Routing on the unique `User` principal covers the stated use cases and keeps selection unambiguous (each connection has exactly one `User`). Routing on group or role membership raises questions when a subject belongs to several groups mapped to different routes. This is deferred; it can be added later as an alternative selection strategy without changing the routing engine.
+* **Route on group or role principals.** Routing on the unique `User` principal covers the stated use cases and keeps selection unambiguous (each connection has exactly one `User`). Routing on group or role membership raises questions when a subject belongs to several groups mapped to different routes. This is deferred; it can be added later as an alternative `RouteSelector` without changing the routing engine.
 
 * **Fall back to a default route for anonymous clients.** Sending unauthenticated traffic to a default cluster was rejected because it defeats the isolation the feature exists to provide and violates fail-closed defaults. Anonymous clients are limited to `API_VERSIONS` for negotiation and otherwise rejected.
 
@@ -309,9 +339,10 @@ Following the project logging rules, the router logs the authenticated subject u
 ## Future work
 
 * **Operator CRD support** for declaring subject routers and their mappings.
-* **Group/role-based selection** as an alternative to `User`-name mapping.
+* **Asynchronous route selection.** Relax the synchronous `RouteSelector` contract so a selector can consult a network source, such as a directory or policy service. This requires the runtime to handle a request while selection is in flight (hold or reject) and a caching contract, since the proxy cannot call out on every RPC: cache the selected route for the life of the subject and re-resolve only when the subject changes. Detecting a subject change cheaply points to splitting selection into a synchronous `Principal -> Key` extraction and a `Key -> Route` mapping, caching on the extracted key, and tightening the `Principal` contract so a routing-relevant identity change arrives as a new `Subject` rather than an in-place mutation.
+* **Group/role-based selection** as an alternative `RouteSelector` to `User`-name mapping.
 * **Runtime fast path** that flattens a connection to a static forwarding path once its route is established (re-evaluating if the subject changes), removing per-request deserialisation for a router that only forwards.
-* **Regex or claim-based mapping** for subjects, instead of exact name matches, for deployments with large or dynamic principal sets.
+* **Regex or claim-based mapping** as further `RouteSelector` implementations, instead of exact name matches, for deployments with large or dynamic principal sets.
 
 [proposal-004]: 004-terminology-for-authentication.md
 [proposal-070]: 070-routing-api.md
