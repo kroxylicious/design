@@ -70,12 +70,23 @@ Route selection is a plugin. The router passes the authenticated `Subject` to a 
 public interface RouteSelector {
     /** Return the name of a declared route for this subject, or empty if it maps to none. */
     CompletionStage<Optional<String>> selectRoute(Subject subject, RouteSelectorContext context);
+
+    /**
+     * Optionally declare the complete set of route names this selector can ever return, for
+     * one-off startup validation. Return empty when the set cannot be enumerated statically,
+     * for example a selector that resolves names from a live source.
+     */
+    default CompletionStage<Optional<Set<String>>> referencedRoutes(RouteSelectorContext context) {
+        return CompletableFuture.completedFuture(Optional.empty());
+    }
 }
 ```
 
 The signature returns a `CompletionStage` so the SPI stays forward compatible with selectors that consult a network source. In v1 the contract is synchronous: an implementation must return an already-completed stage and must not block or perform I/O. The runtime calls the selector on the connection's Netty event-loop thread and reads the result inline; it asserts the returned stage is already complete and fails the connection closed if it is not. Genuinely asynchronous selection, and the pending-request handling it requires, is deferred (see [Future work](#future-work)).
 
-A selector chooses among the routes declared in the router's `routes` block; it cannot invent targets. The runtime rejects a returned name that is not a declared route, fail-closed. The `RouteSelectorContext` exposes the declared route names for the selector to choose from.
+A selector chooses among the routes declared in the router's `routes` block; it cannot invent targets. The `RouteSelectorContext` exposes the declared route names for the selector to choose from. The runtime always rejects a returned name that is not a declared route, fail-closed, as defence against a selector returning a route outside its declared set.
+
+A selector may also declare its full set of route names up front via `referencedRoutes`. When it does, the runtime checks that set against the declared routes at startup and refuses to start if any is unknown, turning a mapping typo into a boot-time error rather than a per-request rejection. A selector that cannot enumerate its routes statically returns empty and is validated per request only.
 
 The module ships one built-in selector, `UserNameMatch`, which matches the `User` principal name against a static map. It performs a single map lookup and is trivially synchronous.
 
@@ -190,12 +201,12 @@ The built-in `UserNameMatch` selector takes:
 
 Pre-authentication `API_VERSIONS` needs no route configuration: it is served from the cross-route version intersection (see [API version negotiation](#api-version-negotiation)), which spans every route in the router.
 
-The built-in selector validates at startup, using `RouterFactoryContext.routeNames()`:
+The built-in `UserNameMatch` selector implements `referencedRoutes`, returning every route named in `mappings` and `defaultRoute`. The runtime validates that set against `RouterFactoryContext.routeNames()` at startup:
 
-* Every route name referenced by `mappings` and `defaultRoute` exists in the router's `routes`.
-* No `User` name appears in more than one mapping.
+* Every route name referenced by `mappings` and `defaultRoute` exists in the router's `routes`; a typo fails the boot with a clear error.
+* No `User` name appears in more than one mapping (checked by the selector itself).
 
-A custom selector that resolves route names dynamically cannot be checked up front; the runtime instead validates each returned name against the declared routes per request and rejects an unknown route fail-closed.
+A custom selector that resolves route names from a live source returns no static set and is validated per request instead: the runtime rejects a returned name that is not a declared route, fail-closed.
 
 #### Same cluster, different filters
 
