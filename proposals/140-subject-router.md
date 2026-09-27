@@ -21,7 +21,7 @@ Concrete use cases:
 * **Blue/green and migration.** Move a subset of clients to a new cluster by changing their mapping, without touching client configuration.
 * **Per-identity policy.** Point two subjects at the *same* cluster but through *different* per-route filter chains, applying different encryption, auditing, or rate-limiting policy per client.
 
-A dedicated Subject Router delivers these with a small, auditable implementation, and gives the project its first production-oriented `Router`. It also exercises the `Router` API end to end against a realistic use case, which helps validate proposal [070][proposal-070] before more complex routers land.
+A dedicated Subject Router delivers these with a small implementation that is easy to security-review, and gives the project its first production-oriented `Router`. It also exercises the `Router` API end to end against a realistic use case, which helps validate proposal [070][proposal-070] before more complex routers land.
 
 ## Proposal
 
@@ -140,7 +140,7 @@ routerDefinitions:
       - name: team-b
         id: 1
         filters:
-          - bob-audit-filter         # per-route filter chain applied only to bob's traffic
+          - record-encryption        # per-route filter chain applied only to bob's traffic
         target:
           cluster: cluster-b
 
@@ -169,7 +169,7 @@ The factory validates at startup, using `RouterFactoryContext.routeNames()`:
 
 #### Same cluster, different filters
 
-To support per-identity policy against a shared backend, the factory calls `RouterFactoryContext.allowSharedClusterTargets()` during `initialize()`. This permits two routes to target the same cluster through different per-route filter chains (for example, routing `alice` and `bob` both to `cluster-a`, but `bob` through an extra audit filter). Without this opt-in the runtime rejects overlapping cluster targets by default, per proposal [070][proposal-070].
+To support per-identity policy against a shared backend, the factory calls `RouterFactoryContext.allowSharedClusterTargets()` during `initialize()`. This permits two routes to target the same cluster through different per-route filter chains (for example, routing `alice` and `bob` both to `cluster-a`, but `bob` through an extra record-encryption filter). Without this opt-in the runtime rejects overlapping cluster targets by default, per proposal [070][proposal-070].
 
 ### Router behaviour in depth
 
@@ -236,7 +236,7 @@ SASL passthrough inspection (proposal [004][proposal-004]) can supply a subject,
 
 The router denies by default:
 
-* An anonymous client cannot reach any data-plane route. The only request serviced while anonymous is `API_VERSIONS`, which is answered from the cross-route version intersection and carries no data.
+* An anonymous client cannot send any request that manipulates data; the router denies those until it knows the user identity. The only request serviced while anonymous is `API_VERSIONS`, which is answered from the cross-route version intersection and carries no data.
 * An authenticated subject that maps to no route is rejected unless the operator has explicitly configured a `defaultRoute`.
 
 There is no configuration in which an unidentified or unmapped client silently reaches an arbitrary cluster. This matches the project's security guidance: on the absence of an explicit allow, deny.
@@ -255,7 +255,7 @@ Because the route is chosen from the authenticated identity, the isolation betwe
 
 ### Single-cluster confinement
 
-Each connection addresses exactly one cluster. Because the router forwards requests unmodified to a single backend, it holds no cross-cluster state, so classes of risk that only arise when one connection spans clusters cannot occur here: producer-ID reuse across clusters, coordinator/leader confusion, fetch-session state leakage, and topic-ID collisions. The router cannot leak data between clusters within a connection because only one cluster is ever addressed. The implementation is small and forwards requests unmodified, which keeps the trusted computing base for this feature minimal and auditable.
+Each connection addresses exactly one cluster. Because the router forwards requests unmodified to a single backend, it holds no cross-cluster state, so classes of risk that only arise when one connection spans clusters cannot occur here: producer-ID reuse across clusters, coordinator/leader confusion, fetch-session state leakage, and topic-ID collisions. The router cannot leak data between clusters within a connection because only one cluster is ever addressed. The implementation is small and forwards requests unmodified, which keeps the trusted computing base for this feature minimal and easy to review.
 
 ### Pre-authentication fan-out
 
