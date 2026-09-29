@@ -2,6 +2,8 @@
 
 PQC support allows the proxy to protect data in transit with encryption resistant to attacks by quantum computers.
 
+This proposal addresses data in transit. Data at rest is largely out of scope: the symmetric encryption the proxy uses (AES-256) is weakened but not broken by Grover's algorithm. The exception is data at rest that is protected by classical asymmetric cryptography, such as a data encryption key wrapped by a classical KEK, which Shor's algorithm can break. Addressing that is out of scope here and is tracked separately (see the Record encryption filter section and issue #783), potentially as its own proposal.
+
 ## Current Situation
 
 Quantum computing can efficiently solve problems that classical cryptography depends on, breaking current security protocols. Two algorithms, Shor's and Grover's, attack different areas of encryption.
@@ -12,11 +14,13 @@ NIST finalized post-quantum cryptography standards in 2024, enabling secure key 
 
 Shor's algorithm enables quantum computers to efficiently solve problems securing RSA, Diffie-Hellman, and elliptic curve cryptography. Classical public-key mechanisms in TLS and PKI, such as RSA and ECDH, are vulnerable to quantum attacks enabled by Shor's algorithm.
 
-### Data encryption at rest
+### Data encryption at rest (background)
+
+This section is background that explains why symmetric data at rest is largely out of scope for this proposal; it is not part of the proposed work.
 
 Grover's algorithm poses a different and often misunderstood quantum threat. Unlike Shor's algorithm, which breaks specific mathematical problems outright, Grover's algorithm provides a quadratic speedup for brute-force search. This applies to any problem that can be framed as searching an unsorted space, including guessing symmetric encryption keys. For cryptography, this means a quantum adversary can search a key space of size N in roughly √N steps instead of N steps.
 
-The key distinction is that Grover's algorithm weakens symmetric encryption but does not fundamentally break it. For example, AES-128 has a classical security level of 128 bits, meaning a brute-force attack requires approximately 2^128 operations. Under Grover's algorithm, the effective complexity drops to roughly 2^64, which is no longer considered sufficient for long-term security. AES-256, however, is reduced from 2^256 to approximately 2^128 operations, which remains extremely strong.
+The key distinction is that Grover's algorithm weakens symmetric encryption but does not fundamentally break it. For example, AES-128 has a classical security level of 128 bits, meaning a brute-force attack requires approximately 2^128 operations. Under Grover's algorithm, the effective complexity drops to roughly 2^64, which is no longer considered sufficient for long-term security. AES-256, however, is reduced from 2^256 to approximately 2^128 operations, which remains extremely strong. As the proxy uses AES-256 for symmetric data at rest, that data stays secure against quantum attack. The exception is data at rest protected by classical asymmetric cryptography, such as a data encryption key wrapped by a classical KEK, which Shor's algorithm can break. That case is out of scope here and is discussed in the Record encryption filter section.
 
 ### NIST PQC standards for data in transit
 
@@ -77,10 +81,6 @@ Changing to use Dilithium certificates has a large blast radius. It's not just a
 
 Provide the ability to only allow PQC endpoints, which gives a stronger guarantee that a back-level client did not connect over a hybrid endpoint and negotiate an insecure key exchange. Strict mode prevents downgrade attacks.
 
-### PQC topic enforcement
-
-Not all topics contain data that need to be PQC protected and not all clients are PQC capable. The proxy is able to redirect clients to PQC endpoints based on the topic being accessed. This can also be combined with existing functionality such as replacing sensitive values and allowing that access to be over non-PQC endpoints.
-
 ## Proposal
 
 This proposal aims to support the proxy offering PQC support in the following scenarios:
@@ -88,7 +88,8 @@ This proposal aims to support the proxy offering PQC support in the following sc
 - Clients connecting to the proxy
 - Proxy connecting to upstream clusters
 - Filters that make connections
-- Filter enforcement of PQC for topics
+
+More generally, the requirement for PQC support applies to all TLS connections the proxy makes, whether by the runtime or by filters, now or in the future. This includes connections that are easy to overlook, such as the SASL termination connection to an OAuth server used to validate bearer tokens. This will also need to be reflected in the developers guide, especially if Proposal #94 is implemented and there is no longer a shared TLS configuration.
 
 ### Dependency on Proposal #94
 
@@ -106,7 +107,9 @@ TLS connections can be controlled with the following configuration options:
 
 - TLS version (allowed/denied)
 - Cipher suites (allowed/denied)
-- **Named groups (allowed/denied)** - new field, required for TLS 1.3 key exchange
+- **Named groups (allowed/denied)** - new field. Named groups are part of the TLS 1.3 key exchange. The field is optional and defaults to the JDK's standard groups when unset.
+
+The order of the `allowed` named groups is significant. The first entry is the most preferred, with the remaining entries used as fallbacks in preference order. For example, `[X25519MLKEM768, X25519, secp256r1]` prefers the hybrid PQC group and falls back to classical groups only if the peer does not support it.
 
 #### The `pqc` convenience field
 
@@ -182,14 +185,14 @@ The `pqc` field prevents the misconfiguration shown in the individual settings e
 
 ### ML-DSA certificate support
 
-Existing configuration will work as is for ML-DSA (Dilithium) certificates as these certificates conform to the X.509 structure and require no special TLS handshake handling. However, certificate parsing will require updating to support Dilithium key types.
+Existing configuration will work as-is for ML-DSA (Dilithium) certificates as these certificates conform to the X.509 structure and require no special TLS handshake handling. However, certificate parsing will require updating to support Dilithium key types.
 
 
 ### ClientTlsContext API extensions
 
 Filters gain visibility into negotiated TLS parameters via [`ClientTlsContext`](https://github.com/kroxylicious/kroxylicious/blob/main/kroxylicious-api/src/main/java/io/kroxylicious/proxy/tls/ClientTlsContext.java) additions.
 
-The API will expose both `negotiatedNamedGroup()` and `isPqcConnection()` convenience method. This follows the same philosophy as the configuration: provide both convenience (the PQC boolean) and granular control (the actual named group for non-PQC logic). Sometimes filters need only the PQC status, other times they need the specific named group for logic unrelated to PQC.
+The API will expose `negotiatedNamedGroup()`, `negotiatedCipherSuite()` and `negotiatedProtocol()`, giving filters visibility into the negotiated handshake parameters. Exposing the named group without the cipher suite and protocol would be inconsistent, as all three are outputs of the same handshake. A filter that cares about the connection's cryptographic posture, for example whether an AES-GCM suite was negotiated, then has the relevant information.
 
 This permits filters to enforce PQC requirements or route based on connection security.
 
@@ -261,9 +264,11 @@ clusterDefinitions:
 
 ### Record encryption filter
 
-Already uses AES-256-GCM and does not need changing. However, the KMS exchange needs to be over PQC connections, so KMS provider implementations will need to be updated.
+The record encryption filter already uses AES-256-GCM for record encryption and does not need changing. However, the exchange with the KMS needs to be over PQC connections, so KMS provider implementations will need to be updated. This proposal is limited to those connections.
 
-If `pqc: strict` is required for the record filter then it will mandate the use of 256-bit AES-GCM symmetric keys. See current warning: `If you are using Azure Key Vault and Managed HSM is not available, you can use RSA-OAEP-256 encryption, using a 2048-bit (or greater) asymmetric key instead of 256-bit AES-GCM symmetric keys. This approach is not quantum-resistant.`
+The proxy does not enforce anything about the KEK; it uses whatever key the user configures the filter with. The `pqc` setting controls the TLS connection to the KMS and governs how the DEK is protected in transit, but has no relationship to the KEK and cannot mandate its characteristics. Full PQC protection therefore also depends on the user choosing a quantum-resistant KEK, as the wrapped DEK (edek) is stored alongside the record and is at rest for as long as the record is retained. For example, an Azure Key Vault KEK using RSA-OAEP-256 rather than a 256-bit AES-GCM symmetric key is not quantum-resistant.
+
+Validating the KEK's characteristics is out of scope for this proposal and is captured by issue [#783](https://github.com/kroxylicious/kroxylicious/issues/783), of which quantum resistance would be one use case.
 
 ### Operator Ingress
 
@@ -370,29 +375,11 @@ Testing infrastructure will need:
 - Test clients that support PQC and ML-DSA certificates
 - Certificate injection into test infrastructure
 
-### Metrics and observability
+## Future work: PQC topic filters
 
-Existing connection metrics follow a directional naming pattern. PQC support augments these existing metrics with a `pqc` label rather than creating separate metrics.
+This is a future capability that PQC enables, rather than part of the work proposed here. The redirect capability and the topic-based routing it depends on do not exist yet.
 
-**Modified existing metrics (label added):**
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `kroxylicious_client_to_proxy_connections_total` | Counter | `virtual_cluster`, `node_id`, **`pqc`** | Count of client-to-proxy connections. **New label** `pqc` with values: `strict`, `hybrid`, `none` |
-| `kroxylicious_proxy_to_server_connections_total` | Counter | `cluster`, `node_id`, **`pqc`** | Count of proxy-to-broker connections. **New label** `pqc` with values: `strict`, `hybrid`, `none` |
-
-**New metrics for migration planning:**
-
-| Metric | Type | Labels | Description |
-|--------|------|--------|-------------|
-| `kroxylicious_client_to_proxy_connections_failed_total` | Counter | `virtual_cluster`, `pqc` | Failed client-to-proxy connection attempts by PQC mode |
-| `kroxylicious_proxy_to_server_connections_failed_total` | Counter | `cluster`, `pqc` | Failed proxy-to-broker connection attempts by PQC mode |
-
-The directional metrics support migration planning. Proxy owners can observe PQC adoption separately for client-facing and broker-facing connections, contacting application developers or Kafka cluster owners independently as migration progresses. Failed connection metrics identify PQC compatibility issues.
-
-## PQC topic filters
-
-The idea is to have a filter that can redirect client connections to PQC or hybrid/non-PQC proxy endpoints based on the topic that they are accessing. This allows a more granular migration strategy and caters for integrating with external business partners where you have no control over their PQC support.
+The idea is to have a filter that can redirect client connections to PQC or hybrid/non-PQC proxy endpoints based on the topic that they are accessing. This allows a more granular migration strategy and caters for integrating with external business partners where you have no control over their PQC support. Where sensitive data has to travel over a non-PQC endpoint, this could be combined with other filters to redact or encrypt parts of the message.
 
 **Example consume use case:**
 
@@ -408,7 +395,7 @@ Production to topics that contain sensitive data can be forced over a PQC compli
 **Affected:**
 
 - [`kroxylicious-api`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-api): [`Tls`](https://github.com/kroxylicious/kroxylicious/blob/main/kroxylicious-api/src/main/java/io/kroxylicious/proxy/config/tls/Tls.java) record and [`ClientTlsContext`](https://github.com/kroxylicious/kroxylicious/blob/main/kroxylicious-api/src/main/java/io/kroxylicious/proxy/tls/ClientTlsContext.java) interface changes
-- [`kroxylicious-runtime`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-runtime): Netty TLS pipeline configuration, connection metrics
+- [`kroxylicious-runtime`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-runtime): Netty TLS pipeline configuration
 - [`kroxylicious-kms-tls-support`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-kms-tls-support): TLS configuration for KMS HTTP clients
 - [`kroxylicious-kubernetes-api`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-kubernetes/kroxylicious-kubernetes-api): CRD schema changes
 - [`kroxylicious-operator`](https://github.com/kroxylicious/kroxylicious/tree/main/kroxylicious-kubernetes/kroxylicious-operator): CRD reconciliation
