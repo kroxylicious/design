@@ -73,8 +73,10 @@ public interface RouteSelector {
 
     /**
      * Optionally declare the complete set of route names this selector can ever return, for
-     * one-off startup validation. Return empty when the set cannot be enumerated statically,
-     * for example a selector that resolves names from a live source.
+     * one-off startup validation. Return an empty {@link Optional} when the set cannot be
+     * enumerated statically, for example a selector that resolves names from a live source.
+     * An empty set (present Optional wrapping an empty Set) declares that the selector
+     * references no routes at all.
      */
     default CompletionStage<Optional<Set<String>>> referencedRoutes(RouteSelectorContext context) {
         return CompletableFuture.completedFuture(Optional.empty());
@@ -86,7 +88,7 @@ The signature returns a `CompletionStage` so the SPI stays forward compatible wi
 
 A selector chooses among the routes declared in the router's `routes` block; it cannot invent targets. The `RouteSelectorContext` exposes the declared route names for the selector to choose from. The runtime always rejects a returned name that is not a declared route, fail-closed, as defence against a selector returning a route outside its declared set.
 
-A selector may also declare its full set of route names up front via `referencedRoutes`. When it does, the runtime checks that set against the declared routes at startup and refuses to start if any is unknown, turning a mapping typo into a boot-time error rather than a per-request rejection. A selector that cannot enumerate its routes statically returns empty and is validated per request only.
+A selector may also declare its full set of route names up front via `referencedRoutes`. When it does, the runtime checks that set against the declared routes at startup and refuses to start if any is unknown, turning a mapping typo into a boot-time error rather than a per-request rejection. A selector that cannot enumerate its routes statically returns an empty `Optional` and is validated per request only.
 
 The module ships one built-in selector, `UserNameMatch`, which matches the `User` principal name against a static map. It performs a single map lookup and is trivially synchronous.
 
@@ -106,7 +108,7 @@ The built-in `UserNameMatch` selector returns the route mapped to the subject's 
 When a request must be rejected (anonymous non-`API_VERSIONS` request, or authenticated-but-unmapped with no `defaultRoute`), the router does not silently fall through to an arbitrary route. It responds with a Kafka error appropriate to the API key and closes the connection:
 
 ```java
-return context.respondWithError(header, request, new SaslAuthenticationException("not authorized for any route"))
+return context.respondWithError(header, request, Errors.SASL_AUTHENTICATION_FAILED, "not authorized for any route")
               .andCloseConnection()
               .build();
 ```
@@ -130,7 +132,7 @@ Every API key is dynamically routed (`staticRoutes()` returns empty), because th
 
 The router cannot negotiate against a single "guess" cluster. If it answered from cluster X but the subject later routed to cluster Y, the client would use X's version ranges against Y for the rest of the connection, and Y would reject any API key whose range is narrower on Y. To stay correct regardless of the eventual route, the router negotiates against the **intersection of all routes**:
 
-* For each API key, the advertised range is `max(minVersion)` to `min(maxVersion)` across every route's cluster (already intersected with the proxy's own maximums by the runtime's `ApiVersionsIntersectFilter`). An API key absent from any route is not advertised.
+* For each API key, the advertised range is `max(minVersion)` to `min(maxVersion)` across every route's cluster (already intersected with the proxy's own maximums by the runtime's `ApiVersionsIntersectFilter`). An API key absent from any route, or one whose ranges leave an empty intersection (`max(minVersion) > min(maxVersion)`), is removed from the response.
 * Because every route supports the advertised range, whatever version the client selects is safe on whichever route its subject resolves to. The result is conservative (the lowest common denominator across clusters) but never wrong.
 
 Selection by authentication state:
@@ -278,7 +280,7 @@ SASL passthrough inspection (proposal [004][proposal-004]) can supply a subject,
 The router denies by default:
 
 * An anonymous client cannot send any request that manipulates data; the router denies those until it knows the user identity. The only request serviced while anonymous is `API_VERSIONS`, which is answered from the cross-route version intersection and carries no data.
-* An authenticated subject that maps to no route is rejected unless the operator has explicitly configured a `defaultRoute`.
+* An authenticated subject that maps to no route is rejected unless an admin has explicitly configured a `defaultRoute`.
 
 There is no configuration in which an unidentified or unmapped client silently reaches an arbitrary cluster. This matches the project's security guidance: on the absence of an explicit allow, deny.
 
@@ -286,13 +288,13 @@ A mid-connection identity change is also handled fail-closed. If reauthenticatio
 
 ### Routing isolation is not access control
 
-The router guarantees that a subject's traffic reaches exactly one cluster. It does not authorise operations within that cluster. Backend brokers remain the authority for ACL enforcement: a client routed to `cluster-a` still needs broker-side permission to produce to or consume from topics there. Operators must not treat subject routing as a substitute for broker ACLs. It is a routing and isolation control, complementary to, not a replacement for, authorisation.
+The router guarantees that a subject's traffic reaches exactly one cluster. It does not authorise operations within that cluster. Authorisation remains the authority of the route's configuration: backend broker ACLs, or an Authorization Filter configured on that branch of the DAG. A client routed to `cluster-a` still needs permission there to produce to or consume from its topics. Admins must not treat subject routing as a substitute for that authorisation. It is a routing and isolation control, complementary to, not a replacement for, authorisation.
 
 This distinction matters because the router forwards requests verbatim. It does not filter which topics, groups, or operations a subject may use within its cluster; it only decides which cluster. Where finer control is required, combine subject routing with per-route authorisation filters or broker ACLs.
 
 ### Strength of isolation equals strength of authentication
 
-Because the route is chosen from the authenticated identity, the isolation between tenants is exactly as strong as the authentication mechanism that establishes the identity. If an attacker can obtain another subject's credentials or forge its principal, they reach that subject's cluster. mTLS and SASL termination with strong mechanisms (SCRAM, OAUTHBEARER) provide this strength; SASL PLAIN without TLS does not. Operators choosing a Subject Router for tenant isolation should pair it with mutual authentication and TLS on the client-facing gateway.
+Because the route is chosen from the authenticated identity, the isolation between tenants is exactly as strong as the authentication mechanism that establishes the identity. If an attacker can obtain another subject's credentials or forge its principal, they reach that subject's cluster. mTLS and SASL termination with strong mechanisms (SCRAM, OAUTHBEARER) provide this strength; SASL PLAIN without TLS does not. Admins choosing a Subject Router for tenant isolation should pair it with mutual authentication and TLS on the client-facing gateway.
 
 ### Single-cluster confinement
 
@@ -306,7 +308,7 @@ Serving `API_VERSIONS` from a live cross-route intersection means an unauthentic
 * Every other request from an anonymous client is rejected fail-closed, so authentication is still required before any data-plane traffic reaches a backend.
 * The client-facing gateway's existing connection and rate limits cap how fast anonymous connections, and therefore fan-outs, can be created.
 
-Operators who cannot tolerate this fan-out should prefer client mTLS, under which the subject is known from the handshake and `API_VERSIONS` routes to the single mapped route with no fan-out at all.
+Admins who cannot tolerate this fan-out should prefer client mTLS, under which the subject is known from the handshake and `API_VERSIONS` routes to the single mapped route with no fan-out at all.
 
 ### Logging
 
