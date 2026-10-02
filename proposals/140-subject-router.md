@@ -59,7 +59,8 @@ The `User` principal name is established upstream of the router by the virtual c
 
 * **Client mTLS** — the principal derives from the validated client certificate. It is present from the first request, including `API_VERSIONS`.
 * **SASL termination** (proposal [124][proposal-124]) — the principal derives from the SASL authorized id, established after the `SASL_HANDSHAKE`/`SASL_AUTHENTICATE` exchange that the `SaslTermination` filter processes on the virtual cluster chain.
-* **SASL passthrough inspection** (proposal [004][proposal-004]) — the principal is inferred as SASL messages pass through. This works only for mechanisms the proxy can introspect, and the identity is not established until the exchange completes on the backend, so it is a weaker fit; see [Security model](#security-model).
+
+The router does not support SASL passthrough. If it sees a SASL frame it rejects the connection fail-closed, because passthrough leaves the identity unverified by the proxy at routing time. See [Future work](#future-work).
 
 #### Route selection SPI
 
@@ -273,7 +274,7 @@ The router makes routing decisions from `authenticatedSubject()`. That subject i
 * **Client mTLS**, which establishes the subject at the TLS handshake, before any Kafka request.
 * **SASL termination** (proposal [124][proposal-124]), which establishes the subject at the proxy and rejects unauthenticated traffic.
 
-SASL passthrough inspection (proposal [004][proposal-004]) can supply a subject, but the identity is asserted by the backend rather than verified by the proxy, and it does not cover all mechanisms. Deployments that rely on it accept that routing is only as trustworthy as that inference. The router does not enforce which authentication component is present; that composition is the administrator's responsibility, consistent with the SASL placement rules in proposal [070][proposal-070].
+SASL passthrough is out of scope. A passthrough-inferred identity is asserted by the backend rather than verified by the proxy, and does not cover all mechanisms, so the router rejects SASL frames rather than routing on an unverified subject (see [Future work](#future-work)). The router does not enforce which authentication component is present; that composition is the administrator's responsibility, consistent with the SASL placement rules in proposal [070][proposal-070].
 
 ### Fail-closed by default
 
@@ -356,8 +357,8 @@ Following the project logging rules, the router logs the authenticated subject u
 * **Group/role-based selection** as an alternative `RouteSelector` to `User`-name mapping.
 * **Runtime fast path** that flattens a connection to a static forwarding path once its route is established (re-evaluating if the subject changes), removing per-request deserialisation for a router that only forwards.
 * **Regex or claim-based mapping** as further `RouteSelector` implementations, instead of exact name matches, for deployments with large or dynamic principal sets.
+* **SASL passthrough.** The v1 router rejects SASL frames because a passthrough-inferred identity is asserted by the backend, not verified by the proxy, and does not cover every mechanism. A later iteration could support it where the deployment accepts that routing is only as trustworthy as the inference. One shape, raised in review: a configurable `authRoute` naming the single route that carries the SASL exchange, which only suits deployments where every upstream shares the same authentication infrastructure. In that case terminating SASL (for example OAUTHBEARER) at the proxy achieves a similar effect with a verified subject, so passthrough earns its place only for mechanisms the proxy cannot terminate.
 
-[proposal-004]: 004-terminology-for-authentication.md
 [proposal-070]: 070-routing-api.md
 [proposal-124]: 124-sasl-termination.md
 [pr-123]: https://github.com/kroxylicious/design/pull/123
