@@ -60,7 +60,7 @@ The `User` principal name is established upstream of the router by the virtual c
 * **Client mTLS** — the principal derives from the validated client certificate. It is present from the first request, including `API_VERSIONS`.
 * **SASL termination** (proposal [124][proposal-124]) — the principal derives from the SASL authorized id, established after the `SASL_HANDSHAKE`/`SASL_AUTHENTICATE` exchange that the `SaslTermination` filter processes on the virtual cluster chain.
 
-The router does not support SASL passthrough. If it sees a SASL frame it rejects the connection fail-closed, because passthrough leaves the identity unverified by the proxy at routing time. See [Future work](#future-work).
+The router does not support SASL passthrough (proposal [004][proposal-004]). If it sees a SASL frame it rejects the connection fail-closed, because passthrough leaves the identity unverified by the proxy at routing time. See [Future work](#future-work).
 
 #### Route selection SPI
 
@@ -85,7 +85,7 @@ public interface RouteSelector {
 }
 ```
 
-The signature returns a `CompletionStage` so the SPI stays forward compatible with selectors that consult a network source. In v1 the contract is synchronous: an implementation must return an already-completed stage and must not block or perform I/O. The runtime calls the selector on the connection's Netty event-loop thread and reads the result inline; it asserts the returned stage is already complete and fails the connection closed if it is not. Genuinely asynchronous selection, and the pending-request handling it requires, is deferred (see [Future work](#future-work)).
+The signature returns a `CompletionStage` so the SPI stays forward compatible with selectors that consult a network source. In the first iteration the contract is synchronous: an implementation must return an already-completed stage and must not block or perform I/O. The runtime calls the selector on the connection's Netty event-loop thread and reads the result inline; it asserts the returned stage is already complete and fails the connection closed if it is not. Genuinely asynchronous selection, and the pending-request handling it requires, is deferred (see [Future work](#future-work)).
 
 A selector chooses among the routes declared in the router's `routes` block; it cannot invent targets. The `RouteSelectorContext` exposes the declared route names for the selector to choose from. The runtime always rejects a returned name that is not a declared route, fail-closed, as defence against a selector returning a route outside its declared set.
 
@@ -226,13 +226,13 @@ The connection progresses through phases:
 1. **Pre-authentication.** With SASL termination, the first requests are `API_VERSIONS` and the SASL exchange. The SASL exchange is handled by the `SaslTermination` filter on the virtual cluster chain and never reaches the router. `API_VERSIONS` does reach the router while the subject is still anonymous; the router answers it by fanning out live to all routes and intersecting the responses (see [API version negotiation](#api-version-negotiation)). With client mTLS the subject is non-anonymous from the first request and this phase does not occur.
 2. **Authenticated steady state.** Once authentication completes, `authenticatedSubject()` returns the client's subject on every subsequent `onRequest`. The router calls the selector and forwards each request to the addressed broker on the resolved route.
 
-The router resolves the route per request and caches nothing. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). Because the v1 selector is a synchronous map lookup, recomputing per request is cheap and needs no cache, and an in-place change to the subject's identity is picked up on the next request with no staleness. A selector that consults a network source could not afford a call per RPC and would need to cache the route for the life of the subject; that path, and its cache-invalidation contract, is deferred (see [Future work](#future-work)).
+The router resolves the route per request and caches nothing. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). Because the built-in selector is a synchronous map lookup, recomputing per request is cheap and needs no cache, and an in-place change to the subject's identity is picked up on the next request with no staleness. A selector that consults a network source could not afford a call per RPC and would need to cache the route for the life of the subject; that path, and its cache-invalidation contract, is deferred (see [Future work](#future-work)).
 
 #### Subject changes mid-connection
 
 The router remembers the route currently in use on a connection (the route it last forwarded to). On each request it calls the selector for the current subject and compares:
 
-* **Same route** — forward as normal. This covers the overwhelmingly common cases: the subject is unchanged, or reauthentication renewed the same identity, or a claim changed in a way that does not alter the mapping (v1 maps on the `User` principal name, so only a change to that name can change the route).
+* **Same route** — forward as normal. This covers the overwhelmingly common cases: the subject is unchanged, or reauthentication renewed the same identity, or a claim changed in a way that does not alter the mapping (the built-in selector maps on the `User` principal name, so only a change to that name can change the route).
 * **Different route** — the resolved route no longer matches the route the connection has been using. The router closes the connection fail-closed with a clear error rather than re-routing live.
 
 The router does not follow a route change live because the connection carries state that is specific to the cluster it has been talking to: virtual node IDs the client cached from `METADATA`, in-flight requests, and any consumer-group, transaction, or fetch-session state on that cluster. None of this can be coherently migrated to a different cluster mid-stream. Closing the connection discards that state cleanly; the client reconnects, renegotiates under its new identity, and is routed to the cluster its new identity maps to. This keeps the single-cluster-per-connection guarantee intact and ensures an identity change (including a privilege reduction) takes effect promptly rather than being ignored for the life of the connection.
@@ -274,7 +274,7 @@ The router makes routing decisions from `authenticatedSubject()`. That subject i
 * **Client mTLS**, which establishes the subject at the TLS handshake, before any Kafka request.
 * **SASL termination** (proposal [124][proposal-124]), which establishes the subject at the proxy and rejects unauthenticated traffic.
 
-SASL passthrough is out of scope. A passthrough-inferred identity is asserted by the backend rather than verified by the proxy, and does not cover all mechanisms, so the router rejects SASL frames rather than routing on an unverified subject (see [Future work](#future-work)). The router does not enforce which authentication component is present; that composition is the administrator's responsibility, consistent with the SASL placement rules in proposal [070][proposal-070].
+SASL passthrough (proposal [004][proposal-004]) is out of scope. A passthrough-inferred identity is asserted by the backend rather than verified by the proxy, and does not cover all mechanisms, so the router rejects SASL frames rather than routing on an unverified subject (see [Future work](#future-work)). The router does not enforce which authentication component is present; that composition is the administrator's responsibility, consistent with the SASL placement rules in proposal [070][proposal-070].
 
 ### Fail-closed by default
 
@@ -289,7 +289,7 @@ A mid-connection identity change is also handled fail-closed. If reauthenticatio
 
 ### Routing isolation is not access control
 
-The router guarantees that a subject's traffic reaches exactly one cluster. It does not authorise operations within that cluster. Authorisation remains the authority of the route's configuration: backend broker ACLs, or an Authorization Filter configured on that branch of the DAG. A client routed to `cluster-a` still needs permission there to produce to or consume from its topics. Admins must not treat subject routing as a substitute for that authorisation. It is a routing and isolation control, complementary to, not a replacement for, authorisation.
+The router guarantees that a subject's traffic reaches exactly one cluster. It does not authorise operations within that cluster. Authorisation remains the authority of the route's configuration: backend broker ACLs, or an [Authorization Filter][proposal-009] configured on that branch of the DAG. A client routed to `cluster-a` still needs permission there to produce to or consume from its topics. Admins must not treat subject routing as a substitute for that authorisation. It is a routing and isolation control, complementary to, not a replacement for, authorisation.
 
 This distinction matters because the router forwards requests verbatim. It does not filter which topics, groups, or operations a subject may use within its cluster; it only decides which cluster. Where finer control is required, combine subject routing with per-route authorisation filters or broker ACLs.
 
@@ -355,10 +355,14 @@ Following the project logging rules, the router logs the authenticated subject u
 * **Operator CRD support** for declaring subject routers and their mappings.
 * **Asynchronous route selection.** Relax the synchronous `RouteSelector` contract so a selector can consult a network source, such as a directory or policy service. This requires the runtime to handle a request while selection is in flight (hold or reject) and a caching contract, since the proxy cannot call out on every RPC: cache the selected route for the life of the subject and re-resolve only when the subject changes. Detecting a subject change cheaply points to splitting selection into a synchronous `Principal -> Key` extraction and a `Key -> Route` mapping, caching on the extracted key, and tightening the `Principal` contract so a routing-relevant identity change arrives as a new `Subject` rather than an in-place mutation.
 * **Group/role-based selection** as an alternative `RouteSelector` to `User`-name mapping.
+* **client.id-derived subject** via a demo-only filter that publishes a `Subject` carrying a `User` principal derived from the client's `client.id`, enabling unauthenticated routing for demos and quickstarts. It would track client.id against [KIP-1313][kip-1313] (client.id sent only on the first request per connection) rather than reworking the router.
 * **Runtime fast path** that flattens a connection to a static forwarding path once its route is established (re-evaluating if the subject changes), removing per-request deserialisation for a router that only forwards.
 * **Regex or claim-based mapping** as further `RouteSelector` implementations, instead of exact name matches, for deployments with large or dynamic principal sets.
-* **SASL passthrough.** The v1 router rejects SASL frames because a passthrough-inferred identity is asserted by the backend, not verified by the proxy, and does not cover every mechanism. A later iteration could support it where the deployment accepts that routing is only as trustworthy as the inference. One shape, raised in review: a configurable `authRoute` naming the single route that carries the SASL exchange, which only suits deployments where every upstream shares the same authentication infrastructure. In that case terminating SASL (for example OAUTHBEARER) at the proxy achieves a similar effect with a verified subject, so passthrough earns its place only for mechanisms the proxy cannot terminate.
+* **SASL passthrough.** The initial router rejects SASL frames because a passthrough-inferred identity is asserted by the backend, not verified by the proxy, and does not cover every mechanism. A later iteration could support it where the deployment accepts that routing is only as trustworthy as the inference. One shape, raised in review: a configurable `authRoute` naming the single route that carries the SASL exchange, which only suits deployments where every upstream shares the same authentication infrastructure. In that case terminating SASL (for example OAUTHBEARER) at the proxy achieves a similar effect with a verified subject, so passthrough earns its place only for mechanisms the proxy cannot terminate.
 
+[proposal-004]: 004-terminology-for-authentication.md
+[proposal-009]: 009-authorizer.md
 [proposal-070]: 070-routing-api.md
 [proposal-124]: 124-sasl-termination.md
 [pr-123]: https://github.com/kroxylicious/design/pull/123
+[kip-1313]: https://cwiki.apache.org/confluence/spaces/KAFKA/pages/406624038/KIP-1313+Client+instance+ID+in+all+request+headers
