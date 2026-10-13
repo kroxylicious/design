@@ -22,9 +22,9 @@ JDK 21 is now one LTS release behind JDK 25. Newer LTS releases get garbage coll
 
 This proposal separates the *preferred runtime* (the JDK the project builds containers with and recommends to operators) from the *language level* (the bytecode target and minimum supported JDK).
 
-1. Once OpenJDK 25.0.5 reaches general availability on 20 October 2026, update the container images for `kroxylicious` and `kroxylicious-operator` to use a JDK 25 base image, and update CI workflows to build with JDK 25.
+1. Update the container images for `kroxylicious`, `kroxylicious-operator`, and `kroxylicious-admission-control` to use a JDK 25 base image, and update CI workflows to build with JDK 25. This does not need to wait for OpenJDK 25.0.5; the runtime move and PQC enablement are separable, and JDK 25.0.5 reaches the project through the normal dependency upgrade cycle once it ships.
 2. Keep `maven.compiler.release` at 21. No bytecode or language-level change. Users running Kroxylicious on bare-metal JDK 21 see no breaking change.
-3. Continue running the unit test suite against JDK 21, as happens today, so the minimum supported JDK stays verified. Do not run integration/system-tests against 21. JDK25 has all test automation ran against it.
+3. Continue running the unit test suite against JDK 21, as happens today, so the minimum supported JDK stays verified. Run integration/system tests against JDK 25 only, not JDK 21. We already pin integration tests to a specific JDK where behaviour depends on it (JDK 21 for DNS resolver behaviour); the same logic applies here. Once JDK 25.0.5 lands, verifying a PQC-enabled session (proposal #141) requires a JVM with JEP 527, so those tests can only run meaningfully on JDK 25.
 4. Document JDK 25 as the recommended runtime for production deployments, while JDK 21 remains the documented minimum.
 
 ## Affected/not affected projects
@@ -33,6 +33,7 @@ This proposal separates the *preferred runtime* (the JDK the project builds cont
 
 - `kroxylicious` — container base image, CI build JDK, documentation.
 - `kroxylicious-operator` — container base image, CI build JDK, documentation.
+- `kroxylicious-admission-control` — container base image, CI build JDK, documentation.
 
 ### Not affected
 
@@ -43,7 +44,7 @@ This proposal separates the *preferred runtime* (the JDK the project builds cont
 
 This is not a breaking change. JDK 21 remains the minimum supported and tested version, so users running Kroxylicious on bare-metal JDK 21 are unaffected. Moving the container images and CI to JDK 25 changes what the project ships and recommends, not what it requires.
 
-Container images should move to JDK 25 only once OpenJDK 25.0.5 is generally available (20 October 2026); the project should not ship containers built on a beta JDK build.
+Container images can move to a generally available JDK 25 release now; PQC support arrives separately, once OpenJDK 25.0.5 reaches the project through the normal dependency upgrade cycle.
 
 ## Rejected alternatives
 
