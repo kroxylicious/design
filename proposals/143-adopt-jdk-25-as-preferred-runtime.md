@@ -1,4 +1,4 @@
-# 000 - Adopt JDK 25 as the Preferred Runtime
+# 143 - Adopt JDK 25 as the Preferred Runtime
 
 Kroxylicious targets Java 21 as its language level and runs on JDK 21 in CI and container images, following the two-stage upgrade in [proposal 013](013-upgrade-project-jdk-to-java-21.md). This proposal suggests running Kroxylicious on JDK 25 as the preferred runtime, while keeping the Java 21 language level and JDK 21 test coverage in place for a prolonged period.
 
