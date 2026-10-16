@@ -105,13 +105,14 @@ spec:
 
 #### Route `targetRef`
 
-`targetRef` is a typed cross-namespace reference using `group`, `kind`, and `name`. Only two
-`kind` values are valid:
+`targetRef` is a typed reference using `group`, `kind`, and `name`.
+
+Only two `kind` values are valid:
 
 - `KafkaService` — leaf target, maps to a `clusterDefinition` entry in the proxy config
 - `KafkaProtocolRouter` — chains to another router, enabling nested routing DAGs
 
-A CEL validation rule in the CRD schema enforces that `targetRef.kind` is one of these two values.
+The `group` field, if specified must be 'kroxylicious.io'.
 
 #### Route `id` and node-ID mapping
 
@@ -129,7 +130,7 @@ Route `id` values MUST be:
 Implicit assignment (deriving `id` from list position) was considered and rejected; see
 [Rejected alternatives](#rejected-alternatives).
 
-Together these three constraints — non-negative, less than route count, and unique — guarantee that
+Together these three constraints — non-negative, stable, and unique — guarantee that
 `id` values form exactly the set `{0, 1, …, S-1}`, which is required for the node-ID mapping
 formula to work correctly. They are enforced by CEL validation rules on the `routes` array in the
 CRD schema:
@@ -152,7 +153,8 @@ self.routes.all(r, self.routes.filter(s, s.id == r.id).size() == 1)
 #### New field: `targetRef`
 
 A new optional field `targetRef` replaces the role of `targetKafkaServiceRef`. It accepts the same
-discriminated union as a route's `targetRef` (`KafkaService` or `KafkaProtocolRouter`):
+discriminated union as a route's `targetRef` (`KafkaService` or `KafkaProtocolRouter`). The `group`
+field, if specified must be 'kroxylicious.io'.
 
 ```yaml
 spec:
