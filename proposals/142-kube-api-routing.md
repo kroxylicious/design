@@ -137,6 +137,9 @@ formula to work correctly. They are enforced by CEL validation rules on the `rou
 CRD schema:
 
 ```
+# at least one route
+self.routes.size() >= 1
+
 # non-negative
 self.routes.all(r, r.id >= 0)
 
@@ -146,6 +149,11 @@ self.routes.all(r, r.id < self.routes.size())
 # unique within router
 self.routes.all(r, self.routes.filter(s, s.id == r.id).size() == 1)
 ```
+
+Proposal 070 describes `routes` as optional on `routerDefinition`, but in practice the proxy
+runtime rejects an empty route list with an `IllegalConfigurationException`. This proposal follows
+the implementation rather than the 070 text. If the constraint is relaxed in a future proxy
+version, removing the CEL rule is a non-breaking API change.
 
 ---
 
