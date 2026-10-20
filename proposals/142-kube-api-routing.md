@@ -465,7 +465,7 @@ reconciliation of a `KafkaProxy` must:
 | Project | Affected |
 |---|---|
 | `kroxylicious-kubernetes/kroxylicious-kubernetes-api` | Yes — new `KafkaProtocolRouter` CRD; changes to `VirtualKafkaCluster` spec |
-| `kroxylicious-kubernetes/kroxylicious-operator` | Yes — reconciler must resolve router refs, detect cycles, generate config |
+| `kroxylicious-kubernetes/kroxylicious-operator` | Yes — reconciler must resolve router refs, detect cycles, generate config; RBAC manifests must grant permissions on `kafkaprotocolrouters` |
 | `kroxylicious-kubernetes/kroxylicious-admission` | No — out of scope; see [Out of scope](#out-of-scope) |
 | `kroxylicious-api` | No — router SPI unchanged |
 | `kroxylicious-runtime` | No — `RouterDefinition`/`RouteDefinition` model unchanged |
