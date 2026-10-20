@@ -304,7 +304,7 @@ kind), the VKC MUST be marked:
 ```
 type:    ResolvedRefs
 status:  "False"
-reason:  TargetNotFound
+reason:  TransitiveReferencedResourcesNotFound
 message: "<human-readable explanation>"
 ```
 
