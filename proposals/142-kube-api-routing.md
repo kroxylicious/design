@@ -478,7 +478,9 @@ reconciliation of a `KafkaProxy` must:
    `KafkaProtocolRouter` and `KafkaService` resources
 3. Detect cycles in the resulting DAG and set conditions accordingly
 4. Generate `routerDefinitions`, `clusterDefinitions`, and the VKC `target` in the proxy config
-   from the resolved graph
+   from the resolved graph. Each reachable `KafkaProtocolRouter` produces exactly one
+   `routerDefinition`, keyed by the router's `metadata.name`, regardless of how many VKCs or
+   other routers reference it — the graph is shared, not duplicated.
 
 ## Affected/not affected projects
 
