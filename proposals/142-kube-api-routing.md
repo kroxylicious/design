@@ -100,7 +100,7 @@ spec:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | Human-readable name; used as the route name in `RouteDefinition` |
-| `id` | integer | yes | Stable zero-based identifier within this router; used in the node-ID mapping formula |
+| `id` | integer | yes | Stable zero-based identifier within this router; used in the node-ID mapping formula. Changing or removing an `id` invalidates any node-ID state held by connected clients; clients must re-bootstrap to return to a clean state. |
 | `filterRefs` | list | no | Ordered list of `KafkaProtocolFilter` references applied on this route |
 | `targetRef` | object | yes | Upstream target — either a `KafkaService` or a `KafkaProtocolRouter` |
 
