@@ -63,8 +63,9 @@ A `KafkaProtocolRouter` is a namespace-scoped resource that declares a router pl
 routes. It follows the same pattern as `KafkaProtocolFilter` (standalone, reusable, no
 `proxyRef`). Multiple VKCs in the same namespace can reference the same router.
 
-All examples in this proposal use `io.kroxylicious.proxy.router.HeaderBasedRouter` as the router
-`type`. This is a hypothetical router used for illustration only.
+All examples in this proposal use a fictitious `io.kroxylicious.proxy.router.TaggedFieldRouter` as the router
+`type`. This is for illustration only. It routes by inspecting a tagged field in the Kafka RPC request header
+(`RequestHeaderData`), pinning each connection to exactly one route through the network.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -72,9 +73,9 @@ kind: KafkaProtocolRouter
 metadata:
   name: tenant-router
 spec:
-  type: io.kroxylicious.proxy.router.HeaderBasedRouter  # passed opaquely to the proxy; resolved by the proxy runtime (FQCN or unambiguous simple name)
+  type: io.kroxylicious.proxy.router.TaggedFieldRouter  # passed opaquely to the proxy; resolved by the proxy runtime (FQCN or unambiguous simple name)
   configTemplate:                                       # router-specific config; supports secret/configmap interpolation e.g. ${secret:my-secret:key}
-    headerName: X-Tenant-Id
+    tagId: X-Tenant-Id
   routes:
     - name: tenant-a
       id: 0
@@ -365,9 +366,9 @@ kind: KafkaProtocolRouter
 metadata:
   name: region-router
 spec:
-  type: io.kroxylicious.proxy.router.HeaderBasedRouter
+  type: io.kroxylicious.proxy.router.TaggedFieldRouter
   configTemplate:
-    headerName: X-Region
+    tagId: X-Region
   routes:
     - name: us
       id: 0
@@ -388,9 +389,9 @@ kind: KafkaProtocolRouter
 metadata:
   name: tenant-router
 spec:
-  type: io.kroxylicious.proxy.router.HeaderBasedRouter
+  type: io.kroxylicious.proxy.router.TaggedFieldRouter
   configTemplate:
-    headerName: X-Tenant-Id
+    tagId: X-Tenant-Id
   routes:
     - name: tenant-a
       id: 0
@@ -563,7 +564,7 @@ spec:
     - name: euCluster
       type: KafkaServiceRef
   template:
-    type: io.kroxylicious.proxy.router.HeaderBasedRouter
+    type: io.kroxylicious.proxy.router.TaggedFieldRouter
     routes:
       - name: us
         id: 0
