@@ -257,6 +257,18 @@ back-edges. A VKC whose resolved graph contains a cycle is marked with `Accepted
 [Status conditions](#status-conditions) below) and is not deployed. This gives the user a clear,
 actionable signal at the API layer without requiring any communication from the running proxy.
 
+The trivial self-referencing case — a route whose `targetRef` names the enclosing router — can be
+caught earlier, at admission time, with a CEL rule at the object root:
+
+```
+# no route may target this router itself
+self.spec.routes.all(r,
+  !(r.targetRef.kind == 'KafkaProtocolRouter' && r.targetRef.name == self.metadata.name))
+```
+
+This prevents the most obvious cycle from entering Kubernetes at all. General multi-hop cycle
+detection still requires operator-side graph traversal as described above.
+
 ---
 
 ### Status conditions
