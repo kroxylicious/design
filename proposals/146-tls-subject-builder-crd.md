@@ -1,8 +1,8 @@
-# 000 - Configure the TLS subject builder through the Kubernetes Operator
+# 146 - Configure the TLS subject builder through the Kubernetes Operator
 
 When clients authenticate with TLS client certificates, the proxy needs rules for turning a certificate into a user identity.
 The standalone proxy supports these rules, but the Kubernetes Operator gives users no way to set them.
-This proposal adds an optional `tlsSubjectBuilder` field to the `VirtualKafkaCluster` custom resource, which the Operator passes to the proxy unchanged.
+This proposal adds an optional `tlsSubjectBuilder` field to the `VirtualKafkaCluster` custom resource, which the Operator turns into the proxy's existing subject builder configuration.
 
 ## Current situation
 
@@ -11,8 +11,9 @@ This identity is called the *subject*, and the names inside it, such as a user n
 Filters such as Authorization use the subject to decide what a client may do.
 
 For clients that authenticate with SASL, the SASL filters build the subject from the login.
+SASL subject builders are out of scope for this proposal.
 
-For clients that authenticate with a TLS client certificate, the proxy needs rules saying which part of the certificate becomes the user name.
+For clients that authenticate with a TLS client certificate, the proxy needs rules saying which part of the certificate becomes the user name. Or more generally which parts of the client certificate become which principals of the subject.
 These rules are called the *subject builder*.
 In the standalone proxy, each virtual cluster can configure one:
 
@@ -52,9 +53,10 @@ Add an optional `tlsSubjectBuilder` field to the `VirtualKafkaCluster` spec.
 It has two parts:
 
 - `type` (required): the subject builder plugin to use.
-- `config` (optional): that plugin's settings, accepted as-is.
+- `configTemplate` (optional): that plugin's settings, which may refer to values held in Kubernetes Secrets or ConfigMaps.
 
-The Operator copies the field, unchanged, into the `subjectBuilder` of the matching virtual cluster in the proxy configuration it generates.
+The Operator copies `type` into the `type` of the matching virtual cluster's `subjectBuilder` in the proxy configuration it generates.
+It resolves any references in `configTemplate` and writes the result to that `subjectBuilder`'s `config`.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -79,7 +81,7 @@ spec:
         tlsClientAuthentication: REQUIRED
   tlsSubjectBuilder:
     type: DefaultTransportSubjectBuilderService
-    config:
+    configTemplate:
       addPrincipals:
         - from: clientTlsSubject
           map:
@@ -98,18 +100,20 @@ Keeping them in the cluster resource gives users one place to read and change th
 
 ### Field shape and name
 
-`type` and `config` mirror the proxy's own `subjectBuilder`, in the same way filter resources mirror the proxy's filter configuration.
-Existing proxy documentation and examples apply directly, and custom subject builder plugins work without any change to the custom resource definition.
+`type` and `configTemplate` work the same way as on the `KafkaProtocolFilter` resource.
+Existing proxy documentation and examples for subject builders apply directly, and custom subject builder plugins work without any change to the custom resource definition.
 
-`config` holds the plugin's rules: which certificate field to read, how to turn it into a name, and what kind of principal to create.
-The Operator passes it to the proxy exactly as written.
+The built-in subject builder needs no secrets, but other subject builders may, for example one that looks up users in LDAP or Active Directory, or one that uses OAuth token introspection.
+`configTemplate` lets such values come from a Kubernetes Secret or ConfigMap instead of being written in the clear, using the same `${secret:<name>:<key>}` and `${configmap:<name>:<key>}` references as filters.
+The Operator mounts each referenced entry as a file in the proxy container and replaces the reference with the file's path, so a subject builder that needs a secret must accept it as a file.
 
 The field is named `tlsSubjectBuilder` to make clear it only applies to TLS client certificates, following the naming of the existing `tlsClientAuthentication` setting.
 
 ### Validation
 
-As with filter configuration today, the Operator doesn't check the contents of `config`.
-The proxy checks it at startup and refuses to start if it's invalid.
+As with filter configuration today, the Operator checks that any Secrets and ConfigMaps referenced in `configTemplate` exist, and reports missing ones as a condition on the `VirtualKafkaCluster`.
+It doesn't check the rest of the contents.
+The proxy checks them at startup and refuses to start if they're invalid.
 For the built-in subject builder, that includes unknown keys and badly formed rules.
 So a mistake shows up as proxy pods failing to start, with the reason in the pod logs, rather than as a condition on the custom resource.
 One proxy serves all the virtual clusters assigned to it, so a mistake in one cluster's rules stops the proxy for all of them.
@@ -141,8 +145,8 @@ This applies equally to filter configuration, so it's better handled as a separa
 **Affected:**
 
 - `kroxylicious-kubernetes-api`: new optional field on the `VirtualKafkaCluster` custom resource definition.
-- `kroxylicious-operator`: copies the field into the generated proxy configuration.
-- Operator documentation: describes the field, how it maps to the proxy's subject builder, and the behaviour when no certificate is presented or SASL is also used.
+- `kroxylicious-operator`: resolves references in `configTemplate`, mounts and watches the referenced Secrets and ConfigMaps, and writes the result into the generated proxy configuration.
+- Operator documentation: describes the field, how it maps to the proxy's subject builder, how to refer to Secrets and ConfigMaps, and the behaviour when no certificate is presented or SASL is also used.
 - Operator examples: a TLS client certificate version of the existing authorization example.
 
 **Not affected:**
@@ -189,8 +193,8 @@ This would match the proxy configuration exactly.
 It was rejected because the SASL filters already use `subjectBuilder` for something different: naming a plugin that builds subjects from SASL logins.
 On a `VirtualKafkaCluster`, the name would also suggest the field controls all client identity, when it only handles TLS certificates.
 
-### Supporting Secret substitution (`configTemplate`)
+### Plain `config` without Secret references
 
-Filter resources can pull values from Kubernetes Secrets into their configuration.
-It was rejected because the subject builder's settings contain nothing secret.
-Supporting it would mean the Operator mounting and watching Secrets for no benefit.
+The field would be passed to the proxy as written, with no references to Secrets or ConfigMaps.
+This is simpler for the Operator, and enough for the built-in subject builder, which has no secret settings.
+It was rejected because other subject builders may need credentials, and the only way to supply them would be in the clear in the custom resource.
