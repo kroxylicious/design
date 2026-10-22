@@ -94,6 +94,8 @@ spec:
 
 The operator translates this to a `proxyProtocol` block on the corresponding `VirtualClusterGateway` in the generated proxy configuration.
 
+> **Note:** Setting `mode: required` configures Kroxylicious to expect and enforce PROXY protocol headers on this gateway. It does **not** automatically configure the cloud load balancer to send them. The administrator is responsible for enabling PROXY protocol on the load balancer separately. For example, when using the AWS Load Balancer Controller, the annotation `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: proxy_protocol_v2.enabled=true` must be applied to the Kubernetes Service — this can be done via the `spec.infrastructure.annotations` field on the `KafkaProxyIngress`.
+
 ### Implementation note — port sharing under TLS/SNI
 
 When multiple gateways share a listening port and are distinguished by SNI hostname, there is a sequencing constraint: the PROXY protocol header arrives before the TLS `ClientHello`, and therefore before SNI resolution identifies which gateway is being targeted.
