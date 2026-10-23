@@ -51,9 +51,13 @@ This proposal covers only the acceptance of PROXY protocol headers from downstre
 
 ## Proposal
 
-### Plain configuration — `VirtualClusterGateway`
+### Proxy 
 
-Add an optional `proxyProtocol` block to `VirtualClusterGateway`. When absent the gateway behaves as `forbidden`. The `allowed` (auto-detect) mode is not supported.
+#### Configuration
+
+Add an optional `proxyProtocol` block to `gateway` block.
+This will specify if the gateway requires the proxy protocol to be sent or not.
+When the `proxyProtocol` block is absent or empty, the gateway behaves as `forbidden`.
 
 ```yaml
 virtualClusters:
@@ -80,7 +84,36 @@ virtualClusters:
 | `required` | Every connection must begin with a valid PROXY v1 or v2 header. Connections that do not carry the header are rejected. |
 | `forbidden` | PROXY protocol headers are not permitted. Connections that carry a PROXY header are rejected to prevent injection. This is the default when `proxyProtocol` is omitted. |
 
-### Kubernetes API — `KafkaProxyIngress`
+#### Implementation notes
+
+##### Sniffing and enforcement
+
+The initial bytes of every incoming connection arriving at the proxy will be sniffed to determine whether a PROXY protocol header is present. If a PROXY protocol header is detected, the full decoder is installed to extract the client address.
+This sniffing step happens unconditionally, before any per-gateway policy is applied.
+
+The point at which per-gateway policy can be enforced depends on whether the connection is plain or TLS:
+
+| Connection type | Enforcement point                                                                                                                                                                                                              |
+|---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| TLS (both `portIdentifiesNode` and `sniHostIdentifiesNode`) | Immediately after the TLS `ClientHello`. The PROXY header arrives before the ClientHello, so detection has already completed. The virtual cluster and gateway is known and enforcement happens before TLS negotiation proceeds. |
+| Plain (`portIdentifiesNode` only) | On the first bytes after PROXY detection — the gateway is known immediately on connect, but no data has arrived yet. Enforcement fires when the first bytes reach the pipeline after the detection has run.             |
+
+Once the virtual cluster/gateway is identified, the mode is enforced:
+
+- Gateway is `required` and a header was received → accepted.
+- Gateway is `required` and no header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_missing`.
+- Gateway is `forbidden` and no header was received → accepted (normal path).
+- Gateway is `forbidden` and a header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_forbidden`.
+
+##### PROXY protocol v2 LOCAL command
+
+PROXY protocol v2 defines two commands: `PROXY` (a normal proxied connection carrying real client address information) and `LOCAL` (a connection initiated directly by the load balancer itself, typically for health checks). A `LOCAL` connection carries the v2 magic bytes and so will be detected and decoded by the sniff handler, but its source and destination addresses are meaningless — the PROXY protocol specification states that receivers must accept the connection and use the real TCP connection endpoints instead.
+
+When a `LOCAL` command connection arrives, the proxy logs this at WARN level. This is intended to help the administrator identify misconfigured load balancer health checks: if a `LOCAL` connection appears on a Kafka port, it indicates the load balancer is health checking that port directly rather than using the proxy's HTTP management endpoint, which is the recommended target for health checks.
+
+The connection is otherwise accepted in accordance with the specification. As the load balancer will send HTTP rather than a Kafka RPC, the proxy will treat the subsequent data as a failed TLS negotiation or an invalid Kafka RPC and close the connection, as it does today. Adding a metric for this type of connection error is out of scope for this proposal.
+
+### Kubernetes API
 
 Add an optional `proxyProtocol` block under `spec.loadBalancer` in the `KafkaProxyIngress` CRD. The field is placed here because cloud load balancers are the primary consumers of PROXY protocol in Kubernetes (see [Rejected alternatives](#rejected-alternatives) for why `clusterIP` and `openShiftRoute` are excluded).
 
@@ -97,22 +130,13 @@ spec:
       mode: required
 ```
 
-The operator translates this to a `proxyProtocol` block on the corresponding `VirtualClusterGateway` in the generated proxy configuration.
+The operator translates this to a `proxyProtocol` block on the corresponding `gateway` in the generated proxy configuration.
 
-> **Note:** Setting `mode: required` configures Kroxylicious to expect and enforce PROXY protocol headers on this gateway. It does **not** automatically configure the cloud load balancer to send them. The administrator is responsible for enabling PROXY protocol on the load balancer separately. For example, when using the AWS Load Balancer Controller, the annotation `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: proxy_protocol_v2.enabled=true` must be applied to the Kubernetes Service — this can be done via the `spec.infrastructure.annotations` field on the `KafkaProxyIngress`.
+> **Note:** Setting `mode: required` configures Kroxylicious to expect and enforce PROXY protocol headers on this gateway.
+> It does **not** automatically configure the cloud load balancer to send them.
+> The administrator is responsible for enabling PROXY protocol on the load balancer separately.
+> For example, when using the AWS Load Balancer Controller, the annotation `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: proxy_protocol_v2.enabled=true` must be applied to the Kubernetes Service — this can be done via the `spec.infrastructure.annotations` field on the `KafkaProxyIngress`.
 
-### Implementation note — port sharing under TLS/SNI
-
-When multiple gateways share a listening port and are distinguished by SNI hostname, there is a sequencing constraint: the PROXY protocol header arrives before the TLS `ClientHello`, and therefore before SNI resolution identifies which gateway is being targeted.
-
-The proxy will resolve this by operating speculatively at the port level: if any gateway bound to a port has `mode: required`, the proxy will attempt to decode a PROXY header on that port. Once SNI resolution has identified the gateway, the per-gateway mode is enforced:
-
-- Gateway is `required` and a header was received → accepted.
-- Gateway is `required` and no header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_missing`.
-- Gateway is `forbidden` and no header was received → accepted (normal path).
-- Gateway is `forbidden` and a header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_forbidden`.
-
-This is an implementation detail. The user-visible API remains binary: `required` or `forbidden`, per gateway.
 
 ### Migration from the global `proxyProtocol` field
 
