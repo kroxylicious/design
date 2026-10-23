@@ -53,7 +53,7 @@ This proposal covers only the acceptance of PROXY protocol headers from downstre
 
 ### Plain configuration — `VirtualClusterGateway`
 
-Add an optional `proxyProtocol` block to `VirtualClusterGateway`. When absent the gateway behaves as `disabled`. The `allowed` (auto-detect) mode is not supported.
+Add an optional `proxyProtocol` block to `VirtualClusterGateway`. When absent the gateway behaves as `forbidden`. The `allowed` (auto-detect) mode is not supported.
 
 ```yaml
 virtualClusters:
@@ -70,7 +70,7 @@ virtualClusters:
       - name: internal
         portIdentifiesNode:
           # ... port config ...
-        # no proxyProtocol block — defaults to disabled
+        # no proxyProtocol block — defaults to forbidden
 ```
 
 **Mode semantics:**
@@ -78,7 +78,7 @@ virtualClusters:
 | Mode | Behaviour |
 |------|-----------|
 | `required` | Every connection must begin with a valid PROXY v1 or v2 header. Connections that do not carry the header are rejected. |
-| `disabled` | No PROXY protocol handling. Connections that carry a PROXY header are rejected to prevent injection. This is the default when `proxyProtocol` is omitted. |
+| `forbidden` | PROXY protocol headers are not permitted. Connections that carry a PROXY header are rejected to prevent injection. This is the default when `proxyProtocol` is omitted. |
 
 ### Kubernetes API — `KafkaProxyIngress`
 
@@ -109,10 +109,10 @@ The proxy will resolve this by operating speculatively at the port level: if any
 
 - Gateway is `required` and a header was received → accepted.
 - Gateway is `required` and no header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_missing`.
-- Gateway is `disabled` and no header was received → accepted (normal path).
-- Gateway is `disabled` and a header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_unexpected`.
+- Gateway is `forbidden` and no header was received → accepted (normal path).
+- Gateway is `forbidden` and a header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_forbidden`.
 
-This is an implementation detail. The user-visible API remains binary: `required` or `disabled`, per gateway.
+This is an implementation detail. The user-visible API remains binary: `required` or `forbidden`, per gateway.
 
 ### Migration from the global `proxyProtocol` field
 
@@ -135,8 +135,8 @@ The `allowed` mode present in the legacy global field is also ignored when encou
 
 - The existing global `proxyProtocol` field is deprecated and ignored. This is a **behavioural breaking change** for any deployment that relied on it; those deployments must migrate to per-gateway configuration.
 - The `allowed` mode is removed. Any configuration using it falls back to the deprecation behaviour above (ignored, warned).
-- The per-gateway `proxyProtocol` field is new and additive; existing configurations without it continue to work with `disabled` semantics.
-- The `KafkaProxyIngress` CRD change is additive (new optional field under `spec.loadBalancer`). Existing resources without the field retain `disabled` behaviour.
+- The per-gateway `proxyProtocol` field is new and additive; existing configurations without it continue to work with `forbidden` semantics.
+- The `KafkaProxyIngress` CRD change is additive (new optional field under `spec.loadBalancer`). Existing resources without the field retain `forbidden` behaviour.
 
 ## Rejected alternatives
 
