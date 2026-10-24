@@ -17,6 +17,8 @@ The Kubernetes `KafkaProxyIngress` CRD has no equivalent field; there is no way 
 
 The proxy already decodes PROXY protocol headers from the wire when the mode is `required` or `allowed`, but currently makes **no programmatic use** of the decoded information — it is discarded. [Proposal 139](https://github.com/kroxylicious/design/blob/main/proposals/139-expose-client-address-to-filters.md) (recently approved, not yet implemented) will change this by exposing the client address to filters via `FilterContext`.
 
+> **Implementation order:** This proposal must be implemented before Proposal 139. Once 139 exposes the client address to filters, the existing `allowed` mode would allow any client to forge its apparent origin by injecting a PROXY header. Removing `allowed` and enforcing per-gateway trust boundaries (this proposal) is a prerequisite for the address exposed by Proposal 139 to be trustworthy.
+
 ## Motivation
 
 The existing global setting is too coarse for real deployments. A virtual cluster may be accessible via more than one gateway, where each gateway has a different trust relationship with its upstream.
