@@ -142,9 +142,9 @@ The operator translates this to a `proxyProtocol` block on the corresponding `ga
 
 ### Migration from the global `proxyProtocol` field
 
-The top-level `proxyProtocol` field in the plain configuration is superseded by this proposal. When the field is present, the proxy will log a startup warning and **ignore the value**. Administrators should migrate to per-gateway configuration.
+The top-level `proxyProtocol` field in the plain configuration is superseded by this proposal. If the field is present at startup, the proxy will **fail to start** with a clear error message directing the administrator to migrate to per-gateway configuration. This fail-fast behaviour is preferable to silently ignoring the field, which would cause PROXY protocol to stop working at runtime without any indication of why.
 
-The `allowed` mode present in the legacy global field is also ignored when encountered. No equivalent is provided in the per-gateway API.
+The `allowed` mode present in the legacy global field has no equivalent in the per-gateway API and is rejected at startup for the same reason.
 
 ## Affected/not affected projects
 
@@ -159,8 +159,8 @@ The `allowed` mode present in the legacy global field is also ignored when encou
 
 ## Compatibility
 
-- The existing global `proxyProtocol` field is deprecated and ignored. This is a **behavioural breaking change** for any deployment that relied on it; those deployments must migrate to per-gateway configuration.
-- The `allowed` mode is removed. Any configuration using it falls back to the deprecation behaviour above (ignored, warned).
+- The existing global `proxyProtocol` field is removed. The proxy will fail to start if it is present. This is a **breaking change**; administrators must migrate to per-gateway configuration before upgrading.
+- The `allowed` mode is removed. The proxy will fail to start if it is present in any configuration.
 - The per-gateway `proxyProtocol` field is new and additive; existing configurations without it continue to work with `forbidden` semantics.
 - The `KafkaProxyIngress` CRD change is additive (new optional field under `spec.loadBalancer`). Existing resources without the field retain `forbidden` behaviour.
 
