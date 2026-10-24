@@ -21,6 +21,11 @@ The proxy already decodes PROXY protocol headers from the wire when the mode is 
 
 The existing global setting is too coarse for real deployments. A virtual cluster may be accessible via more than one gateway, where each gateway has a different trust relationship with its upstream.
 
+Accepting a PROXY header means trusting the peer to tell you the real client address. 
+That trust is per-gateway, not per-cluster: a virtual cluster can expose several gateways, one behind a load balancer that rightly sets the header and another taking direct connections from on-cluster clients whose address is already observable. 
+A single global setting forces one trust decision across all of them. 
+Worse, the allowed (auto-detect) mode makes the header optional on every gateway, so an untrusted peer can inject its own PROXY header and claim any source address.
+
 A common scenario is a virtual cluster with two gateways:
 
 - A **LoadBalancer** gateway for external clients routed through a cloud load balancer that supports PROXY protocol v2 (e.g., AWS NLB with the [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.2/guide/service/annotations/#proxy-protocol-v2)). PROXY protocol headers arriving on this gateway are expected and trustworthy.
