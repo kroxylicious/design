@@ -39,8 +39,8 @@ The Operator generates it from custom resources, and `VirtualKafkaCluster` has n
 
 ## Motivation
 
-Users who deploy with the Operator and authenticate clients with TLS certificates can't give those clients meaningful principals.
-Without principals, Authorization rules can't refer to these clients, so this combination doesn't work today.
+Today, the proxy falls back to the default TLS subject builder with no rules, so every client is anonymous, whatever certificate it presents.
+Authorization rules can't refer to anonymous clients, so users who deploy with the Operator and authenticate clients with TLS certificates can't use Authorization.
 SASL users aren't affected.
 
 This was reported in [kroxylicious#3032](https://github.com/kroxylicious/kroxylicious/issues/3032), and it's likely to come up more often as users combine the Operator with certificate-based authentication.
@@ -140,6 +140,9 @@ The application talks to its sidecar in plain text over localhost, so there's ne
 If the Operator validated plugin configuration itself, it could report mistakes as a condition on the custom resource, and one cluster's mistake would no longer stop the proxy for the others.
 This applies equally to filter configuration, so it's better handled as a separate change covering all plugin configuration.
 
+Some users may need different rules on different ingresses of the same cluster, for example when external and internal clients use different certificate naming schemes that one set of regular expressions can't cover.
+This could be added later as a per-ingress override of the cluster-level field, without breaking existing resources, but it would also need changes to the proxy, so it's deferred until users ask for it.
+
 ## Affected/not affected projects
 
 **Affected:**
@@ -168,12 +171,6 @@ The field follows the proxy's current subject builder configuration.
 If the proxy configuration format changes (see [design #96](https://github.com/kroxylicious/design/pull/96)), the Operator would translate this field into the new format, and the field itself would only change if the new format required it.
 
 ## Rejected alternatives
-
-### A subject builder per ingress
-
-This would allow different rules on each ingress of the same cluster.
-The proxy supports only one subject builder per virtual cluster, so this would need changes to the proxy configuration as well.
-No use case for it has come up.
 
 ### A separate, shared resource
 
