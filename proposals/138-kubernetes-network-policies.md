@@ -117,9 +117,10 @@ Because this validation happens on the reconciler's own schedule rather than at 
 
 ### Policy attachment to `KafkaProxyIngress`
 
-When no `KafkaProxyIngressNetworkPolicy` targets a `KafkaProxyIngress` we will generate a default `NetworkPolicy` which allows access from anywhere.
-This default `NetworkPolicy` will have a name like `default-allow-ingress-${ingress-name}`.
-Here's an example of this kind of policy:
+When no `KafkaProxyIngressNetworkPolicy` targets a `KafkaProxyIngress`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
+The schema default, `allow`, generates a `NetworkPolicy` which allows access from anywhere, named `default-allow-ingress-${ingress-name}`.
+The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, named `default-deny-ingress-${ingress-name}`, blocking all ingress until a `KafkaProxyIngressNetworkPolicy` is attached.
+Here's an example of the `allow` case:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -348,9 +349,10 @@ spec:
 
 ### Policy attachment to `KafkaService`
 
-When no `KafkaProxyEgressNetworkPolicy` targets a `KafkaService` we will generate a default `NetworkPolicy` which allows access to anywhere.
-This default `NetworkPolicy` will have a name like `default-allow-egress-${kafka-service-name}`.
-Here's an example of this kind of policy:
+When no `KafkaProxyEgressNetworkPolicy` targets a `KafkaService`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
+The schema default, `allow`, generates a `NetworkPolicy` which allows access to anywhere, named `default-allow-egress-${kafka-service-name}`.
+The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, named `default-deny-egress-${kafka-service-name}`, blocking all egress until a `KafkaProxyEgressNetworkPolicy` is attached.
+Here's an example of the `allow` case:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -529,9 +531,9 @@ It is common for filters, or their plugins, to require network egress.
 It's also not forbidden for filters to require network ingress.
 In the most general case, a filter or its plugin would require rules for both egress and ingress — in which case the filter is targeted by one `KafkaProxyIngressNetworkPolicy` and one `KafkaProxyEgressNetworkPolicy`, each generating its own `NetworkPolicy`.
 
-When no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a `KafkaProtocolFilter`, the `NetworkPolicy` generated for the missing direction(s) depends on `KafkaProxyOperatorConfig.spec.resourceGeneration[].options.filterDefaultPolicy` (see [`filterDefaultPolicy`](#filterdefaultpolicy) below).
-Unlike `KafkaProxyIngress` and `KafkaService` — which always need *some* access just to function, so always default to allow — a `KafkaProtocolFilter` may need no network access at all, so whether it's safe to default to allow-all is a real question, not a given.
-The default value, `allow`, generates a `NetworkPolicy` which allows access to/from anywhere, named `default-allow-ingress-filter-${kafka-filter-name}`/`default-allow-egress-filter-${kafka-filter-name}`, matching the pattern used elsewhere in this proposal.
+When no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a `KafkaProtocolFilter`, what gets generated for the missing direction(s) depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below), the same mechanism used for `KafkaProxyIngress` and `KafkaService` above.
+A `KafkaProtocolFilter` may need no network access at all, unlike `KafkaProxyIngress`/`KafkaService` which always need *some* access just to function — but the same `allow`/`deny` choice, and the same reasoning, applies to all three.
+The schema default, `allow`, generates a `NetworkPolicy` which allows access to/from anywhere, named `default-allow-ingress-filter-${kafka-filter-name}`/`default-allow-egress-filter-${kafka-filter-name}`, matching the pattern used elsewhere in this proposal.
 The alternative, `deny`, generates a `NetworkPolicy` with the matching `policyTypes` entry but no rules at all (e.g. `ingress: []`), named `default-deny-ingress-filter-${kafka-filter-name}`/`default-deny-egress-filter-${kafka-filter-name}` — Kubernetes' own `NetworkPolicy` semantics mean a `Pod` selected by a policy of a given type with no matching rule denies all traffic of that type, so this blocks the direction entirely until a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` is attached (whose rules are additive with this baseline, per the additive semantics described above).
 
 When a `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` targets a given `KafkaProtocolFilter`, a `NetworkPolicy` will be generated for each, in the same way as for `KafkaProxyIngress` and `KafkaService` above.
@@ -624,20 +626,30 @@ spec:
     kind: NetworkPolicy
     options: 
       generation: enabled|disabled
-      filterDefaultPolicy: allow|deny
   policyAttachment: 
     policyTarget: 
       - group: kroxylicious.io
-        kinds: 
-          - KafkaProxyIngress
-          - KafkaService
-          - KafkaProtocolFilter
-    requiredAttachments: 
+        kind: KafkaProxyIngress
+        permittedAttachments:
+          - group: kroxylicious.io
+            kind: KafkaProxyIngressNetworkPolicy
+            whenAbsent: allow|deny
       - group: kroxylicious.io
-        kind: KafkaProxyIngressNetworkPolicy
+        kind: KafkaService
+        permittedAttachments:
+          - group: kroxylicious.io
+            kind: KafkaProxyEgressNetworkPolicy
+            whenAbsent: allow|deny
       - group: kroxylicious.io
-        kind: KafkaProxyEgressNetworkPolicy
-    # also prohibitedAttachments and permittedAttachments
+        kind: KafkaProtocolFilter
+        requiredAttachments:
+          - group: kroxylicious.io
+            kind: KafkaProxyEgressNetworkPolicy
+        permittedAttachments:
+          - group: kroxylicious.io
+            kind: KafkaProxyIngressNetworkPolicy
+            whenAbsent: allow|deny
+    # also prohibitedAttachments
 ```
 
 The operator `Deployment` itself will support a `CONFIG_NAME` env var which allows to select the `KafkaProxyOperatorConfig` to be used by that operator instance.
@@ -664,17 +676,6 @@ The options for `generation` are as follows:
 
 The default value for `generation` for `NetworkPolicy` will be `enabled`. 
 
-#### `filterDefaultPolicy`
-
-This controls what gets generated for a `KafkaProtocolFilter` when no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets it, as described under [Policy attachment to `KafkaProtocolFilter`](#policy-attachment-to-kafkaprotocolfilter) above.
-It does not affect `KafkaProxyIngress` or `KafkaService`, which always default to `allow` since they need some access just to function.
-
-The schema default is `allow`, so that upgrading a cluster already running this operator never silently cuts off a filter's access it was previously relying on.
-A fresh, net-new install should not have to live with that default indefinitely, though, so the operator applies one piece of first-run logic: on startup, if no `KafkaProxyOperatorConfig` named `default` exists *and* no `KafkaProxy` or `KafkaProtocolFilter` resources exist anywhere in the cluster either, the operator creates one with `filterDefaultPolicy: deny`, giving new installations a secure default with no configuration required. If any such resources already exist, the operator does not auto-create a config, and the `allow` default continues to apply until an administrator explicitly opts in to `deny`.
-
-This heuristic lives entirely in the operator itself, rather than in any install-time tooling, so it behaves identically regardless of how the operator is installed (OLM, via any catalog, Helm, or raw manifests).
-It has to: `KafkaProxyOperatorConfig` is a brand-new CRD, so its absence looks identical on a genuinely fresh install and on an existing deployment upgrading to a version with this feature — neither OLM's `ClusterServiceVersion` nor most other install mechanisms can tell those two cases apart from that signal alone, since nothing before this feature shipped a `KafkaProxyOperatorConfig` either way. The one failure mode of this heuristic — an existing-but-never-used install getting classified as "fresh" — is harmless, since there's no existing filter access to break in that case anyway.
-
 #### `policyAttachment`
 
 `NetworkPolicy` is a `Pod`-level control for network access.
@@ -685,16 +686,29 @@ With the APIs as described so far that filter can get a free ride from the allow
 It would function correctly without any `KafkaProxyEgressNetworkPolicy` targeting it.
 It would be better if the declarative APIs reflected the true situation, with an explicit `KafkaProxyEgressNetworkPolicy` targeting the `KafkaProtocolFilter`.
 
-`policyAttachment` allows the proxy admin to require that Kroxylicious CRs of certain kinds have policy attachments of certain other kinds.
-This could be used to make the operator reject any `KafkaProtocolFilter` which lacked a `KafkaProxyEgressNetworkPolicy` targeting that filter.
-The owner of the filter would need to write a `KafkaProxyEgressNetworkPolicy`.
+`policyAttachment.policyTarget` lists, per targeted kind, which attachment kinds are required, permitted, or prohibited:
 
+* `requiredAttachments`: List the attachment kinds which **must** be present. The target is rejected (`Accepted: False`) if a policy of that kind is missing.
+* `permittedAttachments`: List the attachment kinds which **may** be present, each with a `whenAbsent: allow|deny` setting controlling what's generated if no policy of that kind targets the resource. The target is never rejected for this policy kind being absent.
+* `prohibitedAttachments`: List the attachment kinds which **must not** be present. The target is rejected (`Accepted: False`) if a policy of that kind is attached.
+
+`requiredAttachments` can be used to make the operator reject any `KafkaProtocolFilter` which lacked a `KafkaProxyEgressNetworkPolicy` targeting that filter, as in the example above.
+The owner of the filter would need to write a `KafkaProxyEgressNetworkPolicy`.
 It would still be possible for the owner of the filter to write an _incorrect_ `KafkaProxyEgressNetworkPolicy`, but that is something which might get caught during review.
 Without `policyAttachment` it is more likely a review might overlook the incorrectly declared network access, simply because it was omitted.
 
-* `requiredAttachments`: List the policies which **must** be attached. The `policyTarget` will be rejected if a policy of that kind is missing.
-* `permittedAttachments`: List the policies which **may** be attached. The `policyTarget` will not be rejected whether or not a policy of that kind is exists.
-* `prohibitedAttachments`: List the policies which **must not** be attached. The `policyTarget` will be rejected if a policy of that kind is present.
+`permittedAttachments[].whenAbsent` is the mechanism behind the `allow`/`deny` choice described for `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` earlier in this proposal — it isn't a separate setting, just this value on the relevant `permittedAttachments` entry.
+`allow` is the schema default, so that upgrading a cluster already running this operator never silently cuts off access a target was previously relying on.
+A fresh, net-new install shouldn't have to live with that default indefinitely, though, so the operator applies one piece of first-run logic: on startup, if no `KafkaProxyOperatorConfig` named `default` exists *and* no `KafkaProxy` resources exist anywhere in the cluster either, the operator creates one setting `whenAbsent: deny` on every `permittedAttachments` entry, giving a genuinely fresh install a secure default with no configuration required.
+If any `KafkaProxy` already exists, the operator does not auto-create a config, and `allow` continues to apply until an administrator explicitly opts in to `deny`.
+(Checking for an existing `KafkaProxy` specifically is sufficient, since `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` are all meaningless without one.)
+
+This heuristic lives entirely in the operator itself, rather than in any install-time tooling, so it behaves identically regardless of how the operator is installed (OLM, via any catalog, Helm, or raw manifests).
+It has to: `KafkaProxyOperatorConfig` is a brand-new CRD, so its absence looks identical on a genuinely fresh install and on an existing deployment upgrading to a version with this feature — neither OLM's `ClusterServiceVersion` nor most other install mechanisms can tell those two cases apart from that signal alone. The one failure mode of this heuristic — an existing-but-never-used install getting classified as "fresh" — is harmless, since there's nothing deployed yet to break in that case either way.
+
+When `whenAbsent: deny` applies and no matching policy is attached, the target is given `Accepted: False` with a reason identifying the missing policy — the same treatment as a `requiredAttachments` violation, since the resource genuinely isn't passing traffic in that direction and that should be visible rather than silent. This also means it propagates to dependents the same way an existing `ResolvedRefs`/`Accepted` failure already does: a `KafkaProxyIngress` left with no working ingress rule blocks anything that references it, just as it would if its own `KafkaProxy` reference couldn't be resolved.
+
+Because a `deny`-by-default fresh install genuinely won't pass traffic until the necessary `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` CRs exist, any quickstart, example manifest, or getting-started documentation that stands up a `KafkaProxy` needs to be reviewed and updated to include them (or otherwise target an installation whose `KafkaProxyOperatorConfig` sets `whenAbsent: allow`). Without that, a new user following it will get a proxy that clearly reports why it isn't working, but still doesn't work out of the box.
 
 A use case for `prohibitedAttachments` is where `NetworkPolicy` resource generation is `disabled`. 
 For example perhaps the operating organization's processes require that `NetworkPolicies` are maintained manually. 
@@ -721,7 +735,7 @@ This affects the `kroxylicious/kroxylicious` repo.
 The proposed changes are backwards compatible, because the `NetworkPolicies` generated in the absence of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` are default allow.
 If, due to a bug, the generated policies prevented connections, the user would be able to work around it by setting `KafkaProxyOperatorConfig.spec.generation: disabled`.
 
-This holds even for `KafkaProtocolFilter`'s `filterDefaultPolicy` (see [`filterDefaultPolicy`](#filterdefaultpolicy)), despite its schema default of `allow` being considered insufficiently secure for new installs: an existing deployment upgrading to a version with this feature keeps `allow` unless an administrator opts in to `deny`, while the operator's first-run heuristic gives a genuinely fresh install `deny` with no configuration required. Compatibility is preserved by detecting which situation applies at runtime, rather than by picking one default for everyone.
+This holds even for the `allow`/`deny` choice on `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` (`policyAttachment.policyTarget[].permittedAttachments[].whenAbsent`, see [`policyAttachment`](#policyattachment)), despite its schema default of `allow` being considered insufficiently secure for new installs: an existing deployment upgrading to a version with this feature keeps `allow` unless an administrator opts in to `deny`, while the operator's first-run heuristic gives a genuinely fresh install `deny` with no configuration required. Compatibility is preserved by detecting which situation applies at runtime, rather than by picking one default for everyone.
 
 ## Rejected alternatives
 
@@ -768,4 +782,4 @@ This holds even for `KafkaProtocolFilter`'s `filterDefaultPolicy` (see [`filterD
 * "Seed a `deny`-default `KafkaProxyOperatorConfig` via install-time tooling (an OLM `ClusterServiceVersion` `initialization-resource`/`alm-examples` annotation, a Helm hook, or a bundled manifest), rather than having the operator decide at runtime."
     - `KafkaProxyOperatorConfig` is a brand-new CRD, so the CR is absent both on a genuinely fresh install and on an existing deployment upgrading to a version with this feature — any "create this resource if it's absent" mechanism at the install-tooling layer cannot distinguish those two cases from that signal alone.
     - Helm does have `pre-install`/`post-install` hooks that fire only on `helm install`, not `helm upgrade`, which could work for Helm specifically, but OLM's `ClusterServiceVersion` has no equivalent "only on first install" concept, and this operator needs to support both. Relying on install-tooling would therefore behave inconsistently across install mechanisms, or not at all for OLM-based installs (OpenShift's embedded OperatorHub included, since it uses the same CSV mechanics as upstream OLM regardless of catalog source).
-    - Deciding this in the operator itself, based on whether any `KafkaProxy`/`KafkaProtocolFilter` resources already exist, works uniformly no matter how the operator was installed.
+    - Deciding this in the operator itself, based on whether any `KafkaProxy` resources already exist, works uniformly no matter how the operator was installed.
