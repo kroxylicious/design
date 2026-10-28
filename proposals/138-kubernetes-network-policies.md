@@ -529,9 +529,10 @@ It is common for filters, or their plugins, to require network egress.
 It's also not forbidden for filters to require network ingress.
 In the most general case, a filter or its plugin would require rules for both egress and ingress — in which case the filter is targeted by one `KafkaProxyIngressNetworkPolicy` and one `KafkaProxyEgressNetworkPolicy`, each generating its own `NetworkPolicy`.
 
-When no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a `KafkaProtocolFilter` we will generate a default `NetworkPolicy` for the missing direction(s), such as we saw above, which allows access to and/or from anywhere.
-These default `NetworkPolicy` resources will have names like `default-allow-ingress-filter-${kafka-filter-name}` and `default-allow-egress-filter-${kafka-filter-name}`.
-**TODO** this would be, without policies, lots of access — is that right/defensible?
+When no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a `KafkaProtocolFilter`, the `NetworkPolicy` generated for the missing direction(s) depends on `KafkaProxyOperatorConfig.spec.resourceGeneration[].options.filterDefaultPolicy` (see [`filterDefaultPolicy`](#filterdefaultpolicy) below).
+Unlike `KafkaProxyIngress` and `KafkaService` — which always need *some* access just to function, so always default to allow — a `KafkaProtocolFilter` may need no network access at all, so whether it's safe to default to allow-all is a real question, not a given.
+The default value, `allow`, generates a `NetworkPolicy` which allows access to/from anywhere, named `default-allow-ingress-filter-${kafka-filter-name}`/`default-allow-egress-filter-${kafka-filter-name}`, matching the pattern used elsewhere in this proposal.
+The alternative, `deny`, generates a `NetworkPolicy` with the matching `policyTypes` entry but no rules at all (e.g. `ingress: []`), named `default-deny-ingress-filter-${kafka-filter-name}`/`default-deny-egress-filter-${kafka-filter-name}` — Kubernetes' own `NetworkPolicy` semantics mean a `Pod` selected by a policy of a given type with no matching rule denies all traffic of that type, so this blocks the direction entirely until a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` is attached (whose rules are additive with this baseline, per the additive semantics described above).
 
 When a `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` targets a given `KafkaProtocolFilter`, a `NetworkPolicy` will be generated for each, in the same way as for `KafkaProxyIngress` and `KafkaService` above.
 The `NetworkPolicy` names will follow the patterns `allow-ingress-filter-${policy-name}` and `allow-egress-filter-${policy-name}`.
@@ -623,6 +624,7 @@ spec:
     kind: NetworkPolicy
     options: 
       generation: enabled|disabled
+      filterDefaultPolicy: allow|deny
   policyAttachment: 
     policyTarget: 
       - group: kroxylicious.io
@@ -661,6 +663,17 @@ The options for `generation` are as follows:
 * `disabled`: `NetworkPolicies` will not be generated
 
 The default value for `generation` for `NetworkPolicy` will be `enabled`. 
+
+#### `filterDefaultPolicy`
+
+This controls what gets generated for a `KafkaProtocolFilter` when no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets it, as described under [Policy attachment to `KafkaProtocolFilter`](#policy-attachment-to-kafkaprotocolfilter) above.
+It does not affect `KafkaProxyIngress` or `KafkaService`, which always default to `allow` since they need some access just to function.
+
+The schema default is `allow`, so that upgrading a cluster already running this operator never silently cuts off a filter's access it was previously relying on.
+A fresh, net-new install should not have to live with that default indefinitely, though, so the operator applies one piece of first-run logic: on startup, if no `KafkaProxyOperatorConfig` named `default` exists *and* no `KafkaProxy` or `KafkaProtocolFilter` resources exist anywhere in the cluster either, the operator creates one with `filterDefaultPolicy: deny`, giving new installations a secure default with no configuration required. If any such resources already exist, the operator does not auto-create a config, and the `allow` default continues to apply until an administrator explicitly opts in to `deny`.
+
+This heuristic lives entirely in the operator itself, rather than in any install-time tooling, so it behaves identically regardless of how the operator is installed (OLM, via any catalog, Helm, or raw manifests).
+It has to: `KafkaProxyOperatorConfig` is a brand-new CRD, so its absence looks identical on a genuinely fresh install and on an existing deployment upgrading to a version with this feature — neither OLM's `ClusterServiceVersion` nor most other install mechanisms can tell those two cases apart from that signal alone, since nothing before this feature shipped a `KafkaProxyOperatorConfig` either way. The one failure mode of this heuristic — an existing-but-never-used install getting classified as "fresh" — is harmless, since there's no existing filter access to break in that case anyway.
 
 #### `policyAttachment`
 
@@ -708,6 +721,8 @@ This affects the `kroxylicious/kroxylicious` repo.
 The proposed changes are backwards compatible, because the `NetworkPolicies` generated in the absence of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` are default allow.
 If, due to a bug, the generated policies prevented connections, the user would be able to work around it by setting `KafkaProxyOperatorConfig.spec.generation: disabled`.
 
+This holds even for `KafkaProtocolFilter`'s `filterDefaultPolicy` (see [`filterDefaultPolicy`](#filterdefaultpolicy)), despite its schema default of `allow` being considered insufficiently secure for new installs: an existing deployment upgrading to a version with this feature keeps `allow` unless an administrator opts in to `deny`, while the operator's first-run heuristic gives a genuinely fresh install `deny` with no configuration required. Compatibility is preserved by detecting which situation applies at runtime, rather than by picking one default for everyone.
+
 ## Rejected alternatives
 
 * "Use the static type information in the proxy configuration to infer the ingress and egress needs of plugins, so the user doesn't not have to declare them".
@@ -750,3 +765,7 @@ If, due to a bug, the generated policies prevented connections, the user would b
         - Kubernetes-aware editors can support writing via features like code completion and inline documentation, driven off the CRD schema.
         - Better support for structured values using YAML. For example lists are just YAML lists, rather than needing to define that the env var's value must be a comma separated list.
         - More easily modified by end users (who often don't want to customise `Deployment` env vars)
+* "Seed a `deny`-default `KafkaProxyOperatorConfig` via install-time tooling (an OLM `ClusterServiceVersion` `initialization-resource`/`alm-examples` annotation, a Helm hook, or a bundled manifest), rather than having the operator decide at runtime."
+    - `KafkaProxyOperatorConfig` is a brand-new CRD, so the CR is absent both on a genuinely fresh install and on an existing deployment upgrading to a version with this feature — any "create this resource if it's absent" mechanism at the install-tooling layer cannot distinguish those two cases from that signal alone.
+    - Helm does have `pre-install`/`post-install` hooks that fire only on `helm install`, not `helm upgrade`, which could work for Helm specifically, but OLM's `ClusterServiceVersion` has no equivalent "only on first install" concept, and this operator needs to support both. Relying on install-tooling would therefore behave inconsistently across install mechanisms, or not at all for OLM-based installs (OpenShift's embedded OperatorHub included, since it uses the same CSV mechanics as upstream OLM regardless of catalog source).
+    - Deciding this in the operator itself, based on whether any `KafkaProxy`/`KafkaProtocolFilter` resources already exist, works uniformly no matter how the operator was installed.
