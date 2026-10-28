@@ -349,9 +349,10 @@ spec:
 
 ### Policy attachment to `KafkaService`
 
-When no `KafkaProxyEgressNetworkPolicy` targets a `KafkaService`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
+When no `KafkaProxyEgressNetworkPolicy` targets a `KafkaService` using `bootstrapServers`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
 The schema default, `allow`, generates a `NetworkPolicy` which allows access to anywhere, named `default-allow-egress-${kafka-service-name}`.
 The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, named `default-deny-egress-${kafka-service-name}`, blocking all egress until a `KafkaProxyEgressNetworkPolicy` is attached.
+A `KafkaService` using `strimziKafkaRef` isn't affected by this choice — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case) below.
 Here's an example of the `allow` case:
 
 ```yaml
@@ -385,9 +386,8 @@ The `KafkaService` CR supports two ways to express a target cluster:
 
 `strimziKafkaRef` is a very special case. 
 We already know the namespace of the `Kafka` cluster, and the `Pod` labels (and hence selectors) are a published part of the Strimzi API. 
-So in this case we don't need an explicit `allow` list.
-Its contents can always be inferred from the properties of `strimziKafkaRef`.
-However, for uniformity with the rest of the API we will require a `KafkaProxyEgressNetworkPolicy` to be present in order to generate a specific `NetworkPolicy`
+So the operator can always compute the exact egress rule itself, without needing an `allow` list — or indeed any `KafkaProxyEgressNetworkPolicy` at all — from the user.
+It does so unconditionally: this is the one case in this proposal where neither `allow`-everywhere nor `deny`-everything is the right default, because a precise, correct answer is already available for free, so `policyAttachment`'s `whenAbsent` setting doesn't apply here.
 
 ```yaml
 ---
@@ -402,26 +402,15 @@ spec:
     name: my-kafka-cluster
     namespace: my-strimzi-namespace
     listenerName: my-listener
----
-# Example egress policy restricting access to the given namespaces and pods
-kind: KafkaProxyEgressNetworkPolicy
-metadata:
-  name: my-strimzi-target
-spec:
-  targetRef:
-    group: kroxylicious.io
-    kind: KafkaService
-    name: strimzi-target
-  allow: []
 ```
 
-That would generate a `NetworkPolicy` like this:
+That alone, with no `KafkaProxyEgressNetworkPolicy` at all, generates a `NetworkPolicy` named `allow-egress-${kafka-service-name}` (keyed by the `KafkaService`'s own name, since there's no policy CR to name it after):
 
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-egress-my-strimzi-target
+  name: allow-egress-strimzi-target
 spec:
   podSelector:
     matchLabels:
@@ -445,6 +434,8 @@ spec:
               strimzi.io/broker-role: "true"
 
 ```
+
+A `KafkaProxyEgressNetworkPolicy` can still be attached to a `strimziKafkaRef`-based `KafkaService` if needed — for example to grant egress to some additional destination beyond the Strimzi brokers themselves. Its rules are additive with the auto-derived rule above, per the additive semantics described earlier, rather than replacing it.
 
 #### The `bootstrapServers` case
 
@@ -697,7 +688,7 @@ The owner of the filter would need to write a `KafkaProxyEgressNetworkPolicy`.
 It would still be possible for the owner of the filter to write an _incorrect_ `KafkaProxyEgressNetworkPolicy`, but that is something which might get caught during review.
 Without `policyAttachment` it is more likely a review might overlook the incorrectly declared network access, simply because it was omitted.
 
-`permittedAttachments[].whenAbsent` is the mechanism behind the `allow`/`deny` choice described for `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` earlier in this proposal — it isn't a separate setting, just this value on the relevant `permittedAttachments` entry.
+`permittedAttachments[].whenAbsent` is the mechanism behind the `allow`/`deny` choice described for `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` earlier in this proposal — it isn't a separate setting, just this value on the relevant `permittedAttachments` entry. It has no effect on a `strimziKafkaRef`-based `KafkaService`, which always gets a precise, auto-derived rule regardless (see [the `strimziKafkaRef` case](#the-strimzikafkaref-case)).
 `allow` is the schema default, so that upgrading a cluster already running this operator never silently cuts off access a target was previously relying on.
 A fresh, net-new install shouldn't have to live with that default indefinitely, though, so the operator applies one piece of first-run logic: on startup, if no `KafkaProxyOperatorConfig` named `default` exists *and* no `KafkaProxy` resources exist anywhere in the cluster either, the operator creates one setting `whenAbsent: deny` on every `permittedAttachments` entry, giving a genuinely fresh install a secure default with no configuration required.
 If any `KafkaProxy` already exists, the operator does not auto-create a config, and `allow` continues to apply until an administrator explicitly opts in to `deny`.
