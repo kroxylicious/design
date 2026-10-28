@@ -90,6 +90,24 @@ This makes the invalid combinations possible with a single combined kind — an 
 Further, the allow values in `spec.allow` also depend on the targeted CR, as explained in later sections.
 
 Because `NetworkPolicy` rules are additive (only allowing more access) the effect of multiple `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` resources with the same target is also to widen access.
+This is a deliberate divergence from the Gateway API's direct policy attachment convention, where a target normally has at most one attached policy of a given kind; here, any number of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` resources may target the same CR, and their rules are unioned rather than one replacing another.
+
+#### Status conditions
+
+Both kinds report the same two standard condition types in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs:
+
+| Condition type | Status | Reason | Meaning |
+| --- | --- | --- | --- |
+| `ResolvedRefs` | `True` | — | `spec.targetRef` resolves to an existing CR of the expected kind, and that CR is itself fully resolved. |
+| `ResolvedRefs` | `False` | `ReferencedResourcesNotFound` | No CR named `spec.targetRef.name` of the expected kind exists in this namespace. |
+| `ResolvedRefs` | `False` | `TransitivelyReferencedResourcesNotFound` | The targeted CR exists but does not yet report `ResolvedRefs: True` itself (e.g. a targeted `KafkaProxyIngress` whose own `proxyRef` hasn't resolved). |
+| `ResolvedRefs` | `Unknown` | — | The last reconciliation attempt failed with an error before refs could be checked. |
+| `Accepted` | `True` | — | The policy is valid for its target; a `NetworkPolicy` will be generated from it. |
+| `Accepted` | `False` | `Invalid` | Either the `spec.allow` rules use the wrong peer type for the target (e.g. `ipBlock` against a `clusterIP`-mechanism `KafkaProxyIngress`, or `namespaceSelector`/`podSelector` against a `loadBalancer`/`openShiftRoute`-mechanism one), or `ResolvedRefs` is `False` — a policy whose target can't be found or hasn't resolved is never `Accepted`, regardless of how valid its own rules are. |
+| `Accepted` | `False` | `Disabled` | `NetworkPolicy` generation is disabled cluster-wide via `KafkaProxyOperatorConfig`. `ResolvedRefs` is unaffected and stays `True` in this case. |
+| `Accepted` | `False` | `ReferencedResourceNotReconciled` | The targeted CR resolves (`ResolvedRefs: True`) but hasn't itself reached `Accepted: True` yet. |
+
+The per-mechanism validation failures described in the sections below (e.g. an `ipBlock` rule against a `clusterIP` ingress) are reported as `Accepted: False` with reason `Invalid`, not as a separate condition type.
 
 ### Policy attachment to `KafkaProxyIngress`
 
