@@ -111,6 +111,8 @@ Both kinds report the same two standard condition types in `status.conditions`, 
 
 The per-mechanism validation failures described in the sections below (e.g. an `ipBlock` rule against a `clusterIP` ingress) are reported as `Accepted: False` with reason `Invalid`, not as a separate condition type.
 
+Because this validation happens on the reconciler's own schedule rather than at `kubectl apply` time, a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` can be admitted and only later found to be rejected. GitOps/CI pipelines applying these CRs should therefore wait on the `Accepted` condition explicitly, e.g. `kubectl wait --for=condition=Accepted <kind>/<name>`, rather than treating a successful `kubectl apply` as confirmation that the policy took effect.
+
 ### Policy attachment to `KafkaProxyIngress`
 
 When no `KafkaProxyIngressNetworkPolicy` targets a `KafkaProxyIngress` we will generate a default `NetworkPolicy` which allows access from anywhere.
