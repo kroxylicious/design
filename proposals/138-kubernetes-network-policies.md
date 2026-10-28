@@ -11,6 +11,7 @@ It's worth calling out some important aspects of the `NetworkPolicy` API in Kube
 * Same-kubernetes-cluster rules can be expressed in terms of namespace and pod selectors (e.g. you can say "allow connections to pods matching _this_ selector in namespaces matching _that_ selector"). 
 * `NetworkPolicy` has no direct support for expressing rules using external DNS names (e.g. there is no way to say "allow connections to `kms.example.com`").
 * Where external DNS names are used for egress, it's necessary to have a "allow egress to anywhere" `NetworkPolicy` rule.
+* Enforcement of `NetworkPolicy` depends on the cluster's CNI plugin supporting it (e.g. Calico, Cilium); some CNIs accept `NetworkPolicy` resources without enforcing them. A generated policy still has declarative/audit value on such a cluster (per the Motivation below), but it gives no actual network isolation unless the CNI enforces it.
 
 ## Motivation
 
@@ -60,10 +61,12 @@ For example, while it's fine for the Data Engineer to have control over which to
 
 Two new custom resource definitions (CRDs) will be added:
 
-| Kind | Scope | Purpose |
-| --- | --- | --- |
-| `KafkaProxyNetworkPolicy` | Namespaced | Declares the ingress/egress rules needed by a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
-| `KafkaProxyOperatorConfig` | Cluster-scoped | Configures operator-wide behaviour, including whether `NetworkPolicy` generation is enabled and which policy attachments are required. See [Operator-level opt-out](#operator-level-opt-out). |
+| Kind | Scope | Typical owner | Purpose |
+| --- | --- | --- | --- |
+| `KafkaProxyNetworkPolicy` | Namespaced | Whoever is responsible for network access in that namespace (e.g. a security or platform-per-tenant role) — not necessarily the same role that owns the `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter` it targets. | Declares the ingress/egress rules needed by a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
+| `KafkaProxyOperatorConfig` | Cluster-scoped | The cluster-admin/platform team that runs the operator itself. | Configures operator-wide behaviour, including whether `NetworkPolicy` generation is enabled and which policy attachments are required. See [Operator-level opt-out](#operator-level-opt-out). |
+
+This is the RBAC separation of concerns motivating this proposal (see above): the role that owns a proxy CR's network behaviour need not be the role that owns the rest of that CR's configuration, and the role that sets operator-wide policy need not be either of those.
 
 Users wanting to customise the generated `NetworkPolicies` will need to create suitable `KafkaProxyNetworkPolicy` CRs.
 CRs will not be needed for those willing to accept allow-all type policies.
@@ -72,6 +75,8 @@ CRs will not be needed for those willing to accept allow-all type policies.
 The basic shape of these CRs is:
 * The `spec.targetRef` references another proxy CR (i.e. a `KafkaProxyIngress`, a `KafkaService`, a `KafkaProtocolFilter`)
 * A `spec.allowIngress` or `spec.allowEgress` defines the networking requirement implied by that targeted CR, using a schema that's essentially the same as used in `NetworkPolicy`.
+
+`targetRef` only resolves within the same namespace as the `KafkaProxyNetworkPolicy` itself; there is no cross-namespace form (unlike, for example, the Gateway API's `ReferenceGrant`-mediated cross-namespace policy attachment). This keeps the ownership split described above confined to a single namespace: a `KafkaProxyNetworkPolicy` can never grant or imply network access on behalf of a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter` owned by a different namespace/tenant.
 
 Although not limited at the CRD schema level, the `targetRef`'s `group` and `kind` determine what's allowed for `allowIngress` or `allowEgress`.
 Specifically, the operator will enforce the following rules
