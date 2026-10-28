@@ -92,6 +92,8 @@ Further, the allow values in `spec.allow` also depend on the targeted CR, as exp
 Because `NetworkPolicy` rules are additive (only allowing more access) the effect of multiple `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` resources with the same target is also to widen access.
 This is a deliberate divergence from the Gateway API's direct policy attachment convention, where a target normally has at most one attached policy of a given kind; here, any number of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` resources may target the same CR, and their rules are unioned rather than one replacing another.
 
+Each generated `NetworkPolicy` is owned (via `ownerReferences`) by whichever CR caused it to be generated. A `NetworkPolicy` generated because a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a resource is owned by that policy CR, so deleting the policy CR removes only the `NetworkPolicy` it produced, leaving any other generated `NetworkPolicy` for that target untouched. A default-allow `NetworkPolicy` (generated when no policy CR targets the resource) is instead owned by the target CR itself (`KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`), since there is no policy CR to own it in that case.
+
 #### Status conditions
 
 Both kinds report the same two standard condition types in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs:
