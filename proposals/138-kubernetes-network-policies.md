@@ -58,10 +58,14 @@ For example, while it's fine for the Data Engineer to have control over which to
 
 ### New CRDs
 
+Two new custom resource definitions (CRDs) will be added:
 
+| Kind | Scope | Purpose |
+| --- | --- | --- |
+| `KafkaProxyNetworkPolicy` | Namespaced | Declares the ingress/egress rules needed by a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
+| `KafkaProxyOperatorConfig` | Cluster-scoped | Configures operator-wide behaviour, including whether `NetworkPolicy` generation is enabled and which policy attachments are required. See [Operator-level opt-out](#operator-level-opt-out). |
 
-A new custom resource definition (CRDs) will be added: `KafkaProxyNetworkPolicy`.
-Users wanting to customise the generated `NetworkPolicies` will need to create suitable CRs.
+Users wanting to customise the generated `NetworkPolicies` will need to create suitable `KafkaProxyNetworkPolicy` CRs.
 CRs will not be needed for those willing to accept allow-all type policies.
 
 `KafkaProxyNetworkPolicy` will be used for defining ingress and egress rules.
@@ -258,9 +262,7 @@ Splitting the shared `Service` using a `Service`-per-shared-CIDR-groups would be
 
 Instead it is proposed to keep the single loadbalancer `Service`.
 The operator will construct the union of the CIDRs from all `KafkaProxyNetworkPolicys` targeting any ingress sharing that proxy's SNI Service, and apply that single union to both `loadBalancerSourceRanges` and the pod-level `NetworkPolicy`.
-
-As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBloc rules from the `KafkaProxyNetworkPolicy`.
-Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster network isolation on shared load balancers semantic implied by the CR API.
+(See [Future work](#future-work) for a possible enhancement that would recover per-virtual-cluster isolation on a shared load balancer.)
 
 #### The `openShiftRoute` case
 
@@ -657,6 +659,10 @@ The operator will need to be allowed to CRUD `NetworkPolicy` resources via its d
 
 It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyNetworkPolicy` and `KafkaProxyOperatorConfig` in the "watched resources" `ClusterRole`.
 
+### Future work
+
+As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBlock rules from the `KafkaProxyNetworkPolicy`.
+Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster network isolation on shared load balancers semantic implied by the CR API (which the shared-loadbalancer `Service` CIDR union described under [the `loadBalancer` case](#the-loadbalancer-case) does not).
 
 ## Affected/not affected projects
 
