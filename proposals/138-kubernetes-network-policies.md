@@ -445,7 +445,7 @@ spec:
 Supporting it involves a number of sub-cases:
 
 * the given servers are internal IPv4 or IPv6 addresses
-* the given servers are internal DNS names (e.g. `node12.my-kafka.my-ns.svc.cluster.local`) TODO check what names strimzi actually uses
+* the given servers are internal DNS names (e.g. `my-kafka-cluster-kafka-bootstrap.my-ns.svc.cluster.local`, a Strimzi bootstrap `Service` DNS name)
 * the given servers are external IPv4 or IPv6 addresses
 * the given servers are external DNS names (e.g. `node12.kafka.example.com:9092`)
 
@@ -456,7 +456,11 @@ IP addresses in Kubernetes are very dynamic, so it's unlikely to work reliably, 
 
 ##### Internal DNS names
 
-When the bootstrap servers list is entirely compose of internal DNS names the `to` property of each `spec.allow[]` entry will be required to use `namespaceSelector` and/or `podSelector` rules.
+Strimzi's bootstrap `Service` for a listener is named `<cluster-name>-kafka-bootstrap` (or `<cluster-name>-kafka-<listener-name>-bootstrap` for a named listener), giving an internal DNS name of the form `<cluster-name>-kafka-bootstrap.<namespace>.svc.<cluster-domain>`.
+This is the form `bootstrapServers` should expect: it's derived only from the `Kafka` resource's name, so it stays stable across broker scaling and `KafkaNodePool` changes.
+Strimzi also makes individual broker pods addressable via a headless `Service` (`<cluster-name>-kafka-<broker-id>.<cluster-name>-kafka-brokers.<namespace>.svc.<cluster-domain>`), but with `KafkaNodePool`s in use the `<broker-id>` portion depends on node pool naming and can change as pools are scaled or renamed, so it's not a reliable choice for a `bootstrapServers` entry.
+
+When the bootstrap servers list is entirely composed of internal DNS names the `to` property of each `spec.allow[]` entry will be required to use `namespaceSelector` and/or `podSelector` rules.
 
 
 ```yaml
@@ -466,7 +470,7 @@ metadata:
   namespace: my-proxy-ns
   name: internal-dns
 spec:
-  bootstrapServers: my-kafka-boostrap.my-ns.svc.cluster.local:9092  ## TODO Fix this to be a cluster DNS name
+  bootstrapServers: my-kafka-cluster-kafka-bootstrap.my-ns.svc.cluster.local:9092
 ---
 # Example egress policy restricting access to the given namespaces and pods
 kind: KafkaProxyEgressNetworkPolicy
@@ -486,7 +490,7 @@ spec:
 
 ##### External DNS names and external IP addresses
 
-When the bootstrap servers list is entirely compose of external DNS names and/or external IP addresses the `to` property of each `spec.allow[]` entry will be required to use `ipBlock` rules.
+When the bootstrap servers list is entirely composed of external DNS names and/or external IP addresses the `to` property of each `spec.allow[]` entry will be required to use `ipBlock` rules.
 
 ```yaml
 ---
