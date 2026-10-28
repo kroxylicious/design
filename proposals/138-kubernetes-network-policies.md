@@ -94,6 +94,8 @@ This is a deliberate divergence from the Gateway API's direct policy attachment 
 
 Each generated `NetworkPolicy` is owned (via `ownerReferences`) by whichever CR caused it to be generated. A `NetworkPolicy` generated because a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a resource is owned by that policy CR, so deleting the policy CR removes only the `NetworkPolicy` it produced, leaving any other generated `NetworkPolicy` for that target untouched. A default-allow `NetworkPolicy` (generated when no policy CR targets the resource) is instead owned by the target CR itself (`KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`), since there is no policy CR to own it in that case.
 
+The generated `NetworkPolicy` names shown throughout this proposal are prefixed versions of a source CR's name, and could in principle exceed Kubernetes' name length limit for a sufficiently long source name. Where that happens, the operator will apply the standard Kubernetes truncate-and-hash pattern (as used for e.g. `ReplicaSet`/`ControllerRevision` names) to keep the generated name both valid and deterministic.
+
 #### Status conditions
 
 Both kinds report the same two standard condition types in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs:
