@@ -59,7 +59,8 @@ This proposal covers only the acceptance of PROXY protocol headers from downstre
 
 Add an optional `proxyProtocol` block to `gateway` block.
 This will specify if the gateway requires the proxy protocol to be sent or not.
-When the `proxyProtocol` block is absent or empty, the gateway behaves as `forbidden`.
+When the `proxyProtocol` block is absent, the gateway behaves as `forbidden`.
+If the block is present, `mode` is required — an empty block or a block without `mode` is a validation error at startup.
 
 ```yaml
 virtualClusters:
@@ -113,7 +114,7 @@ PROXY protocol v2 defines two commands: `PROXY` (a normal proxied connection car
 
 When a `LOCAL` command connection arrives, the proxy logs this at WARN level. This is intended to help the administrator identify misconfigured load balancer health checks: if a `LOCAL` connection appears on a Kafka port, it indicates the load balancer is health checking that port directly rather than using the proxy's HTTP management endpoint, which is the recommended target for health checks.
 
-The connection is otherwise accepted in accordance with the specification. As the load balancer will send HTTP rather than a Kafka RPC, the proxy will treat the subsequent data as a failed TLS negotiation or an invalid Kafka RPC and close the connection, as it does today. Adding a metric for this type of connection error is out of scope for this proposal.
+A `LOCAL` connection is subject to the same per-gateway enforcement as any other PROXY header. On a `required` gateway it passes enforcement (a PROXY header was received); on a `forbidden` gateway it is rejected with `cause=proxy_protocol_header_forbidden`. On a `required` gateway, the load balancer will send HTTP rather than a Kafka RPC after the header, so the proxy will treat the subsequent data as a failed TLS negotiation or an invalid Kafka RPC and close the connection, as it does today. Adding a metric for this type of connection error is out of scope for this proposal.
 
 ### Kubernetes API
 
