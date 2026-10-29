@@ -238,23 +238,24 @@ ipBlock:
 (This is exactly the same schema as `NetworkPolicy` supports).
 Again, the operator will reject `KafkaProxyIngressNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
 
-To enforce this correctly some changes will also be needed to the loadBalancer `Service` the operator generates.
-`Service.spec.loadBalancerSourceRanges` is a best-effort declaration of the source IPs which should be allowed through the load balance.
+`Service.spec.loadBalancerSourceRanges` is a best-effort declaration of the source IPs which should be allowed through the load balancer.
 In practice enforcement is cloud-provider-dependent, and this can be ignored. 
-We will also need to set `Service.spec.externalTrafficPolicy: Local` to preserve the client's source IP address, so that it can be enforced by the
-machinery underpinning the generated `NetworkPolicy`.
+
+For `loadBalancerSourceRanges` and the pod-level `NetworkPolicy` below to restrict access correctly, the generated `Service` also needs `externalTrafficPolicy: Local`, to preserve the client's source IP address rather than losing it to SNAT.
+`KafkaProxyIngress` already supports this via `spec.loadBalancer.service.externalTrafficPolicy` (added by [proposal #134](https://github.com/kroxylicious/design/pull/134)) — it isn't something this proposal needs to introduce.
+It is, however, a prerequisite this proposal depends on: the operator should reject a `KafkaProxyIngressNetworkPolicy` with `ipBlock` rules targeting a `loadBalancer` ingress whose `externalTrafficPolicy` isn't `Local` (`Accepted: False`), since otherwise the restriction would silently fail to match real client addresses.
 
 ```yaml
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: my-proxy-cr-my-ingress
+  name: my-loadbalancer-ingress # named after the KafkaProxyIngress — one Service per ingress, per proposal #134
 spec:
   type: LoadBalancer
   loadBalancerSourceRanges:
     - 203.0.113.0/24
-  externalTrafficPolicy: Local
+  externalTrafficPolicy: Local # from the KafkaProxyIngress's own spec.loadBalancer.service.externalTrafficPolicy (proposal #134)
   # ...
 ```
 
@@ -283,19 +284,11 @@ spec:
           port: <PORT_NUM>
 ```
 
-We currently share a single loadbalancer between all the SNI ingresses.
-Sharing amortizes the cost associated with cloud load balancers. 
-But sharing means the apparent IP range segregation given by multiple `KafkaProxyIngressNetworkPolicy` resources targeting different `KafkaProxyIngresses` would not actually be honoured. 
+Proposal #134 gives each `loadBalancer`-type `KafkaProxyIngress` its own dedicated `Service` — ingresses no longer share a single load balancer the way they once did — so a `KafkaProxyIngressNetworkPolicy`'s CIDRs apply directly to that ingress's own `Service.spec.loadBalancerSourceRanges` and pod-level `NetworkPolicy`, with no cross-ingress CIDR union to construct.
 
-Splitting the shared `Service` using a `Service`-per-shared-CIDR-groups would be possible, but has significant drawbacks:
-
-* the cost implication of using multiple services. 
-* only the cloud LB layer gets finer-grained rules
-* a pod-level `NetworkPolicy` still can't differentiate traffic once it reaches the shared port (it doesn't know which Service/LB a packet arrived through), so the `NetworkPolicy` itself would still need to allow the union of all groups' CIDRs. 
-
-Instead it is proposed to keep the single loadbalancer `Service`.
-The operator will construct the union of the CIDRs from all `KafkaProxyIngressNetworkPolicy` resources targeting any ingress sharing that proxy's SNI Service, and apply that single union to both `loadBalancerSourceRanges` and the pod-level `NetworkPolicy`.
-(See [Future work](#future-work) for a possible enhancement that would recover per-virtual-cluster isolation on a shared load balancer.)
+Sharing hasn't disappeared entirely, though: multiple `VirtualKafkaClusters` can still reference the same ingress, addressed by SNI on that ingress's one `Service` — this is what delivers the per-load-balancer cost saving proposal #134 preserves.
+A `KafkaProxyIngressNetworkPolicy` targeting that ingress applies uniformly to all of them: a pod-level `NetworkPolicy` can't differentiate traffic by the SNI hostname it arrived on, so there's no way to give one `VirtualKafkaCluster` a narrower CIDR allowlist than another if they share an ingress.
+(See [Future work](#future-work) for a possible enhancement that would recover that per-virtual-cluster isolation.)
 
 #### The `openShiftRoute` case
 
@@ -715,7 +708,7 @@ It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `Ka
 ### Future work
 
 As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBlock rules from the `KafkaProxyIngressNetworkPolicy`.
-Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster network isolation on shared load balancers semantic implied by the CR API (which the shared-loadbalancer `Service` CIDR union described under [the `loadBalancer` case](#the-loadbalancer-case) does not).
+Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster isolation that `Service`-level CIDR restriction cannot provide when multiple `VirtualKafkaClusters` share one ingress's `Service` (see [the `loadBalancer` case](#the-loadbalancer-case)).
 
 ## Affected/not affected projects
 
