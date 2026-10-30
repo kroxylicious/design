@@ -145,6 +145,8 @@ spec:
 
 The `clusterCIDRs` option allows an admin to specify the IP blocks for cluster-local addresses. 
 This is needed in order to detect and reject internal addresses for `KafkaService.spec.bootstrapServers`.
+Unlike `clusterDomain`, there is no autodetection fallback: Kubernetes offers no reliable, low-privilege way to derive pod/service CIDRs that holds across CNIs (many cloud CNIs don't populate `Node.spec.podCIDRs` at all, and reading it cluster-wide would need a `nodes` RBAC grant disproportionate to this one check).
+If `clusterCIDRs` is left unset, the internal-address check is skipped rather than enforced some other way — an admin relying on it should make sure it's actually configured.
 
 #### `resourceGeneration`
 
@@ -734,6 +736,8 @@ It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `Ka
 
 As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBlock rules from the `KafkaProxyNetworkPolicy`.
 Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster isolation that `Service`-level CIDR restriction cannot provide when multiple `VirtualKafkaClusters` share one ingress's `Service` (see [the `loadBalancer` case](#the-loadbalancer-case)).
+
+[Proposal #148](https://github.com/kroxylicious/design/pull/148) is pursuing per-gateway source-address allow/deny filtering in the proxy application itself. Should that land, `KafkaProxyOperatorConfig.spec.clusterCIDRs` would gain a second consumer: seeding a default "cluster-local only" source filter for `clusterIP`-mechanism gateways, alongside its existing use validating `KafkaService.spec.bootstrapServers`.
 
 ## Affected/not affected projects
 
