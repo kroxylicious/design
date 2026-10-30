@@ -72,44 +72,52 @@ This will permit the Data Engineer to have access to the `KafkaProtocolFilter` w
 
 ### New CRDs
 
-Three new custom resource definitions (CRDs) will be added:
+Two new custom resource definitions (CRDs) will be added:
 
 | Kind | Scope | Typical owner | Purpose |
 | --- | --- | --- | --- |
-| `KafkaProxyIngressNetworkPolicy` | Namespaced | Whoever controls the proxy's network exposure (e.g. a security or platform-per-tenant role), or the owner of a `KafkaProtocolFilter` that itself needs inbound access — not necessarily the same role that owns the `KafkaProxyIngress`/`KafkaProtocolFilter` it targets. | Declares the ingress rules needed by a `KafkaProxyIngress` or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
-| `KafkaProxyEgressNetworkPolicy` | Namespaced | Whoever declares the proxy's or a filter's outbound needs — e.g. the platform team for the proxy's egress to the real Kafka cluster (`KafkaService`), or a plugin-owning team for a filter's own egress. This kind's RBAC surface is shared between those two cases; see [Rejected alternatives](#rejected-alternatives) for the trade-off against splitting further. | Declares the egress rules needed by a `KafkaService` or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
+| `KafkaProxyNetworkPolicy` | Namespaced | Whoever declares the proxy's or a filter's network needs — e.g. a security/platform-per-tenant role for the proxy's ingress exposure and its egress to the real Kafka cluster (`KafkaService`), or a plugin-owning team for a filter's own ingress and/or egress. This kind's RBAC surface is shared across all of those cases; see [Rejected alternatives](#rejected-alternatives) for the trade-off against splitting it (by direction, or by target kind), and for a note on using a policy engine for finer-than-kind-level separation. | Declares ingress and/or egress rules needed by a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`, using the policy attachment pattern. Described in this section. |
 | `KafkaProxyOperatorConfig` | Cluster-scoped | The cluster-admin/platform team that runs the operator itself. | Configures operator-wide behaviour, including whether `NetworkPolicy` generation is enabled and which policy attachments are required. See [Operator-level opt-out](#operator-level-opt-out). |
 
 This is the RBAC separation of concerns motivating this proposal (see above): the role that owns a proxy CR's network behaviour need not be the role that owns the rest of that CR's configuration, and the role that sets operator-wide policy need not be either of those.
-Splitting network policy by direction, rather than using one combined kind, further means the role that controls the proxy's ingress exposure need not be the role that declares a filter's own egress need — see [Rejected alternatives](#rejected-alternatives) for the trade-offs against a single combined kind or against splitting further by target kind.
+A single `KafkaProxyNetworkPolicy` kind does not go further than that: a role trusted to add one filter's own egress rule can, via that same RBAC grant, also add an allow-from-anywhere ingress rule against the shared `KafkaProxyIngress`, or an egress rule against the shared `KafkaService`. An earlier revision of this proposal split ingress and egress into two kinds specifically to prevent that; it was reverted because, on inspection, the separation it bought was narrower than it looked and not worth its extra CRD/controller/RBAC surface — see [Rejected alternatives](#rejected-alternatives) for the full reasoning.
+Organizations that need finer-than-kind-level separation — e.g. restricting which fields of a `KafkaProxyNetworkPolicy` a given role may set, or which `targetRef.kind` values they may use — should enforce that with a policy engine such as Kyverno, OPA Gatekeeper, or a `ValidatingAdmissionPolicy` bound to the requester's identity. Kubernetes' native RBAC has no unit of control finer than a kind (short of `resourceNames`, which doesn't scale for a CR that tenants create dynamically); getting finer than that is a policy-engine problem, not a CRD-design problem.
 
-Users wanting to customise the generated `NetworkPolicies` will need to create suitable `KafkaProxyIngressNetworkPolicy` and/or `KafkaProxyEgressNetworkPolicy` CRs.
+Users wanting to customise the generated `NetworkPolicies` will need to create suitable `KafkaProxyNetworkPolicy` CRs.
 CRs will not be needed for those willing to accept allow-all type NP.
 
-`KafkaProxyIngressNetworkPolicy` (KPINP) and `KafkaProxyEgressNetworkPolicy` (KPENP) are used for defining ingress and egress rules respectively.
-The basic shape of each is the same:
-* The `spec.targetRef` references another proxy CR. A `KafkaProxyIngressNetworkPolicy` may target a `KafkaProxyIngress` or a `KafkaProtocolFilter`; a `KafkaProxyEgressNetworkPolicy` may target a `KafkaService` or a `KafkaProtocolFilter`.
-* A `spec.allow` list defines the networking requirement implied by that targeted CR. Each entry has essentially the same shape as a `NetworkPolicy` `ingress`/`egress` rule (a list of `from`/`to` peers plus optional `ports`); `ports` is usually omitted and inferred by the operator from the targeted CR, except where noted in later sections.
+`KafkaProxyNetworkPolicy` is used for defining both ingress and egress rules. Its basic shape:
+* The `spec.targetRef` references another proxy CR — restricted (via an enum at the CRD schema level) to `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`; no other kind can be targeted.
+* An optional `spec.ingress` list and an optional `spec.egress` list define the networking requirement implied by the targeted CR. Each entry in either list has essentially the same shape as a `NetworkPolicy` `ingress`/`egress` rule (a list of `from`/`to` peers plus optional `ports`); `ports` is usually omitted and inferred by the operator from the targeted CR, except where noted in later sections.
 
-`targetRef` only resolves within the same namespace as the `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` itself; there is no cross-namespace form (unlike, for example, the Gateway API's `ReferenceGrant`-mediated cross-namespace policy attachment). This keeps the ownership split described above confined to a single namespace: neither kind can ever grant or imply network access on behalf of a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter` owned by a different namespace/tenant.
+Which of `spec.ingress`/`spec.egress` may be set depends on `targetRef.kind`. A `KafkaProxyIngress` target only makes sense with `spec.ingress`; a `KafkaService` target only makes sense with `spec.egress`; a `KafkaProtocolFilter` target may use either or both, since a filter may need rules in either direction (or both — see [Policy attachment to `KafkaProtocolFilter`](#policy-attachment-to-kafkaprotocolfilter)). This is enforced with CEL validation rules (`x-kubernetes-validations`) on the CRD, so an invalid combination is rejected at `kubectl apply` time rather than surfacing later as a reconciler-reported condition:
 
-Because each kind only has fields for a single direction, `targetRef.kind` is restricted (at the CRD schema level, via an enum) to the kinds that make sense for that direction:
+```yaml
+x-kubernetes-validations:
+  - rule: "self.targetRef.kind != 'KafkaService' || !has(self.ingress)"
+    message: "spec.ingress is not valid when targetRef.kind is KafkaService"
+  - rule: "self.targetRef.kind != 'KafkaProxyIngress' || !has(self.egress)"
+    message: "spec.egress is not valid when targetRef.kind is KafkaProxyIngress"
+  - rule: "has(self.ingress) || has(self.egress)"
+    message: "at least one of spec.ingress or spec.egress must be set"
+```
 
-* `KafkaProxyIngressNetworkPolicy.spec.targetRef.kind` is one of `KafkaProxyIngress` or `KafkaProtocolFilter`.
-* `KafkaProxyEgressNetworkPolicy.spec.targetRef.kind` is one of `KafkaService` or `KafkaProtocolFilter`.
+This is as far as CEL can take the validation, though: it only ever sees fields on the `KafkaProxyNetworkPolicy` object itself. Most of the remaining peer-type validation described in the sections below — e.g. `ipBlock` vs. selector, which depends on the *targeted* `KafkaProxyIngress`'s own `clusterIP`/`loadBalancer`/`openShiftRoute` mechanism — depends on the state of a different object, which a CRD-schema CEL rule cannot look up. That validation still has to happen in the reconciler and is reported via `Accepted: False` (see [Status conditions](#status-conditions)) exactly as before; merging the two kinds doesn't change that part of the design.
 
-The allow values in `spec.allow` also depend on the targeted CR, as explained in later sections.
+`targetRef` only resolves within the same namespace as the `KafkaProxyNetworkPolicy` itself; there is no cross-namespace form (unlike, for example, the Gateway API's `ReferenceGrant`-mediated cross-namespace policy attachment). This keeps the ownership split described above confined to a single namespace: `KafkaProxyNetworkPolicy` can never grant or imply network access on behalf of a `KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter` owned by a different namespace/tenant.
 
-Because `NetworkPolicy` rules are additive the effect of multiple `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` resources with the same target is also to widen access.
-This is a deliberate divergence from the Gateway API's direct policy attachment convention, where a target normally has at most one attached policy of a given kind; here, any number of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` resources may target the same CR, and their rules are unioned rather than one replacing another.
-This is useful because it allows a user to use fine-grained `KafkaProxyEgressNetworkPolicies` targetting a filter which itself has multiple plugins each requiring egress. 
-For example a `SaslTermination` filter using OAUTHBEARER tokens and a `SaslSubjectBuilder` plugin which looks up additional information about a `Subject` from LDAP could have two `KafkaProxyEgressNetworkPolicies`, one for the Oauth Authorization server and another for the the LDAP server.
+The values allowed in `spec.ingress`/`spec.egress` also depend on the targeted CR, as explained in later sections.
+
+Because `NetworkPolicy` rules are additive the effect of multiple `KafkaProxyNetworkPolicy` resources with the same target is also to widen access.
+This is a deliberate divergence from the Gateway API's direct policy attachment convention, where a target normally has at most one attached policy of a given kind; here, any number of `KafkaProxyNetworkPolicy` resources may target the same CR, and their rules are unioned rather than one replacing another.
+This is useful because it allows a user to use fine-grained `KafkaProxyNetworkPolicies` targetting a filter which itself has multiple plugins each requiring egress.
+For example a `SaslTermination` filter using OAUTHBEARER tokens and a `SaslSubjectBuilder` plugin which looks up additional information about a `Subject` from LDAP could have two `KafkaProxyNetworkPolicies`, one for the Oauth Authorization server and another for the the LDAP server — each named descriptively enough to audit without needing to read its contents.
 
 Every generated `NetworkPolicy` shares a common `podSelector`, `ownerReferences` rule, and naming scheme — see [Common structure of generated `NetworkPolicy` resources](#common-structure-of-generated-networkpolicy-resources) below.
 
 #### Status conditions
 
-Both kinds report the same two standard condition types in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs:
+`KafkaProxyNetworkPolicy` reports two standard condition types in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs:
 
 | Condition type | Status | Reason | Meaning |
 | --- | --- | --- | --- |
@@ -117,18 +125,20 @@ Both kinds report the same two standard condition types in `status.conditions`, 
 | `ResolvedRefs` | `False` | `ReferencedResourcesNotFound` | No CR named `spec.targetRef.name` of the expected kind exists in this namespace. |
 | `ResolvedRefs` | `False` | `TransitivelyReferencedResourcesNotFound` | The targeted CR exists but does not yet report `ResolvedRefs: True` itself (e.g. a targeted `KafkaProxyIngress` whose own `proxyRef` hasn't resolved). |
 | `ResolvedRefs` | `Unknown` | — | The last reconciliation attempt failed with an error before refs could be checked. |
-| `Accepted` | `True` | — | The policy is valid for its target; a `NetworkPolicy` will be generated from it. |
-| `Accepted` | `False` | `Invalid` | Either the `spec.allow` rules use the wrong peer type for the target (e.g. `ipBlock` against a `clusterIP`-mechanism `KafkaProxyIngress`, or `namespaceSelector`/`podSelector` against a `loadBalancer`/`openShiftRoute`-mechanism one), or `ResolvedRefs` is `False` — a policy whose target can't be found or hasn't resolved is never `Accepted`, regardless of how valid its own rules are. |
+| `Accepted` | `True` | — | The policy is valid for its target; a `NetworkPolicy` will be generated from it for each of `spec.ingress`/`spec.egress` that's set. |
+| `Accepted` | `False` | `Invalid` | Either a `spec.ingress`/`spec.egress` rule uses the wrong peer type for the target (e.g. `ipBlock` against a `clusterIP`-mechanism `KafkaProxyIngress`, or `namespaceSelector`/`podSelector` against a `loadBalancer`/`openShiftRoute`-mechanism one), or `ResolvedRefs` is `False` — a policy whose target can't be found or hasn't resolved is never `Accepted`, regardless of how valid its own rules are. |
 | `Accepted` | `False` | `Disabled` | `NetworkPolicy` generation is disabled cluster-wide via `KafkaProxyOperatorConfig`. `ResolvedRefs` is unaffected and stays `True` in this case. |
 | `Accepted` | `False` | `ReferencedResourceNotReconciled` | The targeted CR resolves (`ResolvedRefs: True`) but hasn't itself reached `Accepted: True` yet. |
 
+Note what's *not* in this table: a `spec.ingress` set against a `KafkaService` target, or a `spec.egress` set against a `KafkaProxyIngress` target, never reaches the reconciler at all — it's rejected by the API server at `kubectl apply` time via the CEL rules described above. Only the peer-type-vs-mechanism class of error (which depends on looking up the state of the *targeted* CR, something CEL can't do) surfaces as a reconciler-reported `Accepted: False`/`Invalid`.
+
 The per-mechanism validation failures described in the sections below (e.g. an `ipBlock` rule against a `clusterIP` ingress) are reported as `Accepted: False` with reason `Invalid`, not as a separate condition type.
 
-Because this validation happens on the reconciler's own schedule rather than at `kubectl apply` time, a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` can be admitted and only later found to be rejected. GitOps/CI pipelines applying these CRs should therefore wait on the `Accepted` condition explicitly, e.g. `kubectl wait --for=condition=Accepted <kind>/<name>`, rather than treating a successful `kubectl apply` as confirmation that the policy took effect.
+Because this validation happens on the reconciler's own schedule rather than at `kubectl apply` time, a `KafkaProxyNetworkPolicy` can be admitted and only later found to be rejected. GitOps/CI pipelines applying these CRs should therefore wait on the `Accepted` condition explicitly, e.g. `kubectl wait --for=condition=Accepted <kind>/<name>`, rather than treating a successful `kubectl apply` as confirmation that the policy took effect.
 
 ### Common structure of generated `NetworkPolicy` resources
 
-Every `NetworkPolicy` the operator generates — a default (no policy CR attached), the `strimziKafkaRef` auto-derived rule, or the result of an attached `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` — shares the same `podSelector`, the same `ownerReferences` rule, and is named using the same scheme. This section defines all three once; the sections below describe only what's specific to each target kind: the shape of the `from`/`to` peers and `ports` in the generated `ingress`/`egress` rule.
+Every `NetworkPolicy` the operator generates — a default (no policy CR attached), the `strimziKafkaRef` auto-derived rule, or the result of an attached `KafkaProxyNetworkPolicy` — shares the same `podSelector`, the same `ownerReferences` rule, and is named using the same scheme. This section defines all three once; the sections below describe only what's specific to each target kind: the shape of the `from`/`to` peers and `ports` in the generated `ingress`/`egress` rule.
 
 #### `podSelector`
 
@@ -144,7 +154,7 @@ podSelector:
 
 #### `ownerReferences`
 
-* A `NetworkPolicy` generated because a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a resource is owned by that policy CR. Deleting the policy CR removes only the `NetworkPolicy` it produced, leaving any other generated `NetworkPolicy` for that target untouched.
+* A `NetworkPolicy` generated because a `KafkaProxyNetworkPolicy` targets a resource is owned by that policy CR. Deleting the policy CR removes only the `NetworkPolicy`/`NetworkPolicies` it produced, leaving any other generated `NetworkPolicy` for that target untouched.
 * A `NetworkPolicy` generated in the absence of any targeting policy CR — a default-allow/default-deny rule, or the `strimziKafkaRef` auto-derived rule — is instead owned by the target CR itself (`KafkaProxyIngress`, `KafkaService`, or `KafkaProtocolFilter`), since there's no policy CR to own it in that case.
 
 #### Naming
@@ -153,17 +163,19 @@ Each generated `NetworkPolicy`'s `metadata.name` is `${token}.${name}`, where `$
 
 | Token | `${name}` comes from | Generated when |
 | --- | --- | --- |
-| `ingress-default` | `KafkaProxyIngress` | No `KafkaProxyIngressNetworkPolicy` targets it |
-| `ingress-policy` | `KafkaProxyIngressNetworkPolicy` | It targets a `KafkaProxyIngress` |
-| `filter-ingress-default` | `KafkaProtocolFilter` | No `KafkaProxyIngressNetworkPolicy` targets it |
-| `filter-ingress-policy` | `KafkaProxyIngressNetworkPolicy` | It targets a `KafkaProtocolFilter` |
-| `target-default` | `KafkaService` | Using `bootstrapServers`, and no `KafkaProxyEgressNetworkPolicy` targets it |
+| `ingress-default` | `KafkaProxyIngress` | No `KafkaProxyNetworkPolicy` with `spec.ingress` set targets it |
+| `ingress-policy` | `KafkaProxyNetworkPolicy` | A `KafkaProxyNetworkPolicy` with `spec.ingress` set targets it |
+| `filter-ingress-default` | `KafkaProtocolFilter` | No `KafkaProxyNetworkPolicy` with `spec.ingress` set targets it |
+| `filter-ingress-policy` | `KafkaProxyNetworkPolicy` | A `KafkaProxyNetworkPolicy` with `spec.ingress` set targets it |
+| `target-default` | `KafkaService` | Using `bootstrapServers`, and no `KafkaProxyNetworkPolicy` with `spec.egress` set targets it |
 | `target-strimzi` | `KafkaService` | Using `strimziKafkaRef` (unconditional — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case)) |
-| `target-policy` | `KafkaProxyEgressNetworkPolicy` | It targets a `KafkaService` |
-| `filter-egress-default` | `KafkaProtocolFilter` | No `KafkaProxyEgressNetworkPolicy` targets it |
-| `filter-egress-policy` | `KafkaProxyEgressNetworkPolicy` | It targets a `KafkaProtocolFilter` |
+| `target-policy` | `KafkaProxyNetworkPolicy` | A `KafkaProxyNetworkPolicy` with `spec.egress` set targets it |
+| `filter-egress-default` | `KafkaProtocolFilter` | No `KafkaProxyNetworkPolicy` with `spec.egress` set targets it |
+| `filter-egress-policy` | `KafkaProxyNetworkPolicy` | A `KafkaProxyNetworkPolicy` with `spec.egress` set targets it |
 
-This is collision-free **by construction**, not merely unlikely to collide. `.` is reserved as the delimiter between token and name: the CRD schemas for `KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`, `KafkaProxyIngressNetworkPolicy`, and `KafkaProxyEgressNetworkPolicy` forbid `.` in `metadata.name`, and none of the nine tokens above contain `.` either. So every generated name contains exactly one `.`, and two generated names can only be equal if their token and their source name are both equal.
+Since a single `KafkaProxyNetworkPolicy` targeting a `KafkaProtocolFilter` can set both `spec.ingress` and `spec.egress` at once, one CR can drive the generation of two `NetworkPolicy` resources — `filter-ingress-policy.${name}` and `filter-egress-policy.${name}` — both owned by it, both sharing its name, and distinguished from one another by token exactly as the table above already provides for.
+
+This is collision-free **by construction**, not merely unlikely to collide. `.` is reserved as the delimiter between token and name: the CRD schemas for `KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`, and `KafkaProxyNetworkPolicy` forbid `.` in `metadata.name`, and none of the nine tokens above contain `.` either. So every generated name contains exactly one `.`, and two generated names can only be equal if their token and their source name are both equal.
 
 This matters because plain string concatenation, without a reserved delimiter, cannot give that guarantee: a literal `-filter-` infix used to mark filter-related rules is just text, indistinguishable from a hyphen that happens to occur inside a user-chosen name. For example, a `KafkaProxyIngress` named `filter-myfilter` and a `KafkaProtocolFilter` named `myfilter` are different kinds — Kubernetes happily allows both to exist in the same namespace — but concatenating `default-allow-ingress-` with the first name, or `default-allow-ingress-filter-` with the second, produces the identical string either way. The `.` delimiter rules this out, regardless of what the rest of a name contains.
 
@@ -181,9 +193,9 @@ If the computed `${token}.${name}` would exceed Kubernetes' `NetworkPolicy` name
 
 ### Policy attachment to `KafkaProxyIngress`
 
-When no `KafkaProxyIngressNetworkPolicy` targets a `KafkaProxyIngress`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
+When no `KafkaProxyNetworkPolicy` with `spec.ingress` set targets a `KafkaProxyIngress`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
 The schema default, `allow`, generates a `NetworkPolicy` which allows access from anywhere, named `ingress-default.${ingress-name}` (see [Naming](#naming)).
-The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, using the same name, blocking all ingress until a `KafkaProxyIngressNetworkPolicy` is attached.
+The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, using the same name, blocking all ingress until a `KafkaProxyNetworkPolicy` with `spec.ingress` set is attached.
 Here's an example of the `allow` case:
 
 ```yaml
@@ -205,7 +217,7 @@ spec:
         port: <PORT_NUM> # for each port
 ```
 
-When one or more `KafkaProxyIngressNetworkPolicy` target a given `KafkaProxyIngress` a single `NetworkPolicy` will be generated for each, named `ingress-policy.${policy-name}` (see [Naming](#naming)).
+When one or more `KafkaProxyNetworkPolicy` with `spec.ingress` set target a given `KafkaProxyIngress` a single `NetworkPolicy` will be generated for each, named `ingress-policy.${policy-name}` (see [Naming](#naming)).
 The exact content will depend on the ingress mechanism.
 The `KafkaProxyIngress` CR supports three ingress mechanisms:
 
@@ -216,9 +228,9 @@ The `KafkaProxyIngress` CR supports three ingress mechanisms:
 #### The `clusterIP` case
 
 The `clusterIP` mechanism is specifically intended for access from the same Kubernetes cluster. 
-So when the mechanism is `clusterIP` the rules given by the user in the `from` list of each `spec.allow[]` entry of a `KafkaProxyIngressNetworkPolicy` will be in terms of
+So when the mechanism is `clusterIP` the rules given by the user in the `from` list of each `spec.ingress[]` entry of a `KafkaProxyNetworkPolicy` will be in terms of
 `namespaceSelector` and/or `podSelector`.
-The operator will reject `KafkaProxyIngressNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
+The operator will reject `KafkaProxyNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
 
 ```yaml
 ---
@@ -236,7 +248,7 @@ spec:
 ---
 # Example ingress policy restricting access to the given namespaces and pods
 apiVersion: kroxylicious.io/v1alpha1
-kind: KafkaProxyIngressNetworkPolicy
+kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-clusterIP-policy
 spec:
@@ -244,7 +256,7 @@ spec:
     group: kroxylicious.io
     kind: KafkaProxyIngress
     name: my-ingress
-  allow:
+  ingress:
     - from:
         - namespaceSelector:
             matchLabels:
@@ -274,10 +286,10 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports: # the ingress's own listening port, since spec.allow[].ports was omitted
+    - ports: # the ingress's own listening port, since spec.ingress[].ports was omitted
         - protocol: TCP
           port: <PORT_NUM>
-      from: # copied verbatim from spec.allow[0].from
+      from: # copied verbatim from spec.ingress[0].from
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: my-kafka-app-ns
@@ -291,7 +303,7 @@ spec:
 
 #### The `loadBalancer` case
 
-This will function similarly, except the validation of the rules in the `from` property of each `spec.allow[]` entry is different.
+This will function similarly, except the validation of the rules in the `from` property of each `spec.ingress[]` entry is different.
 `loadBalancer` is explicitly intended for off-cluster access,
 so the value must be a list of objects supporting an `ipBlock` property, like so:
 ```yaml
@@ -299,14 +311,14 @@ ipBlock:
   cidr: 203.0.113.0/24
 ```
 (This is exactly the same schema as `NetworkPolicy` supports).
-Again, the operator will reject `KafkaProxyIngressNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
+Again, the operator will reject `KafkaProxyNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
 
 `Service.spec.loadBalancerSourceRanges` is a best-effort declaration of the source IPs which should be allowed through the load balancer.
 In practice enforcement is cloud-provider-dependent, and can be ignored. 
 
 For `loadBalancerSourceRanges` and the pod-level `NetworkPolicy` below to restrict access correctly, the generated `Service` also needs `externalTrafficPolicy: Local`, to preserve the client's source IP address rather than losing it to SNAT.
 `KafkaProxyIngress` already supports this via `spec.loadBalancer.service.externalTrafficPolicy` (added by [proposal #134](https://github.com/kroxylicious/design/pull/134)).
-The operator should reject a `KafkaProxyIngressNetworkPolicy` with `ipBlock` rules targeting a `loadBalancer` ingress whose `externalTrafficPolicy` isn't `Local` (`Accepted: False`), since otherwise the restriction would silently fail to match real client addresses.
+The operator should reject a `KafkaProxyNetworkPolicy` with `ipBlock` rules targeting a `loadBalancer` ingress whose `externalTrafficPolicy` isn't `Local` (`Accepted: False`), since otherwise the restriction would silently fail to match real client addresses.
 
 ```yaml
 ---
@@ -347,17 +359,17 @@ spec:
           port: <PORT_NUM>
 ```
 
-Proposal #134 gives each `loadBalancer`-type `KafkaProxyIngress` its own dedicated `Service` so a `KafkaProxyIngressNetworkPolicy`'s CIDRs apply directly to that ingress's own `Service.spec.loadBalancerSourceRanges` and pod-level `NetworkPolicy`, with no cross-ingress CIDR union to construct.
+Proposal #134 gives each `loadBalancer`-type `KafkaProxyIngress` its own dedicated `Service` so a `KafkaProxyNetworkPolicy`'s CIDRs apply directly to that ingress's own `Service.spec.loadBalancerSourceRanges` and pod-level `NetworkPolicy`, with no cross-ingress CIDR union to construct.
 
 Sharing hasn't disappeared entirely, though: multiple `VirtualKafkaClusters` can still reference the same ingress, addressed by SNI on that ingress's one `Service` — this is what delivers the per-load-balancer cost saving proposal #134 preserves.
-A `KafkaProxyIngressNetworkPolicy` targeting that ingress applies uniformly to all of them: a pod-level `NetworkPolicy` can't differentiate traffic by the SNI hostname it arrived on, so there's no way to give one `VirtualKafkaCluster` a narrower CIDR allowlist than another if they share an ingress.
+A `KafkaProxyNetworkPolicy` targeting that ingress applies uniformly to all of them: a pod-level `NetworkPolicy` can't differentiate traffic by the SNI hostname it arrived on, so there's no way to give one `VirtualKafkaCluster` a narrower CIDR allowlist than another if they share an ingress.
 (See [Future work](#future-work) for a possible enhancement that would recover that per-virtual-cluster isolation.)
 
 #### The `openShiftRoute` case
 
 Like `loadBalancer`, the `openShiftRoute` mechanism is explicitly intended for off-cluster access.
-Again, the validation of the rules in the `from` property of each `spec.allow[]` entry will require the use of `ipBlock`.
-Again, the operator will reject `KafkaProxyIngressNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
+Again, the validation of the rules in the `from` property of each `spec.ingress[]` entry will require the use of `ipBlock`.
+Again, the operator will reject `KafkaProxyNetworkPolicy` instances where this is not the case (a `Accepted` condition with `status: False`, and an explanatory message).
 
 To restrict access by client CIDR with an OpenShift `Route`, we must restrict traffic at the `Route` layer using an annotation, and pair it with a `NetworkPolicy` to restrict `Pod` ingress to only the OpenShift Ingress `Router`.
 
@@ -369,7 +381,7 @@ metadata:
   name: my-proxy-cr-my-ingress
   namespace: my-proxy
   annotations:
-    # Space-separated list of allowed CIDRs or IP addresses, taken from the KafkaProxyIngressNetworkPolicy
+    # Space-separated list of allowed CIDRs or IP addresses, taken from the KafkaProxyNetworkPolicy
     haproxy.router.openshift.io/ip_whitelist: "203.0.113.0/24 198.51.100.10/32"
 spec:
   host: my-app.example.com
@@ -405,9 +417,9 @@ spec:
 
 ### Policy attachment to `KafkaService`
 
-When no `KafkaProxyEgressNetworkPolicy` targets a `KafkaService` using `bootstrapServers`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
+When no `KafkaProxyNetworkPolicy` with `spec.egress` set targets a `KafkaService` using `bootstrapServers`, what gets generated depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below).
 The schema default, `allow`, generates a `NetworkPolicy` which allows access to anywhere, named `target-default.${kafka-service-name}` (see [Naming](#naming)).
-The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, using the same name, blocking all egress until a `KafkaProxyEgressNetworkPolicy` is attached.
+The alternative, `deny`, generates a `NetworkPolicy` with no rules at all, using the same name, blocking all egress until a `KafkaProxyNetworkPolicy` with `spec.egress` set is attached.
 A `KafkaService` using `strimziKafkaRef` isn't affected by this choice — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case) below.
 Here's an example of the `allow` case:
 
@@ -429,7 +441,7 @@ spec:
     - protocol: TCP
 ```
 
-When one or more `KafkaProxyEgressNetworkPolicy` target a given `KafkaService` a single `NetworkPolicy` will be generated for each, named `target-policy.${policy-name}` (see [Naming](#naming)).
+When one or more `KafkaProxyNetworkPolicy` with `spec.egress` set target a given `KafkaService` a single `NetworkPolicy` will be generated for each, named `target-policy.${policy-name}` (see [Naming](#naming)).
 
 The `KafkaService` CR supports two ways to express a target cluster:
 
@@ -441,7 +453,7 @@ The `KafkaService` CR supports two ways to express a target cluster:
 
 `strimziKafkaRef` is a very special case. 
 We already know the namespace of the `Kafka` cluster, and the `Pod` labels (and hence selectors) are a published part of the Strimzi API. 
-So the operator can always compute the exact egress rule itself, without needing an `allow` list — or indeed any `KafkaProxyEgressNetworkPolicy` at all — from the user.
+So the operator can always compute the exact egress rule itself, without needing a `spec.egress` list — or indeed any `KafkaProxyNetworkPolicy` at all — from the user.
 It does so unconditionally: this is the one case in this proposal where neither `allow`-everywhere nor `deny`-everything is the right default, because a precise, correct answer is already available for free, so `policyAttachment`'s `whenAbsent` setting doesn't apply here.
 
 ```yaml
@@ -459,7 +471,7 @@ spec:
     listenerName: my-listener
 ```
 
-That alone, with no `KafkaProxyEgressNetworkPolicy` at all, generates a `NetworkPolicy` named `target-strimzi.${kafka-service-name}` (see [Naming](#naming)):
+That alone, with no `KafkaProxyNetworkPolicy` at all, generates a `NetworkPolicy` named `target-strimzi.${kafka-service-name}` (see [Naming](#naming)):
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -490,7 +502,7 @@ spec:
 
 ```
 
-A `KafkaProxyEgressNetworkPolicy` can still be attached to a `strimziKafkaRef`-based `KafkaService` if needed — for example to grant egress to some additional destination beyond the Strimzi brokers themselves. Its rules are additive with the auto-derived rule above, per the additive semantics described earlier, rather than replacing it.
+A `KafkaProxyNetworkPolicy` with `spec.egress` set can still be attached to a `strimziKafkaRef`-based `KafkaService` if needed — for example to grant egress to some additional destination beyond the Strimzi brokers themselves. Its rules are additive with the auto-derived rule above, per the additive semantics described earlier, rather than replacing it.
 
 #### The `bootstrapServers` case
 
@@ -514,7 +526,7 @@ Strimzi's bootstrap `Service` for a listener is named `<cluster-name>-kafka-boot
 This is the form `bootstrapServers` should expect: it's derived only from the `Kafka` resource's name, so it stays stable across broker scaling and `KafkaNodePool` changes.
 Strimzi also makes individual broker pods addressable via a headless `Service` (`<cluster-name>-kafka-<broker-id>.<cluster-name>-kafka-brokers.<namespace>.svc.<cluster-domain>`), but with `KafkaNodePool`s in use the `<broker-id>` portion depends on node pool naming and can change as pools are scaled or renamed, so it's not a reliable choice for a `bootstrapServers` entry.
 
-When the bootstrap servers list is entirely composed of internal DNS names the `to` property of each `spec.allow[]` entry will be required to use `namespaceSelector` and/or `podSelector` rules.
+When the bootstrap servers list is entirely composed of internal DNS names the `to` property of each `spec.egress[]` entry will be required to use `namespaceSelector` and/or `podSelector` rules.
 
 
 ```yaml
@@ -527,7 +539,7 @@ spec:
   bootstrapServers: my-kafka-cluster-kafka-bootstrap.my-ns.svc.cluster.local:9092
 ---
 # Example egress policy restricting access to the given namespaces and pods
-kind: KafkaProxyEgressNetworkPolicy
+kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-strimzi-target
 spec:
@@ -535,7 +547,7 @@ spec:
     group: kroxylicious.io
     kind: KafkaService
     name: internal-dns
-  allow:
+  egress:
     - to:
         - namespaceSelector:
             matchLabels:
@@ -544,7 +556,7 @@ spec:
 
 ##### External DNS names and external IP addresses
 
-When the bootstrap servers list is entirely composed of external DNS names and/or external IP addresses the `to` property of each `spec.allow[]` entry will be required to use `ipBlock` rules.
+When the bootstrap servers list is entirely composed of external DNS names and/or external IP addresses the `to` property of each `spec.egress[]` entry will be required to use `ipBlock` rules.
 
 ```yaml
 ---
@@ -556,7 +568,7 @@ spec:
   bootstrapServers: kafka1.example.com:9092,kafka2.example.com:9092
 ---
 # Example egress policy restricting access to the given namespaces and pods
-kind: KafkaProxyEgressNetworkPolicy
+kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-strimzi-target
 spec:
@@ -564,7 +576,7 @@ spec:
     group: kroxylicious.io
     kind: KafkaService
     name: internal-dns
-  allow:
+  egress:
     - to:
         - ipBlock:
             cidr: 10.0.23.0/24
@@ -575,14 +587,14 @@ spec:
 The `KafkaProtocolFilter` CR is used to configure filters. 
 It is common for filters, or their plugins, to require network egress.
 It's also not forbidden for filters to require network ingress.
-In the most general case, a filter or its plugin would require rules for both egress and ingress — in which case the filter is targeted by one `KafkaProxyIngressNetworkPolicy` and one `KafkaProxyEgressNetworkPolicy`, each generating its own `NetworkPolicy`.
+In the most general case, a filter or its plugin would require rules for both egress and ingress. A single `KafkaProxyNetworkPolicy` can set both `spec.ingress` and `spec.egress` against the same `KafkaProtocolFilter` target, generating two `NetworkPolicy` resources — one per direction (see [Naming](#naming)) — from that one CR. Because rules are additive (see above), a filter's ingress and egress needs can equally be declared across two separate `KafkaProxyNetworkPolicy` CRs instead, e.g. for clearer auditing, or because different owners manage the filter's inbound and outbound needs. That choice doesn't affect what's enforced, only how the rules are organized and named — it has no RBAC consequence, since both directions share the same kind regardless (see [Rejected alternatives](#rejected-alternatives)).
 
-When no `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` targets a `KafkaProtocolFilter`, what gets generated for the missing direction(s) depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below), the same mechanism used for `KafkaProxyIngress` and `KafkaService` above.
+When no `KafkaProxyNetworkPolicy` targets a `KafkaProtocolFilter` with a given direction set, what gets generated for the missing direction(s) depends on `KafkaProxyOperatorConfig.spec.policyAttachment` (see [`policyAttachment`](#policyattachment) below), the same mechanism used for `KafkaProxyIngress` and `KafkaService` above.
 A `KafkaProtocolFilter` may need no network access at all, unlike `KafkaProxyIngress`/`KafkaService` which always need *some* access just to function — but the same `allow`/`deny` choice, and the same reasoning, applies to all three.
 The schema default, `allow`, generates a `NetworkPolicy` which allows access to/from anywhere, named `filter-ingress-default.${kafka-filter-name}`/`filter-egress-default.${kafka-filter-name}` (see [Naming](#naming)).
-The alternative, `deny`, generates a `NetworkPolicy` with the matching `policyTypes` entry but no rules at all (e.g. `ingress: []`), using the same names — Kubernetes' own `NetworkPolicy` semantics mean a `Pod` selected by a policy of a given type with no matching rule denies all traffic of that type, so this blocks the direction entirely until a `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` is attached (whose rules are additive with this baseline, per the additive semantics described above).
+The alternative, `deny`, generates a `NetworkPolicy` with the matching `policyTypes` entry but no rules at all (e.g. `ingress: []`), using the same names — Kubernetes' own `NetworkPolicy` semantics mean a `Pod` selected by a policy of a given type with no matching rule denies all traffic of that type, so this blocks the direction entirely until a `KafkaProxyNetworkPolicy` with that direction set is attached (whose rules are additive with this baseline, per the additive semantics described above).
 
-When a `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` targets a given `KafkaProtocolFilter`, a `NetworkPolicy` will be generated for each, in the same way as for `KafkaProxyIngress` and `KafkaService` above, named `filter-ingress-policy.${policy-name}` and `filter-egress-policy.${policy-name}` respectively (see [Naming](#naming)).
+When a `KafkaProxyNetworkPolicy` targets a given `KafkaProtocolFilter` with `spec.ingress` and/or `spec.egress` set, a `NetworkPolicy` will be generated for each direction present, in the same way as for `KafkaProxyIngress` and `KafkaService` above, named `filter-ingress-policy.${policy-name}` and/or `filter-egress-policy.${policy-name}` respectively (see [Naming](#naming)).
 
 Here's an example for the `RecordEncryption` filter, which only needs egress:
 
@@ -605,7 +617,7 @@ spec:
       template: "$(topicName)"
 ---
 # egress policy attached to the protocol filter
-kind: KafkaProxyEgressNetworkPolicy
+kind: KafkaProxyNetworkPolicy
 metadata:
   name: encryption-connect-to-vault
 spec:
@@ -613,7 +625,7 @@ spec:
     group: kroxylicious.io
     kind: KafkaProtocolFilter
     name: encryption
-  allow:
+  egress:
     - to:
         - namespaceSelector:
             matchLabels:
@@ -727,43 +739,49 @@ Example
         kind: KafkaProxyIngress
         permittedAttachments:
           - group: kroxylicious.io
-            kind: KafkaProxyIngressNetworkPolicy
+            kind: KafkaProxyNetworkPolicy
+            direction: ingress
             whenAbsent: allow|deny
       - group: kroxylicious.io
         kind: KafkaService
         permittedAttachments:
           - group: kroxylicious.io
-            kind: KafkaProxyEgressNetworkPolicy
+            kind: KafkaProxyNetworkPolicy
+            direction: egress
             whenAbsent: allow|deny
       - group: kroxylicious.io
         kind: KafkaProtocolFilter
         requiredAttachments:
           - group: kroxylicious.io
-            kind: KafkaProxyEgressNetworkPolicy
+            kind: KafkaProxyNetworkPolicy
+            direction: egress
         permittedAttachments:
           - group: kroxylicious.io
-            kind: KafkaProxyIngressNetworkPolicy
+            kind: KafkaProxyNetworkPolicy
+            direction: ingress
             whenAbsent: allow|deny
     # also prohibitedAttachments
 ```
+
+Each attachment entry now carries a `direction: ingress|egress` field alongside `kind`. This is new compared to splitting by direction into two kinds: with a single `KafkaProxyNetworkPolicy` kind, "which kind is attached" no longer tells you which direction it's declaring (a `KafkaProtocolFilter` target needs to say so for each of its two independent attachment rules), so `direction` carries that distinction explicitly instead. For `KafkaProxyIngress`/`KafkaService` only one direction is ever valid (enforced by the CEL rules on `KafkaProxyNetworkPolicy` itself — see [New CRDs](#new-crds)), so `direction` there is redundant with the target kind, but it's included on every entry for a uniform schema.
 
 `NetworkPolicy` is a `Pod`-level control for network access.
 Consider a `KafkaProxy` with an external `KafkaService` being used with a Kafka-as-a-Service where the user doesn't know an `ipBlock` range to lock down the rule.
 An allow-egress-to-anywhere rule will have to be used. 
 However, a particular filter might also require network egress.
 With the APIs as described so far that filter can get a free ride from the allow-egress-to-anywhere rule needed for `KafkaService`.
-It would function correctly without any `KafkaProxyEgressNetworkPolicy` targeting it.
-It would be better if the declarative APIs reflected the true situation, with an explicit `KafkaProxyEgressNetworkPolicy` targeting the `KafkaProtocolFilter`.
+It would function correctly without any `KafkaProxyNetworkPolicy` targeting it with `spec.egress` set.
+It would be better if the declarative APIs reflected the true situation, with an explicit `KafkaProxyNetworkPolicy` targeting the `KafkaProtocolFilter`.
 
-`policyAttachment.policyTarget` lists, per targeted kind, which attachment kinds are required, permitted, or prohibited:
+`policyAttachment.policyTarget` lists, per targeted kind and direction, which attachments are required, permitted, or prohibited:
 
-* `requiredAttachments`: List the attachment kinds which **must** be present. The target is rejected (`Accepted: False`) if a policy of that kind is missing.
-* `permittedAttachments`: List the attachment kinds which **may** be present, each with a `whenAbsent: allow|deny` setting controlling what's generated if no policy of that kind targets the resource. The target is never rejected for this policy kind being absent.
-* `prohibitedAttachments`: List the attachment kinds which **must not** be present. The target is rejected (`Accepted: False`) if a policy of that kind is attached.
+* `requiredAttachments`: List the (kind, direction) pairs which **must** be present. The target is rejected (`Accepted: False`) if no `KafkaProxyNetworkPolicy` targets it with that direction set.
+* `permittedAttachments`: List the (kind, direction) pairs which **may** be present, each with a `whenAbsent: allow|deny` setting controlling what's generated if no policy with that direction targets the resource. The target is never rejected for this being absent.
+* `prohibitedAttachments`: List the (kind, direction) pairs which **must not** be present. The target is rejected (`Accepted: False`) if a `KafkaProxyNetworkPolicy` targets it with that direction set.
 
-`requiredAttachments` can be used to make the operator reject any `KafkaProtocolFilter` which lacked a `KafkaProxyEgressNetworkPolicy` targeting that filter, as in the example above.
-The owner of the filter would need to write a `KafkaProxyEgressNetworkPolicy`.
-It would still be possible for the owner of the filter to write an _incorrect_ `KafkaProxyEgressNetworkPolicy`, but that is something which might get caught during review.
+`requiredAttachments` can be used to make the operator reject any `KafkaProtocolFilter` which lacked a `KafkaProxyNetworkPolicy` with `spec.egress` set targeting that filter, as in the example above.
+The owner of the filter would need to write a `KafkaProxyNetworkPolicy` with an `egress` rule.
+It would still be possible for the owner of the filter to write an _incorrect_ one, but that is something which might get caught during review.
 Without `policyAttachment` it is more likely a review might overlook the incorrectly declared network access, simply because it was omitted.
 
 `permittedAttachments[].whenAbsent` is the mechanism behind the `allow`/`deny` choice described for `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` earlier in this proposal — it isn't a separate setting, just this value on the relevant `permittedAttachments` entry. It has no effect on a `strimziKafkaRef`-based `KafkaService`, which always gets a precise, auto-derived rule regardless (see [the `strimziKafkaRef` case](#the-strimzikafkaref-case)). The resulting outcome is recorded on the generated `NetworkPolicy` itself via the `kroxylicious.io/default-policy` label (see [Naming](#naming)).
@@ -777,22 +795,22 @@ It has to: `KafkaProxyOperatorConfig` is a brand-new CRD, so its absence looks i
 
 When `whenAbsent: deny` applies and no matching policy is attached, the target is given `Accepted: False` with a reason identifying the missing policy — the same treatment as a `requiredAttachments` violation, since the resource genuinely isn't passing traffic in that direction and that should be visible rather than silent. This also means it propagates to dependents the same way an existing `ResolvedRefs`/`Accepted` failure already does: a `KafkaProxyIngress` left with no working ingress rule blocks anything that references it, just as it would if its own `KafkaProxy` reference couldn't be resolved.
 
-Because a `deny`-by-default fresh install genuinely won't pass traffic until the necessary `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` CRs exist, any quickstart, example manifest, or getting-started documentation that stands up a `KafkaProxy` needs to be reviewed and updated to include them (or otherwise target an installation whose `KafkaProxyOperatorConfig` sets `whenAbsent: allow`). Without that, a new user following it will get a proxy that clearly reports why it isn't working, but still doesn't work out of the box.
+Because a `deny`-by-default fresh install genuinely won't pass traffic until the necessary `KafkaProxyNetworkPolicy` CRs exist, any quickstart, example manifest, or getting-started documentation that stands up a `KafkaProxy` needs to be reviewed and updated to include them (or otherwise target an installation whose `KafkaProxyOperatorConfig` sets `whenAbsent: allow`). Without that, a new user following it will get a proxy that clearly reports why it isn't working, but still doesn't work out of the box.
 
 A use case for `prohibitedAttachments` is where `NetworkPolicy` resource generation is `disabled`. 
 For example perhaps the operating organization's processes require that `NetworkPolicies` are maintained manually. 
-In this case it might be confusing to have a `KafkaProxyIngressNetworkPolicy` or `KafkaProxyEgressNetworkPolicy` targeting a resource which is actually ignored by the operator. 
-Using `prohibitedAttachments` to prevent the attachment of either kind would avoid this.
+In this case it might be confusing to have a `KafkaProxyNetworkPolicy` targeting a resource which is actually ignored by the operator. 
+Using `prohibitedAttachments` to prevent the attachment of either direction would avoid this.
 
 ### Operator RBAC changes
 
 The operator will need to be allowed to CRUD `NetworkPolicy` resources via its dependent resources `ClusterRole`.
 
-It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyIngressNetworkPolicy`, `KafkaProxyEgressNetworkPolicy`, and `KafkaProxyOperatorConfig` in the "watched resources" `ClusterRole`.
+It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyNetworkPolicy` and `KafkaProxyOperatorConfig` in the "watched resources" `ClusterRole`.
 
 ### Future work
 
-As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBlock rules from the `KafkaProxyIngressNetworkPolicy`.
+As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the ipBlock rules from the `KafkaProxyNetworkPolicy`.
 Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster isolation that `Service`-level CIDR restriction cannot provide when multiple `VirtualKafkaClusters` share one ingress's `Service` (see [the `loadBalancer` case](#the-loadbalancer-case)).
 
 ## Affected/not affected projects
@@ -801,7 +819,7 @@ This affects the `kroxylicious/kroxylicious` repo.
 
 ## Compatibility
 
-The proposed changes are backwards compatible, because the `NetworkPolicies` generated in the absence of `KafkaProxyIngressNetworkPolicy`/`KafkaProxyEgressNetworkPolicy` are default allow.
+The proposed changes are backwards compatible, because the `NetworkPolicies` generated in the absence of `KafkaProxyNetworkPolicy` are default allow.
 If, due to a bug, the generated policies prevented connections, the user would be able to work around it by setting `KafkaProxyOperatorConfig.spec.generation: disabled`.
 
 This holds even for the `allow`/`deny` choice on `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` (`policyAttachment.policyTarget[].permittedAttachments[].whenAbsent`, see [`policyAttachment`](#policyattachment)), despite its schema default of `allow` being considered insufficiently secure for new installs: an existing deployment upgrading to a version with this feature keeps `allow` unless an administrator opts in to `deny`, while the operator's first-run heuristic gives a genuinely fresh install `deny` with no configuration required. Compatibility is preserved by detecting which situation applies at runtime, rather than by picking one default for everyone.
@@ -828,16 +846,16 @@ This holds even for the `allow`/`deny` choice on `KafkaProxyIngress`, `KafkaServ
 * "Consume a single monolithic policy-attachment CR, rather than one per rule."
     - As for having a single monolithic `NetworkPolicy`, using fine grained resources aids auditing.
     - We can also apply sensible validation to the policy rules.
-* "Use a single `KafkaProxyNetworkPolicy` kind for both ingress and egress rules, rather than splitting by direction."
-    - A single kind can only be granted or withheld as a whole via Kubernetes RBAC, which is enforced per-kind, not per spec-field or per-`targetRef`.
-      In a namespace with one shared `KafkaProxyIngress` and several independently-owned `KafkaProtocolFilter`s, this would mean a role trusted to declare a single filter's own egress need (e.g. "reach Vault on port 8200") would, by that same RBAC grant, also be able to declare an allow-from-anywhere ingress rule against the shared `KafkaProxyIngress`, affecting every tenant of that proxy.
-      Splitting by direction gives RBAC a meaningful boundary to grant against.
-    - A single kind also requires the operator to validate and reject invalid direction/target combinations (e.g. an ingress rule against a `KafkaService`) at reconcile time. Splitting by direction makes these combinations impossible to express in the first place.
-* "Use one kind per target CR (`KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`), rather than splitting by direction."
-    - This is the most granular option: it would let an organization separate "who sets the proxy's ingress exposure," "who sets its egress to the real cluster," and "who sets a given filter's needs" into three distinct RBAC-governed roles.
-    - Rejected for now as more CRDs/RBAC surface than the problem calls for. Splitting by direction already removes the sharpest issue — a filter's own rules sharing a kind with the proxy's ingress exposure. The residual coarseness it leaves, a `KafkaService`'s bulk egress and an individual filter's egress sharing the `KafkaProxyEgressNetworkPolicy` kind/RBAC surface, was judged an acceptable trade-off for a smaller API surface. This can be revisited, by splitting `KafkaProxyEgressNetworkPolicy` further, if that turns out to matter in practice.
+* "Split ingress and egress into two kinds (`KafkaProxyIngressNetworkPolicy` and `KafkaProxyEgressNetworkPolicy`), rather than a single combined `KafkaProxyNetworkPolicy` kind."
+    - An earlier revision of this proposal did this. The argument was that a single kind can only be granted or withheld as a whole via Kubernetes RBAC, which is enforced per-kind, not per spec-field or per-`targetRef`: in a namespace with one shared `KafkaProxyIngress` and several independently-owned `KafkaProtocolFilter`s, a role trusted to declare a single filter's own egress need (e.g. "reach Vault on port 8200") would, by that same RBAC grant, also be able to declare an allow-from-anywhere ingress rule against the shared `KafkaProxyIngress`, affecting every tenant of that proxy. Splitting by direction was meant to give RBAC a meaningful boundary to grant against.
+    - On closer inspection that boundary was weaker than it looked. Each of the two kinds still mixed one shared, proxy-wide target with per-filter ownership: `KafkaProxyIngressNetworkPolicy` could target either the shared `KafkaProxyIngress` *or* a `KafkaProtocolFilter`'s own ingress need, and `KafkaProxyEgressNetworkPolicy` could likewise target either the shared `KafkaService` *or* a `KafkaProtocolFilter`'s own egress need. So a role trusted only for a filter's own egress could, via that same kind, still rewrite the shared `KafkaService`'s bulk egress rule — the identical cross-contamination pattern the split was meant to prevent, just confined to one direction instead of two. Splitting by direction only ever removed the ingress↔egress straddle, never the shared-target↔filter straddle; the latter is the residual coarseness the next bullet discusses.
+    - Given that the RBAC benefit was partial rather than complete, it didn't justify doubling the CRD/controller/status-machinery/RBAC/documentation surface (two reconciled kinds instead of one) to get it. A single kind, with the `targetRef.kind`/direction combinations it allows narrowed by CEL validation instead of by which kind exists, gets equivalent functional behaviour for substantially less ongoing engineering cost.
+    - Organizations that do need finer-than-kind-level separation — including the specific ingress-exposure-vs-filter-egress separation this alternative was trying to buy — can get it from a policy engine (Kyverno, OPA Gatekeeper, or a `ValidatingAdmissionPolicy` bound to the requester's identity) layered on top of the single kind, restricting which `targetRef.kind`/field combinations a given identity may submit. Kubernetes' native RBAC was never going to offer a unit of control finer than "kind" (short of an unwieldy, manually-maintained `resourceNames` allowlist per tenant), so reaching for more CRDs to simulate field-level RBAC was solving the problem at the wrong layer.
+* "Use one kind per target CR (`KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`), rather than a single combined kind."
+    - This is the most granular option: it would let an organization separate "who sets the proxy's ingress exposure," "who sets its egress to the real cluster," and "who sets a given filter's needs" into three distinct RBAC-governed roles — the one separation a single combined kind doesn't give you.
+    - Rejected for the same reason the two-kind split above was reverted to one: more CRDs/controllers/RBAC surface than the problem calls for, for a form of separation a policy engine can already provide on top of a single kind (see previous bullet). If finer separation turns out to matter in practice despite that option being available, this remains the fallback to revisit.
 * "Use a hash suffix (extending proposal #150's truncation mechanism) to avoid name collisions between generated `NetworkPolicy` resources, rather than a reserved delimiter."
-    - This would avoid needing new CRD-level validation forbidding `.` in the names of the five source kinds (see [Naming](#naming)).
+    - This would avoid needing new CRD-level validation forbidding `.` in the names of the four source kinds (see [Naming](#naming)).
     - However it only makes collisions vanishingly unlikely, not impossible, reintroducing exactly the kind of small-but-nonzero risk proposal #150 already accepts for the (much rarer) long-name case. Since the naming scheme also has to double as a human-auditable identifier, the one-off cost of a single extra CRD validation rule was judged worth paying for an actual guarantee instead.
 * "Use the same property name (`networkPolicyPeers`) as Strimzi"
     - `networkPolicyPeers` does not distinguish between the ingress and egress cases. We have CRs which support one, but not the other, and other CRs which support both at the same time. Being able to distinguish between the two cases seems like a useful way to ensure unambiguous communication of the user's intent.
