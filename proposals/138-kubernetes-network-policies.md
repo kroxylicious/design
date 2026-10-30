@@ -317,11 +317,7 @@ kind: NetworkPolicy
 metadata:
   name: ingress-default.my-loadbalancer-ingress
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Ingress
   ingress:
@@ -388,11 +384,7 @@ metadata:
   name: ingress-policy.my-clusterIP-policy
   namespace: my-proxy
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Ingress
   ingress:
@@ -449,11 +441,7 @@ metadata:
   name: ingress-policy.my-loadbalancer-policy
   namespace: my-proxy
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Ingress
   ingress: # The rules will be copied verbatim
@@ -501,11 +489,7 @@ metadata:
   name: ingress-policy.my-route-policy
   namespace: my-proxy
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Ingress
   ingress: # The rules target the pod running the Router network proxy.
@@ -529,11 +513,7 @@ kind: NetworkPolicy
 metadata:
   name: target-default.my-target-cluster
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Egress
   egress:
@@ -579,11 +559,7 @@ kind: NetworkPolicy
 metadata:
   name: target-strimzi.strimzi-target
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Egress
   egress:
@@ -738,11 +714,7 @@ kind: NetworkPolicy
 metadata:
   name: filter-egress-policy.encryption-connect-to-vault
 spec:
-  podSelector: # see Common structure above
-    matchLabels:
-        app.kubernetes.io/name: kroxylicious
-        app.kubernetes.io/component: proxy
-        app.kubernetes.io/instance: my-proxy-cr
+  podSelector: ... # see Common structure above
   policyTypes:
     - Egress
   egress:
