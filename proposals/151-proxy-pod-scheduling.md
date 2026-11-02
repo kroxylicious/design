@@ -1,9 +1,10 @@
-# 000 - Proxy pod scheduling for KafkaProxy
+# 151 - Proxy pod scheduling for KafkaProxy
 
 Add optional `nodeSelector`, `tolerations`, `affinity`, and `topologySpreadConstraints` fields to
-`KafkaProxy.spec.infrastructure`, so users can control where proxy pods are scheduled. This also proposes
-an answer to the strategy question in
-[issue #4978](https://github.com/kroxylicious/kroxylicious/issues/4978) for pod-level settings.
+`KafkaProxy.spec.infrastructure`, so users can control where proxy pods are scheduled. This relates to
+[issue #4978](https://github.com/kroxylicious/kroxylicious/issues/4978): it covers the scheduling part of
+that issue and proposes rules for adding further pod-level settings, but leaves Deployment-level controls
+such as rollout strategy to a later proposal.
 
 ## Current situation
 
@@ -18,8 +19,8 @@ affinity, or topology spread constraints, so proxy pods:
 
 `KafkaProxy.spec.podTemplate` once existed ([#1596](https://github.com/kroxylicious/kroxylicious/pull/1596)),
 was limited to `metadata.labels`, and was removed in favour of `infrastructure`
-([#2323](https://github.com/kroxylicious/kroxylicious/pull/2323)), noting that pod configuration would be
-reintroduced under `infrastructure`.
+([#2323](https://github.com/kroxylicious/kroxylicious/pull/2323)), which said that some pod configuration
+would be reintroduced under `infrastructure` and left support for a full pod template to be decided.
 
 Because the operator owns the Deployment and reconciles it, users cannot patch these fields onto the
 Deployment themselves in a supported way. The current workarounds are mutating admission webhooks or a
@@ -80,8 +81,15 @@ spec:
 ### API semantics
 
 - Each field has exactly the type, schema, and semantics of the field with the same name in the Kubernetes
-  `core/v1` `PodSpec`. The CRD schema inlines the Kubernetes OpenAPI definitions, so the API server
-  validates them the same way and `kubectl explain` documents them.
+  `core/v1` `PodSpec`. The CRD schema inlines the Kubernetes OpenAPI definitions, so the API server checks
+  their structure (types and required fields) when the `KafkaProxy` is written, and `kubectl explain`
+  documents them.
+- The OpenAPI schema does not carry the rest of Kubernetes' pod validation, such as allowed toleration
+  operators or `weight` and `maxSkew` ranges. Such errors are reported when the operator applies the
+  Deployment: the apply fails, and the `KafkaProxy` `Ready` condition becomes `Unknown` with the API
+  server's message, as for any other failure to apply a dependent resource. Until the value is corrected,
+  the Deployment is not updated. Duplicating pod validation as CEL rules in the CRD was considered and is
+  not proposed, because it would have to track Kubernetes' validation across versions.
 - The generated Java model uses the fabric8 types (`Toleration`, `Affinity`, `TopologySpreadConstraint`)
   through `existingJavaTypes`, as is already done for `ResourceRequirements`.
 - When set, the operator copies each field unchanged to the proxy pod template. The operator does not add,
@@ -100,22 +108,30 @@ spec:
   removes it from the Deployment, because the operator stops claiming it. None of these fields has a
   deprecated alias, unlike `serviceAccountName`, so no extra handling is needed.
 - If no node satisfies the constraints, replacement pods stay `Pending` with scheduler events explaining
-  why, and the existing pods keep running. This is standard Kubernetes behaviour; the operator does not
-  add a status condition for it.
+  why. The Deployment's default rolling update strategy (`maxUnavailable` of 25%, rounded down) may stop
+  some existing pods first: none with fewer than four replicas, and at least one with four or more. This
+  is standard Kubernetes behaviour; the operator does not add a status condition for it, and the operator
+  guide documents it.
 
-### Strategy for pod-level settings (issue #4978)
+### Rules for further pod-level settings (issue #4978)
 
 Issue #4978 asks how the project should expose user controls over the proxy Deployment. For pod-level
 settings this proposal recommends continuing the inline approach under `infrastructure`, with these rules:
 
 1. Add a field only when there is a demonstrated need.
 2. Reuse the Kubernetes field name, type, and schema verbatim, rather than inventing a Kroxylicious shape.
-3. The operator copies the field; it does not merge user values with values it sets itself. Fields the
-   operator must own (containers, volumes, security context, probes) are not exposed this way.
+3. The operator copies the field; it does not merge user values with values it sets itself.
 
-Rules 2 and 3 keep each field easy to learn, validate, and implement, and avoid the conflict-reporting
-problem that a pod template raises. Deployment-level controls such as rollout strategy remain out of scope
-here and can follow the same rules in a later proposal.
+Rules 2 and 3 keep each field easy to learn, validate, and implement, and mean there are no conflicts
+between user and operator values to report.
+
+This proposal does not settle the rest of #4978:
+
+- **Deployment-level controls** such as rollout strategy could follow the same rules (for example, an
+  `infrastructure.deploymentStrategy` field mirroring `DeploymentSpec.strategy`), but they need their own
+  proposal.
+- **Fields the operator sets itself**, such as containers, volumes, security context, and probes, cannot
+  follow rule 3. Overriding them needs merge and conflict-reporting semantics, which is out of scope.
 
 ## Affected/not affected projects
 
@@ -141,10 +157,11 @@ Because they mirror stable `core/v1` fields, they can be carried unchanged into 
 
 ### A full or partial `podTemplate`
 
-Rejected for the reasons that led to the removal of `spec.podTemplate` in
-[#2323](https://github.com/kroxylicious/kroxylicious/pull/2323): a pod template exposes fields the operator
-must own, so the project would need merge rules, conflict detection and reporting, and a compatibility
-commitment to all of `PodTemplateSpec`. Scheduling needs none of that.
+Rejected because a pod template exposes fields the operator must own, such as containers, volumes, and
+the security context. The project would need merge rules, conflict detection and reporting, and a
+compatibility commitment to all of `PodTemplateSpec`. Scheduling needs none of that.
+[#2323](https://github.com/kroxylicious/kroxylicious/pull/2323) removed the earlier `spec.podTemplate` and
+left full pod template support to be decided.
 
 ### A referenced parameters object, as in the Kubernetes Gateway API
 
@@ -170,6 +187,8 @@ The implementation is complete when tests and documentation show that:
 - omitting the fields leaves them unset in the pod template;
 - configured values are copied unchanged to the pod template and reach scheduled pods;
 - removing the configuration removes the fields from the Deployment;
-- the CRD rejects invalid values with errors naming the field path, and accepts valid ones; and
-- the operator guide documents the fields, the pod labels to select on, and how to diagnose `Pending`
-  pods.
+- the CRD rejects structurally invalid values with errors naming the field path, and accepts valid ones;
+- a value that passes the CRD but fails pod validation is reported on the `KafkaProxy` `Ready` condition;
+  and
+- the operator guide documents the fields, the pod labels to select on, how to diagnose `Pending` pods,
+  and how rollouts behave when pods cannot be scheduled.
