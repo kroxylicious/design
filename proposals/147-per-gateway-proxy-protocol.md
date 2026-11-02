@@ -89,32 +89,32 @@ virtualClusters:
 
 #### Implementation notes
 
-##### Sniffing and enforcement
+##### Same-port mode constraint
 
-The initial bytes of every incoming connection arriving at the proxy will be sniffed to determine whether a PROXY protocol header is present. If a PROXY protocol header is detected, the full decoder is installed to extract the client address.
-This sniffing step happens unconditionally, before any per-gateway policy is applied.
+All gateways that share a listening port must declare the same `proxyProtocol` mode. The proxy validates this at startup and fails with a clear error if conflicting modes are configured on the same port. This constraint arises naturally from the implementation: the PROXY protocol decision must be made when the TCP connection is accepted, before the virtual cluster or gateway identity is known.
 
-The point at which per-gateway policy can be enforced depends on whether the connection is plain or TLS:
+Gateways assigned port 0 (OS-assigned) are exempt — each such gateway always receives its own unique ephemeral port.
 
-| Connection type | Enforcement point                                                                                                                                                                                                              |
-|---|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| TLS (both `portIdentifiesNode` and `sniHostIdentifiesNode`) | Immediately after the TLS `ClientHello`. The PROXY header arrives before the ClientHello, so detection has already completed. The virtual cluster and gateway is known and enforcement happens before TLS negotiation proceeds. |
-| Plain (`portIdentifiesNode` only) | On the first bytes after PROXY detection — the gateway is known immediately on connect, but no data has arrived yet. Enforcement fires when the first bytes reach the pipeline after the detection has run.             |
+##### Static per-port pipeline
 
-Once the virtual cluster/gateway is identified, the mode is enforced:
+The PROXY protocol decoder is wired into the Netty pipeline statically at connection-accept time based on the port's agreed mode, rather than sniffing each connection at runtime.
 
-- Gateway is `required` and a header was received → accepted.
-- Gateway is `required` and no header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_missing`.
-- Gateway is `forbidden` and no header was received → accepted (normal path).
-- Gateway is `forbidden` and a header was received → connection closed immediately; closure is logged; `kroxylicious_client_to_proxy_disconnects` is incremented with `cause=proxy_protocol_header_forbidden`.
+For `required` mode, Netty's `HAProxyMessageDecoder` is installed at the front of the pipeline, ahead of the TLS/SNI handler. For `forbidden` mode, no decoder is installed. Enforcement is therefore a natural consequence of the pipeline configuration:
+
+| Mode | Behaviour |
+|---|---|
+| `required`, header present | Decoder extracts the client address; connection proceeds normally. |
+| `required`, header absent | Decoder raises a protocol error; connection is closed. For TLS connections this occurs before the TLS handshake begins. |
+| `forbidden`, header absent | Normal path — no decoder installed. |
+| `forbidden`, header present | PROXY bytes reach the Kafka codec; the frame decoder raises a protocol error and the connection is closed. |
 
 ##### PROXY protocol v2 LOCAL command
 
-PROXY protocol v2 defines two commands: `PROXY` (a normal proxied connection carrying real client address information) and `LOCAL` (a connection initiated directly by the load balancer itself, typically for health checks). A `LOCAL` connection carries the v2 magic bytes and so will be detected and decoded by the sniff handler, but its source and destination addresses are meaningless — the PROXY protocol specification states that receivers must accept the connection and use the real TCP connection endpoints instead.
+PROXY protocol v2 defines two commands: `PROXY` (a normal proxied connection carrying real client address information) and `LOCAL` (a connection initiated directly by the load balancer itself, typically for health checks). A `LOCAL` connection carries the v2 magic bytes and is decoded by the PROXY decoder, but its source and destination addresses are meaningless — the PROXY protocol specification states that receivers must accept the connection and use the real TCP connection endpoints instead.
 
 When a `LOCAL` command connection arrives, the proxy logs this at WARN level. This is intended to help the administrator identify misconfigured load balancer health checks: if a `LOCAL` connection appears on a Kafka port, it indicates the load balancer is health checking that port directly rather than using the proxy's HTTP management endpoint, which is the recommended target for health checks.
 
-A `LOCAL` connection is subject to the same per-gateway enforcement as any other PROXY header. On a `required` gateway it passes enforcement (a PROXY header was received); on a `forbidden` gateway it is rejected with `cause=proxy_protocol_header_forbidden`. On a `required` gateway, the load balancer will send HTTP rather than a Kafka RPC after the header, so the proxy will treat the subsequent data as a failed TLS negotiation or an invalid Kafka RPC and close the connection, as it does today. Adding a metric for this type of connection error is out of scope for this proposal.
+A `LOCAL` connection is subject to the same per-gateway enforcement as any other PROXY header. On a `required` gateway it passes (a PROXY header was received); on a `forbidden` gateway the PROXY bytes trigger a protocol error and the connection is closed. On a `required` gateway, the load balancer will send HTTP rather than a Kafka RPC after the header, so the proxy will treat the subsequent data as a failed TLS negotiation or an invalid Kafka RPC and close the connection, as it does today.
 
 ### Kubernetes API
 
@@ -190,6 +190,14 @@ Auto-detection allows any client to inject a PROXY header and spoof its origin. 
 ### Retaining the global `proxyProtocol` field as a default fallback
 
 A global default (analogous to `defaultFilters`) might seem convenient during migration, but it would undermine the security guarantee this feature is designed to provide. An administrator who intends only the LoadBalancer gateway to accept PROXY headers could accidentally leave the global default active, enabling injection on all other gateways. Explicit per-gateway configuration is safer.
+
+### Runtime byte-sniffing to detect PROXY headers
+
+An earlier design considered sniffing the initial bytes of every incoming connection to determine whether a PROXY header is present, then dynamically installing the decoder only when detected. This was rejected: the sniff must identify a PROXY header in exactly the same way as the real decoder, duplicating fragile wire-format logic on the hot accept path and introducing risk if the two implementations ever diverge. The static pipeline approach is simpler — the decoder is either present or absent based on configuration, with no duplication.
+
+### Per-connection enforcement metrics
+
+Adding a dedicated metric (e.g. incrementing a counter with `cause=proxy_protocol_header_missing` or `cause=proxy_protocol_header_forbidden`) would require the proxy to distinguish enforcement rejections from other protocol errors at the point of closure. With the static pipeline approach this is not straightforward: a missing PROXY header produces a decoder protocol error, and a forbidden PROXY header produces a Kafka framing error — both are indistinguishable from genuine client misbehaviour at the metric layer without reintroducing the sniffing logic that was already rejected. For now, the logged protocol errors are sufficient for administrator diagnostics.
 
 ### Restricting accepted PROXY protocol versions
 
