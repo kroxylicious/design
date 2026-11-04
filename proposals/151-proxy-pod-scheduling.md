@@ -1,10 +1,11 @@
 # 151 - Proxy pod scheduling for KafkaProxy
 
-Add optional `nodeSelector`, `tolerations`, `affinity`, and `topologySpreadConstraints` fields to
-`KafkaProxy.spec.infrastructure`, so users can control where proxy pods are scheduled. This relates to
-[issue #4978](https://github.com/kroxylicious/kroxylicious/issues/4978): it covers the scheduling part of
-that issue and proposes rules for adding further pod-level settings, but leaves Deployment-level controls
-such as rollout strategy to a later proposal.
+Add an optional `KafkaProxy.spec.infrastructure.podSpec` object with `nodeSelector`, `tolerations`,
+`affinity`, and `topologySpreadConstraints` fields, so users can control where proxy pods are scheduled,
+and move `serviceAccountName` into it, deprecating `spec.infrastructure.serviceAccountName`. This relates
+to [issue #4978](https://github.com/kroxylicious/kroxylicious/issues/4978): it covers the scheduling part
+of that issue and proposes how `infrastructure` is structured for further settings, but leaves
+Deployment-level controls such as rollout strategy to a later proposal.
 
 ## Current situation
 
@@ -42,7 +43,8 @@ Scheduling control is a basic requirement for running a workload in a shared or 
 
 ### API
 
-Add four optional fields to `KafkaProxy.spec.infrastructure`:
+Add an optional `podSpec` object to `KafkaProxy.spec.infrastructure`, holding four scheduling fields and
+the service account:
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -53,37 +55,43 @@ metadata:
 spec:
   replicas: 3
   infrastructure:
-    nodeSelector:
-      node-pool: kafka-proxy
-    tolerations:
-      - key: node-pool
-        operator: Equal
-        value: kafka-proxy
-        effect: NoSchedule
-    affinity:
-      podAntiAffinity:
-        preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              topologyKey: kubernetes.io/hostname
-              labelSelector:
-                matchLabels:
-                  app.kubernetes.io/instance: simple
-    topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app.kubernetes.io/instance: simple
+    podSpec:
+      serviceAccountName: simple-proxy
+      nodeSelector:
+        node-pool: kafka-proxy
+      tolerations:
+        - key: node-pool
+          operator: Equal
+          value: kafka-proxy
+          effect: NoSchedule
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/instance: simple
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/instance: simple
 ```
+
+`podSpec` names the object its fields land in: each field is copied to the `spec` of the proxy pod
+template. It is not a full `PodSpec`; it holds only the fields listed here, and further fields are added
+under the rules in [Structure of `infrastructure`](#structure-of-infrastructure-issue-4978).
 
 ### API semantics
 
-- Each field has exactly the type, schema, and semantics of the field with the same name in the Kubernetes
-  `core/v1` `PodSpec`. The CRD schema inlines the Kubernetes OpenAPI definitions, so the API server checks
-  their structure (types and required fields) when the `KafkaProxy` is written, and `kubectl explain`
-  documents them.
+- Each `podSpec` field has exactly the name, type, schema, and semantics of the field with the same name in
+  the Kubernetes `core/v1` `PodSpec`. The CRD schema inlines the Kubernetes OpenAPI definitions, so the API
+  server checks their structure (types and required fields) when the `KafkaProxy` is written, and
+  `kubectl explain` documents them.
 - The OpenAPI schema does not carry the rest of Kubernetes' pod validation, such as allowed toleration
   operators or `weight` and `maxSkew` ranges. Such errors are reported when the operator applies the
   Deployment: the apply fails, and the `KafkaProxy` `Ready` condition becomes `Unknown` with the API
@@ -100,47 +108,71 @@ spec:
   (`app.kubernetes.io/name: kroxylicious`, `app.kubernetes.io/component: proxy`,
   `app.kubernetes.io/instance: <KafkaProxy name>`), which are documented.
 
+### Service account
+
+`podSpec.serviceAccountName` has the semantics defined for `infrastructure.serviceAccountName` by
+[proposal 135](./135-dedicated-service-account.md); only its location changes, so that the service account
+follows the same pattern as the other pod-level fields.
+
+- `spec.infrastructure.serviceAccountName` is deprecated. It keeps working in `v1alpha1`, is marked
+  deprecated in the CRD description and the documentation, and is not carried into the next API version.
+- Setting both fields is rejected by a CEL validation rule on `infrastructure`, so there is no precedence
+  to define.
+- Moving the value from one field to the other in the same update leaves the pod template unchanged, so it
+  does not cause a rollout.
+
 ### Lifecycle
 
 - Changing any field changes the pod template, so the proxy pods are replaced through a normal Deployment
   rollout. Rollout strategy is unchanged.
 - The operator applies the Deployment with server-side apply. Removing a field from the `KafkaProxy`
-  removes it from the Deployment, because the operator stops claiming it. None of these fields has a
-  deprecated alias, unlike `serviceAccountName`, so no extra handling is needed.
+  removes it from the Deployment, because the operator stops claiming it. `podSpec.serviceAccountName` keeps
+  the existing handling of the deprecated pod `serviceAccount` alias; the scheduling fields have no alias,
+  so they need no extra handling.
 - If no node satisfies the constraints, replacement pods stay `Pending` with scheduler events explaining
   why. The Deployment's default rolling update strategy (`maxUnavailable` of 25%, rounded down) may stop
   some existing pods first: none with fewer than four replicas, and at least one with four or more. This
   is standard Kubernetes behaviour; the operator does not add a status condition for it, and the operator
   guide documents it.
 
-### Rules for further pod-level settings (issue #4978)
+### Structure of `infrastructure` (issue #4978)
 
-Issue #4978 asks how the project should expose user controls over the proxy Deployment. For pod-level
-settings this proposal recommends continuing the inline approach under `infrastructure`, with these rules:
+Issue #4978 asks how the project should expose user controls over the proxy Deployment. This proposal
+recommends that each property of `infrastructure` is named after the Kubernetes object its fields land
+in, and that such properties follow these rules:
 
 1. Add a field only when there is a demonstrated need.
 2. Reuse the Kubernetes field name, type, and schema verbatim, rather than inventing a Kroxylicious shape.
-3. The operator copies the field; it does not merge user values with values it sets itself.
+3. Put the field under the property for the object it lands in: `podSpec` for the pod template `spec`,
+   and, in later proposals, `deploymentSpec` for the Deployment `spec` (for example, `strategy`) and
+   `deploymentMetadata` for the Deployment's labels and annotations.
+4. These properties hold only fields that belong entirely to the user. The operator never sets them
+   itself; it copies them unchanged and does not merge them with values of its own.
 
-Rules 2 and 3 keep each field easy to learn, validate, and implement, and mean there are no conflicts
-between user and operator values to report.
+Rules 2 and 4 keep each field easy to learn, validate, and implement, and mean there are no conflicts
+between user and operator values to report. Rule 3 makes it clear from the `KafkaProxy` where each value
+ends up in the deployed resources. The existing `proxyContainer` property already follows rule 3 for the
+proxy container.
 
 This proposal does not settle the rest of #4978:
 
-- **Deployment-level controls** such as rollout strategy could follow the same rules (for example, an
-  `infrastructure.deploymentStrategy` field mirroring `DeploymentSpec.strategy`), but they need their own
-  proposal.
+- **Deployment-level controls** such as rollout strategy would go in `deploymentSpec`, and Deployment labels
+  and annotations in `deploymentMetadata`, but each needs its own proposal.
 - **Fields the operator sets itself**, such as containers, volumes, security context, and probes, cannot
-  follow rule 3. Overriding them needs merge and conflict-reporting semantics, which is out of scope.
+  follow rule 4. Letting users influence them needs cooperative management, where user and operator values
+  are merged and conflicts are detected and reported. That would use a separate property of
+  `infrastructure` (for example, `podSpecTemplate` or `podSpecBaseline`) with its own semantics, so that
+  `podSpec` keeps meaning "owned by the user". It is out of scope.
 
 ## Affected/not affected projects
 
 **Affected:**
 
-- `kroxylicious-kubernetes/kroxylicious-kubernetes-api`: the four CRD fields and `existingJavaTypes`
-  mappings.
-- `kroxylicious-kubernetes/kroxylicious-operator`: copy the fields to the proxy pod template; unit,
-  CRD validation, and reconciler integration tests.
+- `kroxylicious-kubernetes/kroxylicious-kubernetes-api`: the `podSpec` object with its five fields and the
+  `existingJavaTypes` mappings; deprecation of `infrastructure.serviceAccountName` and the CEL rule that
+  rejects setting both service account fields.
+- `kroxylicious-kubernetes/kroxylicious-operator`: copy the `podSpec` fields to the proxy pod template and
+  read the service account from either field; unit, CRD validation, and reconciler integration tests.
 - `kroxylicious-docs`: a "Controlling where proxy pods are scheduled" section in the operator guide.
 
 **Not affected:**
@@ -150,10 +182,20 @@ This proposal does not settle the rest of #4978:
 
 ## Compatibility
 
-All four fields are additive and optional. Omitting them preserves the current pod template exactly.
-Because they mirror stable `core/v1` fields, they can be carried unchanged into later API versions.
+`podSpec` and its fields are additive and optional. Omitting them preserves the current pod template
+exactly. Existing `KafkaProxy` resources that set `infrastructure.serviceAccountName` keep working
+unchanged in `v1alpha1`; users move the value to `podSpec.serviceAccountName` before the next API version,
+which drops the deprecated field. Because the `podSpec` fields mirror stable `core/v1` fields, they can be
+carried unchanged into later API versions.
 
 ## Rejected alternatives
+
+### Flat fields directly under `infrastructure`
+
+An earlier draft of this proposal added the scheduling fields directly to `infrastructure`, next to
+`serviceAccountName` and `proxyContainer`. Rejected because it does not show where each field lands in
+the deployed resources, and it leaves no clear place for Deployment-level settings, or for labels and
+annotations, which would land on more than one object.
 
 ### A full or partial `podTemplate`
 
@@ -166,7 +208,7 @@ left full pod template support to be decided.
 ### A referenced parameters object, as in the Kubernetes Gateway API
 
 Rejected for now because it adds a new resource type, a watch, cross-resource status reporting, and an
-indirection users must learn, for four fields that belong to a single `KafkaProxy`. It may be worth
+indirection users must learn, for a few fields that belong to a single `KafkaProxy`. It may be worth
 revisiting if the same settings must be shared by many proxies.
 
 ### Kroxylicious-specific scheduling fields
@@ -184,9 +226,11 @@ Rejected because these are workarounds that depend on cluster-specific tooling, 
 
 The implementation is complete when tests and documentation show that:
 
-- omitting the fields leaves them unset in the pod template;
+- omitting `podSpec` or any of its fields leaves the fields unset in the pod template;
 - configured values are copied unchanged to the pod template and reach scheduled pods;
 - removing the configuration removes the fields from the Deployment;
+- `podSpec.serviceAccountName` and the deprecated `infrastructure.serviceAccountName` produce the same pod
+  template, and setting both is rejected;
 - the CRD rejects structurally invalid values with errors naming the field path, and accepts valid ones;
 - a value that passes the CRD but fails pod validation is reported on the `KafkaProxy` `Ready` condition;
   and
