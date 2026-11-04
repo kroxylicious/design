@@ -41,13 +41,13 @@ However, the operator is uniquely positioned to make that as simple as possible 
 To make best use of Kubernetes' RBAC authorization, it is proposed to express ingress and egress information in a dedicated CR, rather than in the existing Kroxylicious resources.
 This will permit the Data Engineer to have access to a `KafkaProtocolFilter` without also granting them control over the firewall rules for the proxy as a whole.
 
-Unlike an earlier revision of this proposal (see [Rejected alternatives](#rejected-alternatives)), the dedicated CR is not attached per-target via a generic `targetRef`. Instead, each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which declares, in one place, the ingress rules for every `KafkaProxyIngress`, and the egress rules for every `KafkaService` and `KafkaProtocolFilter`, that belong to that proxy. This trades a theoretical, finer-than-kind RBAC separation (see [Non-goals](#non-goals)) for a much simpler CRD, validation, and reconciliation story, and a single place to review a proxy's complete declared network policy.
+Each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which declares, in one place, the ingress rules for every `KafkaProxyIngress`, and the egress rules for every `KafkaService` and `KafkaProtocolFilter`, that belong to that proxy. This results in a simple CRD, validation, and reconciliation story, and a single place to review a proxy's complete declared network policy.
 
 ### Non-goals
 
 * Support for other resources than Kubernetes' built-in `NetworkPolicy`.
-* RBAC separation finer than "who may shape this `KafkaProxy`'s network policy as a whole" — e.g. separately granting one role control over a proxy's ingress exposure, another over its egress to the real cluster, and a third over an individual filter's own needs. An earlier revision of this proposal pursued that; see [Rejected alternatives](#rejected-alternatives) for why it was dropped. Organizations that need it can layer a policy engine (Kyverno, OPA Gatekeeper, a `ValidatingAdmissionPolicy`) on top of this design, inspecting which part of a `KafkaProxyNetworkPolicy`'s spec a given identity is permitted to change.
-* Support for the new `KafkaProtocolRouter` CR. This can be done in a later proposal.
+* RBAC separation finer than "who may shape this `KafkaProxy`'s network policy as a whole" — e.g. separately granting one role control over a proxy's ingress exposure, another over its egress to the real cluster, and a third over an individual filter's own needs. 
+* Support for the new `KafkaProtocolRouter` CR. That can be done in a later proposal.
 
 ### Goals
 
@@ -72,7 +72,7 @@ Two new custom resource definitions (CRDs) will be added:
 
 #### `KafkaProxyNetworkPolicy`
 
-Each `KafkaProxy` may have **at most one** `KafkaProxyNetworkPolicy`, referencing it explicitly via `spec.proxyRef` — the same pattern used elsewhere in this API (e.g. `KafkaProxyIngress.spec.proxyRef`), rather than any implicit binding by name. If a second `KafkaProxyNetworkPolicy` is created with a `proxyRef` to a `KafkaProxy` that already has one, the second (by creation timestamp) is rejected: `Accepted: False`, reason `Conflicting`, pointing at the name of the one already in effect.
+Each `KafkaProxy` may have **at most one** `KafkaProxyNetworkPolicy`, referencing it explicitly via `spec.proxyRef` — the same pattern used elsewhere in this API (e.g. `KafkaProxyIngress.spec.proxyRef`). If a second `KafkaProxyNetworkPolicy` is created with a `proxyRef` to a `KafkaProxy` that already has one, the second (by creation timestamp) is rejected: `Accepted: False`, reason `Conflicting`, pointing at the name of the one already in effect.
 
 ```yaml
 apiVersion: kroxylicious.io/v1alpha1
@@ -121,7 +121,7 @@ spec:
                   kubernetes.io/metadata.name: vault
 ```
 
-* `spec.proxyRef` identifies the `KafkaProxy` this `KafkaProxyNetworkPolicy` governs. It resolves only within the same namespace — there is no cross-namespace form — so a `KafkaProxyNetworkPolicy` can never grant or imply network access on behalf of a `KafkaProxy` owned by a different namespace/tenant.
+* `spec.proxyRef` identifies the `KafkaProxy` this `KafkaProxyNetworkPolicy` governs. It resolves only within the same namespace — there is no cross-namespace form.
 * `spec.kafkaProxyIngresses[]` declares, per `ingressRef`, the `from` peers allowed to reach that ingress. There is no `ports` field here: the port(s) are always the ingress's own listening port(s), which the operator already knows — see [Ports](#ports) for why this differs from the other two lists.
 * `spec.kafkaServices[]` declares, per `serviceRef`, zero or more `{ports, to}` rules for egress to that `KafkaService`. An entry with no `allowEgress` at all is valid — see [The `strimziKafkaRef` case](#the-strimzikafkaref-case) for why, and [Ports](#ports) for what an entry's own omitted `ports` means.
 * `spec.kafkaProtocolFilters[]` declares, per `filterRef`, zero or more `{ports, from}` rules under `allowIngress` and/or zero or more `{ports, to}` rules under `allowEgress`. Unlike the other two lists, `ports` is **required** on every entry here — see [Ports](#ports).
@@ -192,46 +192,40 @@ If `clusterCIDRs` is left unset, the internal-address check is skipped rather th
 Example:
 ```yaml
 spec:
-  resourceGeneration:
-    - group: networking.k8s.io
-      kind: NetworkPolicy
-      options:
-        generation: enabled|disabled
-        whenAbsent: allow|deny
+  networkPolicyGeneration: 
+    generation: enabled|disabled
+    whenAbsent: allow|deny
 ```
 
-This allows enabling/disabling the generation of optional resources, and configuring that generation's behaviour, where `NetworkPolicy` is the first such optional resource.
-The schema is flexible to allow other, additional resource kinds to be optionally generated by the operator in future, each with its own `options` shape; `generation` and `whenAbsent` below are specific to the `NetworkPolicy` entry.
+This allows enabling/disabling the generation of NP, and configuring that generation's behaviour.
 
-**`options.generation`** controls whether `NetworkPolicy` resources are generated at all:
+**`networkPolicyGeneration.generation`** controls whether `NetworkPolicy` resources are generated at all:
 
 * `enabled`: `NetworkPolicies` will be generated
 * `disabled`: `NetworkPolicies` will not be generated
 
-The default value for `generation` for `NetworkPolicy` will be `enabled` for fresh installations; installation tooling for an existing (upgrading) deployment should explicitly set `disabled`, per the [Goals](#goals) above.
+The default value for `generation` for `NetworkPolicy` will be `enabled` for fresh installations.
 
-**`options.whenAbsent`** governs what's generated for **any** target — a `KafkaProxyIngress`, a `KafkaService`, or a `KafkaProtocolFilter` direction — that currently has no explicit rule declared for it, whether that's because its `KafkaProxy` has no `KafkaProxyNetworkPolicy` at all, or because one exists but doesn't yet mention that particular target (see [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics)). This single setting replaces what, in an earlier revision of this proposal, was a per-kind, per-direction `requiredAttachments`/`permittedAttachments` matrix (see [Rejected alternatives](#rejected-alternatives)):
+**`networkPolicyGeneration.whenAbsent`** governs what's generated for **any** target — a `KafkaProxyIngress`, a `KafkaService`, or a `KafkaProtocolFilter` direction — that currently has no explicit rule declared for it, whether that's because its `KafkaProxy` has no `KafkaProxyNetworkPolicy` at all, or because one exists but doesn't yet mention that particular target (see [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics)). 
 
 * `allow` generates a `NetworkPolicy` permitting that traffic from/to anywhere.
 * `deny` generates a `NetworkPolicy` with the matching `policyTypes` entry but no rules at all for that direction. Kubernetes' own `NetworkPolicy` semantics mean a `Pod` selected by a policy of a given type with no matching rule denies all traffic of that type, so this blocks the direction entirely until an explicit rule is declared for it — whose rules are then additive with this (empty) baseline, i.e. exactly what it specifies.
 
-The one exception is a `strimziKafkaRef`-based `KafkaService`, which always gets a precise, auto-derived rule regardless of `whenAbsent` — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case).
+**TODO** `allow` is the schema default for every install, fresh or upgraded alike. The bar to getting a working proxy should be low: a brand-new `KafkaProxy` should pass traffic immediately, not force the user to author a `KafkaProxyNetworkPolicy` before anything works, and upgrading a cluster already running this operator should never silently cut off access a target was previously relying on. This also matches the [Compatibility](#compatibility) story below.
 
-`allow` is the schema default for every install, fresh or upgraded alike. The bar to getting a working proxy should be low: a brand-new `KafkaProxy` should pass traffic immediately, not force the user to author a `KafkaProxyNetworkPolicy` before anything works, and upgrading a cluster already running this operator should never silently cut off access a target was previously relying on. This also matches the [Compatibility](#compatibility) story below.
-
-`allow` isn't a dead end for security, though: every generated policy — including the wide-open ones — is still named descriptively and labelled `kroxylicious.io/default-policy: allow` (see [Naming](#naming)), so an administrator can enumerate every allow-everywhere rule in the cluster (`kubectl get networkpolicy -l kroxylicious.io/default-policy=allow`) and tighten them at their own pace, either by adding explicit entries to the relevant `KafkaProxyNetworkPolicy` or, once confident nothing still depends on the wide-open default, flipping `options.whenAbsent` to `deny`. `deny` is always a deliberate, explicit administrator choice — the operator never switches to it on its own.
-
-We deliberately chose a single operator-wide setting over a per-kind one (e.g. "allow by default for ingress/service, but require explicit declaration for filters"). That finer-grained control was available in an earlier revision of this proposal, at the cost of the matrix this setting replaces. An administrator who wants to force explicit declaration specifically for filters while leaving ingress/service on defaults can still get most of the way there operationally (e.g. via CI policy checking that any `KafkaProtocolFilter` known to need egress has a corresponding entry), but the operator itself no longer enforces it as a first-class per-kind setting.
-
-`generation` and `whenAbsent` are grouped as sibling `options` of the same `resourceGeneration` entry, rather than as separate top-level `KafkaProxyOperatorConfig` fields, because both are specific to `NetworkPolicy` generation and nothing else: keeping them together means a future optionally-generated resource kind can define its own, unrelated `options` without crowding the top-level spec with kind-specific fields.
+**TODO** `allow` isn't a dead end for security, though: every generated policy — including the wide-open ones — is still named descriptively and labelled `kroxylicious.io/default-policy: allow` (see [Naming](#naming)), so an administrator can enumerate every allow-everywhere rule in the cluster (`kubectl get networkpolicy -l kroxylicious.io/default-policy=allow`) and tighten them at their own pace, either by adding explicit entries to the relevant `KafkaProxyNetworkPolicy` or, once confident nothing still depends on the wide-open default, flipping `options.whenAbsent` to `deny`. `deny` is always a deliberate, explicit administrator choice — the operator never switches to it on its own.
 
 ### Resolution, exhaustiveness, and generation semantics
 
-`spec.proxyRef`, `ingressRef`, `serviceRef`, and `filterRef` are all resolved by the operator, which updates `status` accordingly (see [Status conditions](#status-conditions)). A reference is only considered resolved if the referenced CR exists **and** itself, directly or transitively, resolves to the same `KafkaProxy` named by this `KafkaProxyNetworkPolicy`'s own `spec.proxyRef` — e.g. a `serviceRef` pointing at a `KafkaService` that isn't actually attached to this proxy's `VirtualKafkaCluster`(s) does not resolve.
+`spec.proxyRef`, `ingressRef`, `serviceRef`, and `filterRef` are all resolved by the operator, which updates `status` accordingly (see [Status conditions](#status-conditions)). A reference is only considered resolved if:
 
-**Exhaustiveness.** A `KafkaProxyNetworkPolicy` is only `Accepted: True` if, in addition to every listed ref resolving, the reverse also holds: every `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` that resolves to this proxy has a corresponding entry in the relevant list. This directly replaces the `requiredAttachments` mechanism from an earlier revision of this proposal (see [Rejected alternatives](#rejected-alternatives)): instead of an admin opting specific kinds into "must be explicitly declared," *every* target must be acknowledged, even if only by an entry with no rules (e.g. `- serviceRef: {name: my-strimzi}` with no `allowEgress`, meaning "I know this one auto-derives; nothing more to add"). This also directly resolves the two motivating problems that led to this proposal: there's no longer a state where some targets on a proxy have declared rules and others silently don't, and a filter can never get a "free ride" on a sibling's broad rule without an explicit entry of its own making that visible.
+* the referenced CR exists 
+* **and** the referenced CR has `ResolvedRef: True`
+* **and** the referenced CR, directly or transitively, resolves to the same `KafkaProxy` named by this `KafkaProxyNetworkPolicy`'s own `spec.proxyRef` — e.g. a `serviceRef` pointing at a `KafkaService` that isn't actually attached to this proxy's `VirtualKafkaCluster`(s) does not resolve.
 
-**Generation is per-target, not all-or-nothing for the `KafkaProxyNetworkPolicy` as a whole.** Each `ingressRef`/`serviceRef`/`filterRef` entry is resolved, validated, and used to generate (or update) its own `NetworkPolicy` independently:
+**Exhaustiveness.** A `KafkaProxyNetworkPolicy` is only `Accepted: True` if, in addition to every listed ref resolving, the reverse also holds: every `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` that resolves to this proxy has a corresponding entry in the relevant list of the `KafkaProxyNetworkPolicy`. This means there is way for some targets on a proxy have declared rules and others silently not have, and a filter can never get a "free ride" on a sibling's broad rule without an explicit entry of its own making that visible.
+
+**Generation is per-target.** Each `ingressRef`/`serviceRef`/`filterRef` entry is resolved, validated, and used to generate (or update) its own `NetworkPolicy` independently:
 
 * An entry that resolves and validates generates/updates its `NetworkPolicy` from its declared rules, regardless of the state of any other entry.
 * A target with **no** entry in the `KafkaProxyNetworkPolicy` (e.g. a `KafkaProtocolFilter` just added to the proxy, before its owner has updated the shared CR) is treated exactly as if the whole `KafkaProxyNetworkPolicy` were absent for that one target: the `whenAbsent` fallback applies to it alone, generating an allow- or deny-everywhere `NetworkPolicy` labelled `kroxylicious.io/default-policy` (see [Naming](#naming)). It does not affect any other, already-declared target. This is what keeps exhaustiveness from becoming a cliff-edge: a `KafkaProxyNetworkPolicy` that's temporarily `Accepted: False` because of one missing entry still has every other entry's precise, declared rules in full effect.
@@ -318,7 +312,7 @@ Each generated `NetworkPolicy`'s `metadata.name` is `${token}.${name}`, where `$
 | `filter-ingress` | A `KafkaProtocolFilter` entry's `allowIngress` (or default) |
 | `filter-egress` | A `KafkaProtocolFilter` entry's `allowEgress` (or default) |
 
-This is collision-free **by construction**, not merely unlikely to collide. `.` is reserved as the delimiter between token and name: the CRD schemas for `KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`, and `KafkaProxyNetworkPolicy` forbid `.` in `metadata.name`, and none of the four tokens above contain `.` either. So every generated name contains exactly one `.`, and two generated names can only be equal if their token and their source name are both equal — the same reasoning, with a smaller token set, as an earlier revision of this proposal (see [Rejected alternatives](#rejected-alternatives) for why a reserved delimiter was chosen over a hash suffix).
+This is collision-free by construction. `.` is reserved as the delimiter between token and name: the CRD schemas for `KafkaProxyIngress`, `KafkaService`, `KafkaProtocolFilter`, and `KafkaProxyNetworkPolicy` already forbid `.` in `metadata.name`, and none of the four tokens above contain `.` either. So every generated name contains exactly one `.`, and two generated names can only be equal if their token and their source name are both equal.
 
 Whether a given `ingress`/`egress`/`filter-ingress`/`filter-egress` `NetworkPolicy` came from a declared entry or from the `whenAbsent` fallback is recorded as a label, not in the name:
 
@@ -330,7 +324,7 @@ metadata:
 
 This label is present whenever a `NetworkPolicy` was generated via the `whenAbsent` fallback — whether because the whole `KafkaProxy` has no `KafkaProxyNetworkPolicy`, or because one exists but this particular target has no entry in it — letting all such rules be selected independent of target kind, e.g. `kubectl get networkpolicy -l kroxylicious.io/default-policy=deny`. It's absent once an entry's own declared rules are in effect, and absent from the `strimziKafkaRef` auto-derived rule, since neither is driven by `whenAbsent`.
 
-If the computed `${token}.${name}` would exceed Kubernetes' `NetworkPolicy` name length limit, the truncation algorithm defined in https://github.com/kroxylicious/design/pull/150 is applied to the whole string.
+**TODO** If the computed `${token}.${name}` would exceed Kubernetes' `NetworkPolicy` name length limit, the truncation algorithm defined in https://github.com/kroxylicious/design/pull/150 is applied to the whole string.
 
 ### Policy for `KafkaProxyIngress`
 
