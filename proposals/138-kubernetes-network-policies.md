@@ -760,8 +760,12 @@ A filter needing egress to more than one kind of destination for different reaso
 ### Operator RBAC changes
 
 The operator will need to be allowed to CRUD `NetworkPolicy` resources via its dependent resources `ClusterRole`.
+This means the operator has the ability to widen NP on every Pod in every namespace in the cluster, even though it's only ever needed for proxy Pods.
+That's unavoidable with Kubernetes's RBAC authorization model: RBAC grants by resource type, not by object identity, so there's no way to restrict the grant to just the `NetworkPolicy` objects the operator itself created.
 
-It will also need `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyNetworkPolicy` and `KafkaProxyOperatorConfig` in the "watched resources" `ClusterRole`.
+In the "watched resources" `ClusterRole` the operator will need:
+* `watch`, `get`, `list`, `create` on `KafkaProxyOperatorConfig`,
+* `watch`, `get`, `list`, `patch`, `update` (+ `/status`) on `KafkaProxyNetworkPolicy`.
 
 ### Future work
 
