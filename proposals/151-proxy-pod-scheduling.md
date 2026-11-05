@@ -90,8 +90,8 @@ under the rules in [Structure of `infrastructure`](#structure-of-infrastructure-
 
 - Each `podSpec` field has exactly the name, type, schema, and semantics of the field with the same name in
   the Kubernetes `core/v1` `PodSpec`. The CRD schema inlines the Kubernetes OpenAPI definitions, so the API
-  server checks their structure (types and required fields) when the `KafkaProxy` is written, and
-  `kubectl explain` documents them.
+  server checks their structure (types and required fields) when the `KafkaProxy` is written.
+- Nested `description` strings are removed from the inlined definitions to keep the CRD small.
 - The OpenAPI schema does not carry the rest of Kubernetes' pod validation, such as allowed toleration
   operators or `weight` and `maxSkew` ranges. Such errors are reported when the operator applies the
   Deployment: the apply fails, and the `KafkaProxy` `Ready` condition becomes `Unknown` with the API
@@ -142,7 +142,8 @@ recommends that each property of `infrastructure` is named after the Kubernetes 
 in, and that such properties follow these rules:
 
 1. Add a field only when there is a demonstrated need.
-2. Reuse the Kubernetes field name, type, and schema verbatim, rather than inventing a Kroxylicious shape.
+2. Reuse the Kubernetes field name, type, and schema verbatim, rather than inventing a Kroxylicious shape,
+   stripping nested descriptions to keep the CRD small.
 3. Put the field under the property for the object it lands in: `podSpec` for the pod template `spec`,
    and, in later proposals, `deploymentSpec` for the Deployment `spec` (for example, `strategy`) and
    `deploymentMetadata` for the Deployment's labels and annotations.
