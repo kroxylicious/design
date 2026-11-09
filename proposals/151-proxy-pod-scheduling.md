@@ -134,6 +134,14 @@ follows the same pattern as the other pod-level fields.
   some existing pods first: none with fewer than four replicas, and at least one with four or more. This
   is standard Kubernetes behaviour; the operator does not add a status condition for it, and the operator
   guide documents it.
+- Unschedulable constraints also hold back configuration changes. The proxy reads its configuration from a
+  `subPath` mount, which Kubernetes never refreshes in a running pod, and the pod template carries a
+  `kroxylicious.io/referent-checksum` annotation, so each change to virtual clusters, filters, services,
+  ingresses, or their Secrets is applied through a new rollout. While constraints that no node can satisfy
+  keep the replacement pods `Pending`, every later configuration change is stuck behind them, and the
+  existing pods keep serving the previous configuration until the constraints are fixed. The operator
+  guide's troubleshooting section explains this, so that users do not read it as a configuration change,
+  such as a filter change, that was not applied.
 
 ### Structure of `infrastructure` (issue #4978)
 
@@ -236,4 +244,5 @@ The implementation is complete when tests and documentation show that:
 - a value that passes the CRD but fails pod validation is reported on the `KafkaProxy` `Ready` condition;
   and
 - the operator guide documents the fields, the pod labels to select on, how to diagnose `Pending` pods,
-  and how rollouts behave when pods cannot be scheduled.
+  and how rollouts behave when pods cannot be scheduled, and its troubleshooting section explains that
+  configuration changes do not take effect while replacement pods are `Pending`.
