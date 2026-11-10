@@ -1,4 +1,4 @@
-# 000 - Shared ConfigResource type-classification utility
+# 152 - Shared ConfigResource type-classification utility
 
 Multiple Kroxylicious filters need to determine whether a `ConfigResource` in a
 `DescribeConfigs` request or response represents a topic name, a group id, or something else.
