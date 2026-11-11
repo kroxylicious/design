@@ -48,11 +48,13 @@ The router keeps a connection on a single cluster by construction: if a subject 
 
 #### Subject resolution
 
-The router reads the client's identity from `RouterContext.authenticatedSubject()`. For each `Principal` type referenced by a `hasPrincipals` entry anywhere in the configuration (see [Rule matching](#rule-matching)), it extracts the subject's unique principal of that type:
+The router reads the client's identity from `RouterContext.authenticatedSubject()`. For each `{withType, withName}` pair referenced by a `hasPrincipals` entry anywhere in the configuration (see [Rule matching](#rule-matching)), it checks whether the subject carries a matching principal:
 
 ```java
-subject.uniquePrincipalOfType(principalType).map(Principal::name)
+subject.allPrincipalsOfType(withType).stream().anyMatch(p -> p.name().equals(withName))
 ```
+
+This is a membership check, not a uniqueness check: it works whether `withType` denotes a principal the subject carries at most one of (for example `User`), or one it can carry several of (for example a `Role` type, where a subject might hold both a `developer` role and a `team-a` role at once).
 
 The default example in this proposal uses `io.kroxylicious.proxy.authentication.User`, whose name is established upstream of the router by the virtual cluster filter chain:
 
@@ -71,7 +73,7 @@ A client can technically send a different `client.id` on a later request today. 
 
 `ruleMatch` evaluates an ordered list of `rules` against the current subject and the connection's pinned `client.id`, in declaration order, and uses the route of the first rule that matches. Each rule has:
 
-* `hasPrincipals` (optional) — a map of fully-qualified `Principal` implementation name to required principal name. The rule matches only if the subject carries a principal of *every* listed type, with the exact name given for each. Each referenced type must be annotated `@Unique` or `@SingularPrincipal` (directly, or via meta-annotation), the contract that guarantees a `Subject` carries at most one principal of that type (proposal [119][proposal-119]); the factory checks this reflectively in `initialize()` for every type referenced anywhere in the configuration and refuses to start if any is not singular. A rule with `hasPrincipals` cannot match an anonymous subject: it has no principals to check against.
+* `hasPrincipals` (optional) — a list of `{withType, withName}` pairs, `withType` a fully-qualified `Principal` implementation name and `withName` a required principal name. The rule matches only if the subject carries, for *every* listed pair, a principal of that type with that name (checked via `Subject.allPrincipalsOfType(withType)`, proposal [119][proposal-119]). This is a list rather than a map keyed by type, because YAML mapping keys must be unique: a map cannot express two pairs with the same `withType` and different `withName`s, which a rule needs to match more than one principal of a non-singular type (for example two `Role` principals). A rule with `hasPrincipals` cannot match an anonymous subject: it has no principals to check against.
 * `hasClientId` (optional) — a required value for the connection's pinned `client.id`. Because `client.id` is available before authentication, a rule with `hasClientId` and no `hasPrincipals` can match on an anonymous connection; see [Fail-closed by default](#fail-closed-by-default) for what that implies for isolation.
 * `useRoute` — the route name, declared in the router's `routes` block, to forward to when the rule matches.
 
@@ -79,7 +81,7 @@ A rule needs at least one of `hasPrincipals` or `hasClientId`; the factory rejec
 
 `defaultRoute` (optional) names the route for a subject/`client.id` pair that no rule matches once the subject is authenticated. If omitted, such a connection is rejected fail-closed; see [Route selection](#route-selection) for why this never applies to an anonymous subject.
 
-At startup the factory validates every `useRoute` and `defaultRoute` against the router's declared routes (`RouterFactoryContext.routeNames()`); a typo surfaces as a boot-time error rather than a per-request rejection. It also rejects two rules with identical predicates (the same `hasPrincipals` map and the same `hasClientId`, where present), since the second could never be reached. Beyond that, overlapping rules are legal: evaluation order is the precedence mechanism, so a more specific rule (for example, one matching both a principal and a `client.id`) should be declared ahead of a more general one it should take priority over.
+At startup the factory validates every `useRoute` and `defaultRoute` against the router's declared routes (`RouterFactoryContext.routeNames()`); a typo surfaces as a boot-time error rather than a per-request rejection. It also rejects two rules with identical predicates (the same `hasPrincipals` pairs, order-insensitive, and the same `hasClientId`, where present), since the second could never be reached. Beyond that, overlapping rules are legal: evaluation order is the precedence mechanism, so a more specific rule (for example, one matching both a principal and a `client.id`) should be declared ahead of a more general one it should take priority over.
 
 #### Route selection
 
@@ -148,13 +150,16 @@ routerDefinitions:
         defaultRoute: team-a         # optional; authenticated-but-unmapped subjects route here
         rules:
           - hasPrincipals:
-              io.kroxylicious.proxy.authentication.User: alice
+              - withType: io.kroxylicious.proxy.authentication.User
+                withName: alice
             useRoute: team-a
           - hasPrincipals:
-              io.kroxylicious.proxy.authentication.User: carol
+              - withType: io.kroxylicious.proxy.authentication.User
+                withName: carol
             useRoute: team-a
           - hasPrincipals:
-              io.kroxylicious.proxy.authentication.User: bob
+              - withType: io.kroxylicious.proxy.authentication.User
+                withName: bob
             useRoute: team-b
           - hasClientId: demo-app    # no principal required; matches before/without authentication
             useRoute: team-a
@@ -183,7 +188,7 @@ The `SubjectRouter` `config` takes a single `ruleMatch` block:
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `ruleMatch.rules` | list\<object\> | Yes | — | Ordered rules, each with an optional `hasPrincipals` map, an optional `hasClientId` string, and a required `useRoute` naming a route declared in the router's `routes`. At least one of `hasPrincipals`/`hasClientId` is required per rule. The first matching rule wins; see [Rule matching](#rule-matching). |
+| `ruleMatch.rules` | list\<object\> | Yes | — | Ordered rules, each with an optional `hasPrincipals` list of `{withType, withName}` pairs, an optional `hasClientId` string, and a required `useRoute` naming a route declared in the router's `routes`. At least one of `hasPrincipals`/`hasClientId` is required per rule. The first matching rule wins; see [Rule matching](#rule-matching). |
 | `ruleMatch.defaultRoute` | string | No | none | Route for an authenticated subject whose principals and `client.id` match no rule. Never applies to an anonymous subject. If omitted, such a subject is rejected fail-closed. |
 
 Pre-authentication `API_VERSIONS` needs no route configuration: it is served from the cross-route version intersection (see [API version negotiation](#api-version-negotiation)), which spans every route in the router.
@@ -321,6 +326,8 @@ Following the project logging rules, the router logs the authenticated subject u
 * **A pluggable `RouteSelector` SPI.** An earlier draft let operators supply a custom `RouteSelector` plugin for the subject-to-route decision, with `ruleMatch` as one built-in implementation among possibly several. This is rejected for the initial version: a plugin SPI multiplies the surface that needs design and security review before a single concrete strategy has shipped and proven the `Router` API end to end. Shipping `ruleMatch` as the only matching strategy keeps the initial scope small and reviewable. Pluggable selection can be reintroduced later if a second strategy earns its place (see [Future work](#future-work)).
 
 * **Route on group or role principals.** Matching the unique `User` principal covers the stated use cases and keeps the lookup unambiguous (each connection has exactly one `User`). Routing on group or role membership raises questions when a subject belongs to several groups mapped to different routes. This is deferred; it can be added later as an alternative matching strategy without changing the routing engine.
+
+* **A map from principal type to name for `hasPrincipals`.** An earlier draft keyed `hasPrincipals` as `{type: name}`, one entry per type. This is rejected: YAML forbids duplicate keys in a mapping, so it cannot express two pairs for the same type with different names, for example `Role: developer` and `Role: team-a` in one rule. A rule needing that has no valid way to say it under a map. The list of `{withType, withName}` pairs has no such restriction, and, as a side effect, drops the requirement that `hasPrincipals` only reference singular principal types: a list is a set of membership checks via `Subject.allPrincipalsOfType()`, which works the same whether a type is singular or not.
 
 * **Represent `client.id` as a Principal in the `Subject`.** An earlier idea added a `ClientId` principal to the subject, populated by a filter, so routers (and other subject-consuming components) could treat it uniformly with authenticated principals. This is rejected: `client.id` is supplied by the client and the proxy cannot verify it, so putting it in the `Subject` would let it masquerade as something trustworthy to any later consumer, a footgun. `ruleMatch`'s `hasClientId` instead matches on it as a separate, explicitly-unverified predicate, never conflated with `hasPrincipals`.
 
