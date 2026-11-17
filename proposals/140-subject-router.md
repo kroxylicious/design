@@ -28,7 +28,7 @@ A dedicated Subject Router delivers these with a small implementation that is ea
 
 ### Overview
 
-The Subject Router is a `@Plugin`-annotated `RouterFactory` in a new `kroxylicious-router-subject` module. It maps the client's authenticated `Subject`, its `client.id`, or both, to exactly one route and forwards every request to that route unchanged. Its one matching strategy, `ruleMatch`, evaluates an ordered list of rules against the subject's principals and the connection's `client.id`, selecting the first rule's route that matches. It performs no request decomposition, no fan-out, no response recomposition, and no protocol rewriting.
+The Subject Router is a `@Plugin`-annotated `RouterFactory` in a new `kroxylicious-router-subject` module. It maps the client's authenticated `Subject`, its `client.id`, or both, to exactly one route and forwards every request to that route unchanged. It evaluates an ordered list of `routingRules` against the subject's principals and the connection's `client.id`, selecting the first rule's route that matches, with an optional trailing rule that catches whatever matches none of the others. It performs no request decomposition, no fan-out, no response recomposition, and no protocol rewriting.
 
 ```
                                          route "team-a"  (subject: alice, carol)
@@ -71,30 +71,30 @@ A client can technically send a different `client.id` on a later request today. 
 
 #### Rule matching
 
-`ruleMatch` evaluates an ordered list of `rules` against the current subject and the connection's pinned `client.id`, in declaration order, and uses the route of the first rule that matches. Each rule has:
+`routingRules` is evaluated in declaration order against the current subject and the connection's pinned `client.id`; the router uses the route of the first rule that matches. Each rule has:
 
 * `hasPrincipals` (optional) — a list of `{withType, withName}` pairs, `withType` a fully-qualified `Principal` implementation name and `withName` a required principal name. The rule matches only if the subject carries, for *every* listed pair, a principal of that type with that name (checked via `Subject.allPrincipalsOfType(withType)`, proposal [119][proposal-119]). This is a list rather than a map keyed by type, because YAML mapping keys must be unique: a map cannot express two pairs with the same `withType` and different `withName`s, which a rule needs to match more than one principal of a non-singular type (for example two `Role` principals). A rule with `hasPrincipals` cannot match an anonymous subject: it has no principals to check against.
 * `hasClientId` (optional) — a required value for the connection's pinned `client.id`. Because `client.id` is available before authentication, a rule with `hasClientId` and no `hasPrincipals` can match on an anonymous connection; see [Fail-closed by default](#fail-closed-by-default) for what that implies for isolation.
 * `useRoute` — the route name, declared in the router's `routes` block, to forward to when the rule matches.
 
-A rule needs at least one of `hasPrincipals` or `hasClientId`; the factory rejects a rule with neither. When a rule has both, the subject must satisfy `hasPrincipals` *and* the pinned `client.id` must equal `hasClientId` for the rule to match.
+A rule needs at least one of `hasPrincipals` or `hasClientId`, with one exception: `routingRules`' last entry may instead be a bare `otherwiseUseRoute`. Think of it as a `hasPrincipals` rule with a wildcard: it matches any principals, including none, rather than a specific set. The factory rejects any other rule with neither `hasPrincipals` nor `hasClientId`. When a rule has both `hasPrincipals` and `hasClientId`, the subject must satisfy `hasPrincipals` *and* the pinned `client.id` must equal `hasClientId` for the rule to match.
 
-`defaultRoute` (optional) names the route for a subject/`client.id` pair that no rule matches once the subject is authenticated. If omitted, such a connection is rejected fail-closed; see [Route selection](#route-selection) for why this never applies to an anonymous subject.
+`otherwiseUseRoute` (optional) names the route for a subject/`client.id` pair that no preceding rule matches. Being a wildcard `hasPrincipals` check, it inherits the same precondition: an anonymous subject has no principals to check, wildcard or otherwise, so `otherwiseUseRoute` cannot match one, exactly like any other `hasPrincipals` rule. If omitted, an authenticated subject matching no rule is rejected fail-closed; see [Route selection](#route-selection).
 
-At startup the factory validates every `useRoute` and `defaultRoute` against the router's declared routes (`RouterFactoryContext.routeNames()`); a typo surfaces as a boot-time error rather than a per-request rejection. It also rejects two rules with identical predicates (the same `hasPrincipals` pairs, order-insensitive, and the same `hasClientId`, where present), since the second could never be reached. Beyond that, overlapping rules are legal: evaluation order is the precedence mechanism, so a more specific rule (for example, one matching both a principal and a `client.id`) should be declared ahead of a more general one it should take priority over.
+At startup the factory validates every `useRoute` and `otherwiseUseRoute` against the router's declared routes (`RouterFactoryContext.routeNames()`); a typo surfaces as a boot-time error rather than a per-request rejection. It also rejects two rules with identical predicates (the same `hasPrincipals` pairs, order-insensitive, and the same `hasClientId`, where present), since the second could never be reached, and rejects an `otherwiseUseRoute` entry anywhere but last: being a wildcard match, it matches any authenticated subject, so a rule placed after it could never be reached by one. (An anonymous connection still skips it, the same way it skips any `hasPrincipals` rule, so a later `hasClientId` rule stays reachable there; requiring `otherwiseUseRoute` last removes any reason to rely on that.) Beyond that, overlapping rules are legal: evaluation order is the precedence mechanism, so a more specific rule (for example, one matching both a principal and a `client.id`) should be declared ahead of a more general one it should take priority over.
 
 #### Route selection
 
 The router resolves a request's route against the current subject and the connection's pinned `client.id`:
 
-1. **A rule matches** — forward to that rule's route (see [Rule matching](#rule-matching)). A rule needing only `client.id` can match before, or without, authentication; a rule needing principals can only match once the subject is authenticated.
-2. **No rule matches, subject authenticated** — forward to `defaultRoute` if configured, otherwise reject fail-closed.
+1. **A rule matches** — forward to that rule's route (see [Rule matching](#rule-matching)). A rule needing only `client.id` can match before, or without, authentication; a rule needing principals — including `otherwiseUseRoute`, a wildcard principal match — can only match once the subject is authenticated.
+2. **No rule matches, subject authenticated** — forward to the `otherwiseUseRoute` route if configured, otherwise reject fail-closed.
 3. **No rule matches, subject anonymous, request is `API_VERSIONS`** — answered from the cross-route version intersection rather than routed to a single cluster, because the eventual route is still unknown. See [API version negotiation](#api-version-negotiation). This exposes only protocol version ranges, no data.
-4. **No rule matches, subject anonymous, any other request** — reject fail-closed. `defaultRoute` never applies to an anonymous subject: an operator wanting to route anonymous traffic must do so with an explicit `hasClientId` rule naming the exact `client.id` values they accept, not a blanket default (see [Rejected alternatives](#rejected-alternatives)).
+4. **No rule matches, subject anonymous, any other request** — reject fail-closed. `otherwiseUseRoute` never applies to an anonymous subject, for the same reason no `hasPrincipals` rule can: there are no principals yet to check, wildcard or otherwise. An operator wanting to route anonymous traffic must do so with an explicit `hasClientId` rule naming the exact `client.id` values they accept, not a blanket default (see [Rejected alternatives](#rejected-alternatives)).
 
 #### Fail-closed rejection
 
-When a request must be rejected — an anonymous non-`API_VERSIONS` request, or a connection whose subject and `client.id` match no rule and has no `defaultRoute` — the router does not silently fall through to an arbitrary route. It responds with a Kafka error appropriate to the API key and closes the connection:
+When a request must be rejected — an anonymous non-`API_VERSIONS` request, or a connection whose subject and `client.id` match no rule and has no `otherwiseUseRoute` configured — the router does not silently fall through to an arbitrary route. It responds with a Kafka error appropriate to the API key and closes the connection:
 
 ```java
 return context.respondWithError(header, request, Errors.SASL_AUTHENTICATION_FAILED, "not authorized for any route")
@@ -146,23 +146,22 @@ routerDefinitions:
   - name: subject-router
     type: SubjectRouter
     config:
-      ruleMatch:
-        defaultRoute: team-a         # optional; authenticated-but-unmapped subjects route here
-        rules:
-          - hasPrincipals:
-              - withType: io.kroxylicious.proxy.authentication.User
-                withName: alice
-            useRoute: team-a
-          - hasPrincipals:
-              - withType: io.kroxylicious.proxy.authentication.User
-                withName: carol
-            useRoute: team-a
-          - hasPrincipals:
-              - withType: io.kroxylicious.proxy.authentication.User
-                withName: bob
-            useRoute: team-b
-          - hasClientId: demo-app    # no principal required; matches before/without authentication
-            useRoute: team-a
+      routingRules:
+        - hasPrincipals:
+            - withType: io.kroxylicious.proxy.authentication.User
+              withName: alice
+          useRoute: team-a
+        - hasPrincipals:
+            - withType: io.kroxylicious.proxy.authentication.User
+              withName: carol
+          useRoute: team-a
+        - hasPrincipals:
+            - withType: io.kroxylicious.proxy.authentication.User
+              withName: bob
+          useRoute: team-b
+        - hasClientId: demo-app      # no principal required; matches before/without authentication
+          useRoute: team-a
+        - otherwiseUseRoute: team-a  # optional, must be last; wildcard principal match, never matches anonymous
     routes:
       - name: team-a
         id: 0
@@ -184,12 +183,11 @@ virtualClusters:
       - sasl-termination             # establishes the authenticated Subject before routing
 ```
 
-The `SubjectRouter` `config` takes a single `ruleMatch` block:
+The `SubjectRouter` `config` takes a single `routingRules` list:
 
 | Option | Type | Required | Default | Description |
 |--------|------|----------|---------|-------------|
-| `ruleMatch.rules` | list\<object\> | Yes | — | Ordered rules, each with an optional `hasPrincipals` list of `{withType, withName}` pairs, an optional `hasClientId` string, and a required `useRoute` naming a route declared in the router's `routes`. At least one of `hasPrincipals`/`hasClientId` is required per rule. The first matching rule wins; see [Rule matching](#rule-matching). |
-| `ruleMatch.defaultRoute` | string | No | none | Route for an authenticated subject whose principals and `client.id` match no rule. Never applies to an anonymous subject. If omitted, such a subject is rejected fail-closed. |
+| `routingRules` | list\<object\> | Yes | — | Ordered rules. Each is either a predicate rule — an optional `hasPrincipals` list of `{withType, withName}` pairs, an optional `hasClientId` string, and a required `useRoute` naming a route declared in the router's `routes`, with at least one of `hasPrincipals`/`hasClientId` required — or, only as the list's last entry, an `otherwiseUseRoute` string naming a route for a wildcard `hasPrincipals` match (any principals, including none). The first matching rule wins. Like any `hasPrincipals` rule, `otherwiseUseRoute` never matches an anonymous subject. If no rule matches and no `otherwiseUseRoute` is configured, an authenticated subject matching no rule is rejected fail-closed. See [Rule matching](#rule-matching). |
 
 Pre-authentication `API_VERSIONS` needs no route configuration: it is served from the cross-route version intersection (see [API version negotiation](#api-version-negotiation)), which spans every route in the router.
 
@@ -206,13 +204,13 @@ A `Router` instance is created per client connection and runs on a single Netty 
 The connection progresses through phases:
 
 1. **Pre-authentication.** With SASL termination, the first requests are `API_VERSIONS` and the SASL exchange. The SASL exchange is handled by the `SaslTermination` filter on the virtual cluster chain and never reaches the router. `API_VERSIONS` does reach the router while the subject is still anonymous; if a `hasClientId` rule already matches the pinned `client.id`, the router answers directly from that route, otherwise it answers by fanning out live to all routes and intersecting the responses (see [API version negotiation](#api-version-negotiation)). With client mTLS the subject is non-anonymous from the first request and the fan-out case does not occur.
-2. **Authenticated steady state.** Once authentication completes, `authenticatedSubject()` returns the client's subject on every subsequent `onRequest`. The router evaluates `ruleMatch` against the authenticated subject and the pinned `client.id`, and forwards each request to the addressed broker on the resolved route.
+2. **Authenticated steady state.** Once authentication completes, `authenticatedSubject()` returns the client's subject on every subsequent `onRequest`. The router evaluates `routingRules` against the authenticated subject and the pinned `client.id`, and forwards each request to the addressed broker on the resolved route.
 
-The router resolves the route per request and caches nothing beyond the pinned `client.id`. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). `client.id`, by contrast, is pinned once (see [Client ID resolution](#client-id-resolution)) and never re-read. Because `ruleMatch` is a synchronous, in-memory rule scan, recomputing it against the current subject on every request is cheap and needs no cache, and an in-place change to the subject's identity is picked up on the next request with no staleness. A future matching strategy that consults a network source could not afford a call per RPC and would need to cache the route for the life of the subject; that path, and its cache-invalidation contract, is deferred (see [Future work](#future-work)).
+The router resolves the route per request and caches nothing beyond the pinned `client.id`. The subject is not fixed: it transitions from anonymous to authenticated on a SASL-terminated connection, and a plugin may change it later (reauthentication, role or claim refresh). `client.id`, by contrast, is pinned once (see [Client ID resolution](#client-id-resolution)) and never re-read. Because evaluating `routingRules` is a synchronous, in-memory scan, recomputing it against the current subject on every request is cheap and needs no cache, and an in-place change to the subject's identity is picked up on the next request with no staleness. A future matching strategy that consults a network source could not afford a call per RPC and would need to cache the route for the life of the subject; that path, and its cache-invalidation contract, is deferred (see [Future work](#future-work)).
 
 #### Subject changes mid-connection
 
-The router remembers the route currently in use on a connection (the route it last forwarded to). On each request it re-evaluates `ruleMatch` against the current subject and the pinned `client.id`, and compares:
+The router remembers the route currently in use on a connection (the route it last forwarded to). On each request it re-evaluates `routingRules` against the current subject and the pinned `client.id`, and compares:
 
 * **Same route** — forward as normal. This covers the overwhelmingly common cases: the subject is unchanged, or reauthentication renewed the same identity, or a claim changed in a way that does not alter the mapping (`client.id` is pinned and cannot change, so only a change to a matched principal's name can change the resolved route).
 * **Different route** — the resolved route no longer matches the route the connection has been using. The router closes the connection fail-closed with a clear error rather than re-routing live.
@@ -227,7 +225,7 @@ Proposal [124][proposal-124] specifies that the `SaslTermination` filter rejects
 
 #### Reconfiguration
 
-Adding or removing a route changes the route count `S` in the runtime's node-ID mapping formula, which shifts virtual node IDs (proposal [070][proposal-070]). Virtual cluster reconfiguration already drains client connections before applying a new configuration, so clients reconnect and receive fresh metadata. Changing only `ruleMatch.rules` (moving a subject or `client.id` between existing routes, or adding a rule) does not change `S`; affected clients pick up the new mapping on their next connection.
+Adding or removing a route changes the route count `S` in the runtime's node-ID mapping formula, which shifts virtual node IDs (proposal [070][proposal-070]). Virtual cluster reconfiguration already drains client connections before applying a new configuration, so clients reconnect and receive fresh metadata. Changing only `routingRules` (moving a subject or `client.id` between existing routes, or adding a rule) does not change `S`; affected clients pick up the new mapping on their next connection.
 
 #### Error and staleness handling
 
@@ -241,7 +239,7 @@ The router relies on the runtime's per-route metrics defined in proposal [070][p
 
 | Metric | Type | Tags | Description |
 |--------|------|------|-------------|
-| `kroxylicious_subject_router_rejected_total` | Counter | `virtual_cluster`, `router`, `reason` (`anonymous`, `unmapped`) | Requests rejected because no rule matched. `anonymous`: the subject is still anonymous and no `hasClientId` rule matched. `unmapped`: the subject and `client.id` were evaluated against every rule, none matched, and no `defaultRoute` is configured. |
+| `kroxylicious_subject_router_rejected_total` | Counter | `virtual_cluster`, `router`, `reason` (`anonymous`, `unmapped`) | Requests rejected because no rule matched. `anonymous`: the subject is still anonymous and no `hasClientId` rule matched. `unmapped`: the subject and `client.id` were evaluated against every rule, none matched, and no `otherwiseUseRoute` is configured. |
 
 Route selection itself needs no dedicated metric; the runtime's per-route request counter already attributes traffic to routes, and hence to the subjects mapped there. The router deliberately does not tag metrics with the subject name, to avoid unbounded cardinality and to avoid emitting identities into monitoring systems.
 
@@ -265,9 +263,9 @@ This precondition applies to rules with `hasPrincipals`: they can only match an 
 The router denies by default:
 
 * An anonymous client cannot send any request that manipulates data unless a `hasClientId` rule matches its pinned `client.id`; absent such a rule, the router denies data-plane requests until it knows the user identity. The only request serviced otherwise while anonymous is `API_VERSIONS`, which is answered from the cross-route version intersection and carries no data.
-* A connection whose subject and `client.id` match no rule is rejected once authenticated, unless an admin has explicitly configured a `defaultRoute`. `defaultRoute` never applies to an anonymous subject (see [Route selection](#route-selection)).
+* A connection whose subject and `client.id` match no rule is rejected once authenticated, unless an admin has explicitly configured `otherwiseUseRoute`. `otherwiseUseRoute` never applies to an anonymous subject (see [Route selection](#route-selection)).
 
-There is no configuration in which a client reaches a cluster that no rule or `defaultRoute` names. Every cluster a client can reach is one an admin explicitly configured it for, whether keyed on an authenticated principal, a self-reported `client.id`, or both. This matches the project's security guidance: on the absence of an explicit allow, deny.
+There is no configuration in which a client reaches a cluster that no rule or `otherwiseUseRoute` names. Every cluster a client can reach is one an admin explicitly configured it for, whether keyed on an authenticated principal, a self-reported `client.id`, or both. This matches the project's security guidance: on the absence of an explicit allow, deny.
 
 A mid-connection identity change is also handled fail-closed. If reauthentication or a claim refresh changes the subject such that it now maps to a different route, the router closes the connection rather than continuing to serve the old route (see [Subject changes mid-connection](#subject-changes-mid-connection)). An identity change that reduces privilege (for example reauthenticating as a lower-privilege principal) therefore cannot keep using the previous identity's cluster; the client must reconnect and is routed by its current identity. `client.id` cannot trigger this case: it is pinned for the connection and never re-evaluated (see [Client ID resolution](#client-id-resolution)).
 
@@ -304,7 +302,7 @@ Following the project logging rules, the router logs the authenticated subject u
 
 ## Affected/not affected projects
 
-* **New module `kroxylicious-router-subject`** — the `SubjectRouter` `RouterFactory`, its `Router`, the `ruleMatch` matching strategy, and configuration types. A new top-level module.
+* **New module `kroxylicious-router-subject`** — the `SubjectRouter` `RouterFactory`, its `Router`, the `routingRules` matching logic, and configuration types. A new top-level module.
 * **`kroxylicious-bom`** — version management for the new module.
 * **`kroxylicious-integration-tests`** — integration tests exercising subject-to-route selection, fail-closed rejection, and per-route filter application, behind both mTLS and SASL termination.
 * **`kroxylicious-docs`** — user documentation for configuring and operating the router.
@@ -323,15 +321,17 @@ Following the project logging rules, the router logs the authenticated subject u
 
 * **Extend the `Filter` API to select an upstream.** Identity-based upstream selection could be bolted onto the filter chain instead of the `Router` API. This was rejected: the `Router` API (proposal [070][proposal-070]) exists precisely to own upstream selection, node-ID mapping, and per-route filter chains. Reimplementing that in a filter would duplicate the runtime machinery the `Router` API already provides and bypass its addressing guarantees.
 
-* **A pluggable `RouteSelector` SPI.** An earlier draft let operators supply a custom `RouteSelector` plugin for the subject-to-route decision, with `ruleMatch` as one built-in implementation among possibly several. This is rejected for the initial version: a plugin SPI multiplies the surface that needs design and security review before a single concrete strategy has shipped and proven the `Router` API end to end. Shipping `ruleMatch` as the only matching strategy keeps the initial scope small and reviewable. Pluggable selection can be reintroduced later if a second strategy earns its place (see [Future work](#future-work)).
+* **A pluggable `RouteSelector` SPI.** An earlier draft let operators supply a custom `RouteSelector` plugin for the subject-to-route decision, with `routingRules` as one built-in implementation among possibly several. This is rejected for the initial version: a plugin SPI multiplies the surface that needs design and security review before a single concrete strategy has shipped and proven the `Router` API end to end. Shipping `routingRules` as the only matching strategy keeps the initial scope small and reviewable. Pluggable selection can be reintroduced later if a second strategy earns its place (see [Future work](#future-work)).
 
 * **Route on group or role principals.** Matching the unique `User` principal covers the stated use cases and keeps the lookup unambiguous (each connection has exactly one `User`). Routing on group or role membership raises questions when a subject belongs to several groups mapped to different routes. This is deferred; it can be added later as an alternative matching strategy without changing the routing engine.
 
 * **A map from principal type to name for `hasPrincipals`.** An earlier draft keyed `hasPrincipals` as `{type: name}`, one entry per type. This is rejected: YAML forbids duplicate keys in a mapping, so it cannot express two pairs for the same type with different names, for example `Role: developer` and `Role: team-a` in one rule. A rule needing that has no valid way to say it under a map. The list of `{withType, withName}` pairs has no such restriction, and, as a side effect, drops the requirement that `hasPrincipals` only reference singular principal types: a list is a set of membership checks via `Subject.allPrincipalsOfType()`, which works the same whether a type is singular or not.
 
-* **Represent `client.id` as a Principal in the `Subject`.** An earlier idea added a `ClientId` principal to the subject, populated by a filter, so routers (and other subject-consuming components) could treat it uniformly with authenticated principals. This is rejected: `client.id` is supplied by the client and the proxy cannot verify it, so putting it in the `Subject` would let it masquerade as something trustworthy to any later consumer, a footgun. `ruleMatch`'s `hasClientId` instead matches on it as a separate, explicitly-unverified predicate, never conflated with `hasPrincipals`.
+* **Represent `client.id` as a Principal in the `Subject`.** An earlier idea added a `ClientId` principal to the subject, populated by a filter, so routers (and other subject-consuming components) could treat it uniformly with authenticated principals. This is rejected: `client.id` is supplied by the client and the proxy cannot verify it, so putting it in the `Subject` would let it masquerade as something trustworthy to any later consumer, a footgun. `routingRules`' `hasClientId` instead matches on it as a separate, explicitly-unverified predicate, never conflated with `hasPrincipals`.
 
-* **Fall back to a default route for anonymous clients.** Having `defaultRoute` catch every unmatched anonymous connection was rejected because it defeats the isolation the feature exists to provide and violates fail-closed defaults: an admin who wants anonymous traffic routed should name the exact `client.id` values they accept, not get a silent catch-all. `defaultRoute` therefore only ever applies to an authenticated, unmatched subject; an anonymous connection matching no `hasClientId` rule is limited to `API_VERSIONS` for negotiation and otherwise rejected (see [Route selection](#route-selection)).
+* **Fall back to a default route for anonymous clients.** Having `otherwiseUseRoute` catch every unmatched anonymous connection was rejected because it defeats the isolation the feature exists to provide and violates fail-closed defaults: an admin who wants anonymous traffic routed should name the exact `client.id` values they accept, not get a silent catch-all. `otherwiseUseRoute` therefore only ever applies to an authenticated, unmatched subject; an anonymous connection matching no `hasClientId` rule is limited to `API_VERSIONS` for negotiation and otherwise rejected (see [Route selection](#route-selection)).
+
+* **A separate `ruleMatch` block with sibling `rules` and `defaultRoute` fields.** An earlier draft nested the configuration under `config.ruleMatch`, with `rules` and `defaultRoute` as its two children. This is rejected: the indirection bought no flexibility not already available by adding fields directly under `config` if a second matching strategy is ever introduced, and splitting the fallback into a separate `defaultRoute` field, rather than a trailing entry in the same ordered list, forced a reader to cross-reference two fields to see the full routing logic instead of reading one list top to bottom. Folding the fallback into `routingRules` as a trailing `otherwiseUseRoute` entry — a wildcard `hasPrincipals` match, written without the explicit pairs — keeps every routing decision in one place; the factory enforces that this entry can only be last, since placed earlier it would make every subsequent rule unreachable for an authenticated subject (an anonymous connection skips `otherwiseUseRoute` regardless, same as any `hasPrincipals` rule, so a later `hasClientId` rule would stay technically reachable, but there is no reason to rely on that).
 
 * **Negotiate `API_VERSIONS` against a single bootstrap route.** An earlier draft forwarded pre-authentication `API_VERSIONS` to a configured `bootstrapRoute`. This is incorrect under SASL termination: the client negotiates and caches versions before it authenticates, so if it negotiated against the bootstrap cluster but its subject later resolved to a different cluster, the client would use version ranges the eventual cluster may not support, and requests would fail. Because `API_VERSIONS` is re-run before the SASL exchange on every per-broker connection too, the bootstrap route would also be used where the client actually intends a specific broker on its real route. Intersecting across all routes is correct regardless of the eventual route.
 
@@ -346,9 +346,9 @@ Following the project logging rules, the router logs the authenticated subject u
 ## Future work
 
 * **Operator CRD support** for declaring subject routers and their mappings.
-* **Pluggable, possibly asynchronous route selection.** Introduce a `RouteSelector` SPI so operators can supply a custom subject-to-route strategy, such as one that consults a network directory or policy service, alongside or instead of `ruleMatch`. An asynchronous contract requires the runtime to handle a request while selection is in flight (hold or reject) and a caching contract, since the proxy cannot call out on every RPC: cache the selected route for the life of the subject and re-resolve only when the subject changes. Detecting a subject change cheaply points to splitting selection into a synchronous `Principal -> Key` extraction and a `Key -> Route` mapping, caching on the extracted key, and tightening the `Principal` contract so a routing-relevant identity change arrives as a new `Subject` rather than an in-place mutation.
+* **Pluggable, possibly asynchronous route selection.** Introduce a `RouteSelector` SPI so operators can supply a custom subject-to-route strategy, such as one that consults a network directory or policy service, alongside or instead of `routingRules`. An asynchronous contract requires the runtime to handle a request while selection is in flight (hold or reject) and a caching contract, since the proxy cannot call out on every RPC: cache the selected route for the life of the subject and re-resolve only when the subject changes. Detecting a subject change cheaply points to splitting selection into a synchronous `Principal -> Key` extraction and a `Key -> Route` mapping, caching on the extracted key, and tightening the `Principal` contract so a routing-relevant identity change arrives as a new `Subject` rather than an in-place mutation.
 * **Group or role-based matching**, as an alternative to per-principal-name mapping, once pluggable selection lands.
-* **Startup warnings for shadowed rules** — detecting a rule whose predicate is implied by an earlier one (for example, a `hasClientId`-only rule placed after an identical-but-broader one), beyond the exact-duplicate case `ruleMatch` already rejects at startup.
+* **Startup warnings for shadowed rules** — detecting a rule whose predicate is implied by an earlier one (for example, a `hasClientId`-only rule placed after an identical-but-broader one), beyond the exact-duplicate predicate case and the misplaced-`otherwiseUseRoute` case already rejected at startup (see [Rule matching](#rule-matching)).
 * **Runtime fast path** that flattens a connection to a static forwarding path once its route is established (re-evaluating if the subject changes), removing per-request deserialisation for a router that only forwards.
 * **Regex or claim-based mapping**, instead of exact name matches, for deployments with large or dynamic principal sets, once pluggable selection lands.
 * **SASL passthrough.** The initial router rejects SASL frames because a passthrough-inferred identity is asserted by the backend, not verified by the proxy, and does not cover every mechanism. A later iteration could support it where the deployment accepts that routing is only as trustworthy as the inference. One shape, raised in review: a configurable `authRoute` naming the single route that carries the SASL exchange, which only suits deployments where every upstream shares the same authentication infrastructure. In that case terminating SASL (for example OAUTHBEARER) at the proxy achieves a similar effect with a verified subject, so passthrough earns its place only for mechanisms the proxy cannot terminate.
