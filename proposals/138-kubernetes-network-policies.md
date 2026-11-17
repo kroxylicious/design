@@ -40,12 +40,12 @@ Since the operator alone is unable to determine a working minimal `NetworkPolicy
 To make best use of Kubernetes' RBAC authorization, it is proposed to express ingress and egress information in a dedicated CR, rather than in the existing Kroxylicious resources.
 This will permit the Data Engineer to have access to a `KafkaProtocolFilter` without also granting them control over the firewall rules for the proxy as a whole.
 
-Each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which declares, in one place, the ingress rules for every `KafkaProxyIngress`, and the egress rules for every `KafkaService` and `KafkaProtocolFilter`, that belong to that proxy. This results in a simple CRD, validation, and reconciliation story, and a single place to review a proxy's complete declared network policy.
+Each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which declares, in one place, the ingress and egress rules for CR belonging to that proxy. This results in a simple CRD, validation, and reconciliation story, and a single place to review a proxy's complete declared network policy.
 
 `NetworkPolicy` generation is controlled by the `KROXYLICIOUS_KPNP_ABSENT` environment variable on the operator `Deployment`. This variable controls what happens when no `KafkaProxyNetworkPolicy` exists for a proxy at all. It can take three values:
-- `allow-all`: generates a `NetworkPolicy` allowing traffic from/to anywhere for every target (the default on fresh installs)
+- `allow-all`: generates a `NetworkPolicy` allowing traffic from/to anywhere for every target (the default)
 - `deny-all`: generates a `NetworkPolicy` with no rules for every target
-- `no-np`: disables `NetworkPolicy` generation entirely (the default on upgrades)
+- `no-np`: disables `NetworkPolicy` generation entirely
 
 ### Non-goals
 
@@ -289,7 +289,7 @@ spec:
     proxyRef:                      # required
       name: my-proxy               # required
     allowEgressToClusterDns: true  # required
-    allowIngress:                  # required, but may be []  
+    allowIngressForMetrics:        # required, but may be []  
       - from:
           - namespaceSelector:
               matchLabels:
@@ -298,7 +298,7 @@ spec:
 
 The core proxy itself only requires egress for DNS — any other egress is more accurately associated with a `KafkaService` or `KafkaProtocolFilter`. 
 We use `allowEgressToClusterDns` as a shorthand, rather than having `NetworkPolicy`-style arrays of egress rules (which would always need the same rule for talking to the cluster DNS server). 
-`spec.kafkaProxy.allowIngress` lacks a `ports` property: the proxy's metrics listening port is already known to the operator.
+`spec.kafkaProxy.allowIngressForMetrics` lacks a `ports` property: the proxy's metrics listening port is already known to the operator.
 
 Generated `NetworkPolicies` for the above example:
 
