@@ -46,7 +46,7 @@ Each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which dec
 `NetworkPolicy` generation is controlled by the `KROXYLICIOUS_KPNP_ABSENT` environment variable on the operator `Deployment`. This variable controls what happens when no `KafkaProxyNetworkPolicy` exists for a proxy at all. It can take three values:
 - `allow-all`: generates a `NetworkPolicy` allowing traffic from/to anywhere for every target (the default)
 - `deny-all`: generates a `NetworkPolicy` with no rules for every target
-- `no-np`: disables `NetworkPolicy` generation entirely
+- `no-np`: disables `NetworkPolicy` generation entirely — this is a true off switch: transitioning to `no-np` actively deletes any previously-generated `kroxylicious.io/default-policy`-labelled `NetworkPolicy`, rather than merely leaving existing ones in place
 
 ### Non-goals
 
@@ -107,7 +107,11 @@ spec:
 
 The `defaultIngress` and `defaultEgress` specify how the operator handles missing references. These will be explained in later sections.
 
-The elipsis for each section of the CR represent some network rules which apply to that CR. For example an object with a `filterRef` has other properties which are used to describe the network ingress and egress needs of that filter. 
+The `kafkaProxyIngresses`, `kafkaServices`, and `kafkaProtocolFilters` lists are themselves required, though each may be empty, rather than being optional and defaulting to empty: this keeps "no entries" an explicit statement in the CR rather than an absent field whose default behaviour a reader would have to go and look up.
+
+The elipsis for each section of the CR represent some network rules which apply to that CR. For example an object with a `filterRef` has other properties which are used to describe the network ingress and egress needs of that filter.
+
+These properties aren't uniformly shaped, because the sections genuinely differ: where the operator already knows the ports or peers itself, the user only supplies what it can't infer; and a rule needed almost universally may be offered as a simple boolean rather than a full rule list. See the per-target sections below for specifics.
 
 ### Resolution
 
@@ -139,6 +143,8 @@ status:
         - KafkaService 'my-second-cluster'
     - type: Programmed
       status: "True"
+  effectivelyUnrestrictedIngress: false
+  effectivelyUnrestrictedEgress: true  # some target's allow-all makes other targets' narrow egress rules moot
   kafkaProxyIngresses:
     - ingressRef:
         name: my-ingress
@@ -213,15 +219,18 @@ Length is a separate concern from collision, and needs separate handling: `Kafka
 
 #### Labels
 
-Whether a given generated `NetworkPolicy` came from a declared entry or via the `spec.defaultIngress`, `spec.defaultEgress` or `KROXYLICIOUS_KPNP_ABSENT` fallbacks, is recorded as a label, not in the name:
+Whether a given generated `NetworkPolicy` came from a declared entry or via the `spec.defaultIngress`, `spec.defaultEgress` or `KROXYLICIOUS_KPNP_ABSENT` fallbacks, is recorded as a label, not in the name. Every generated `NetworkPolicy` also carries a label naming the `KafkaProxy` it's for, regardless of which entry drove its generation:
 
 ```yaml
 metadata:
   labels:
     kroxylicious.io/default-policy: allow-all # or: deny-all
+    kroxylicious.io/proxy-name: my-proxy
 ```
 
 This label is present whenever a `NetworkPolicy` was generated via the `spec.defaultIngress`, `spec.defaultEgress` or `KROXYLICIOUS_KPNP_ABSENT` fallback, or (see [Generation](#generation)), letting all such rules be selected independent of target kind, e.g. `kubectl get networkpolicy -l kroxylicious.io/default-policy=allow-all`. It's absent once an entry's own declared rules are in effect — including the `strimziKafkaRef` auto-derived rule, which is itself only generated once an entry exists — since that's not driven by `KROXYLICIOUS_KPNP_ABSENT`.
+
+`kroxylicious.io/proxy-name` has no such conditions — it's always present, on every generated `NetworkPolicy`, for every proxy. The proxy's own identity is otherwise only visible via `spec.podSelector.matchLabels` (not `metadata.labels`) or by parsing it out of the generated name, neither of which `kubectl -l` can select on; this label makes "every `NetworkPolicy` for proxy X" a one-line query.
 
 
 #### `podSelector`
@@ -238,7 +247,7 @@ podSelector:
 
 Because this `podSelector` is identical on every `NetworkPolicy` generated for a given `KafkaProxy` — regardless of which entry drove its generation — they all select the same `Pods`, and `NetworkPolicy` rules are additive across policies selecting the same `Pod` (see [Current situation](#current-situation)). This means a broad rule generated for *any one* target on a proxy is unioned with every other target's rules for the same direction. For example, a `KafkaProxy` with one `KafkaService` using `strimziKafkaRef` and a declared entry (getting the narrow, auto-derived rule) and a second `KafkaService` using `bootstrapServers` with no declared `allowEgress` (falling back to `KROXYLICIOUS_KPNP_ABSENT`) ends up, if that fallback is `allow-all`, with unrestricted egress on that port from the proxy's `Pods`: the first `KafkaService`'s narrow rule is still generated correctly and still has naming/audit value, but it adds no enforcement once a sibling target's rule already allows everything. Restricting a proxy's effective ingress or egress for a given direction therefore means addressing *every* target on that proxy, not just the one under review.
 
-**Known limitation:** this isn't only a transient, defaulting-related risk — it holds for as long as *any* target on the proxy has an `allow-all` rule in a given direction, declared or defaulted, even once `KafkaProxyNetworkPolicy` is fully `Accepted: True` with every target explicitly covered. A reviewer who sees one `KafkaProtocolFilter` entry with a tight `allowEgress` to, say, just its KMS can't tell from that entry alone whether it does anything: that depends on every other target on the same proxy also lacking an `allow-all` rule for egress, which requires manually unioning every generated `NetworkPolicy` for the proxy to check. Nothing in `status` flags this — a declared narrow rule and a sibling `allow-all` rule both independently report `Programmed: True`, with no indication that the narrow one is currently redundant. This proposal does not attempt to detect or surface that condition; auditing a proxy's actual effective policy, as opposed to auditing why any one generated `NetworkPolicy` exists, remains a manual exercise for the user.
+**Known limitation:** this isn't only a transient, defaulting-related risk — it holds for as long as *any* target on the proxy has an `allow-all` rule in a given direction, declared or defaulted, even once `KafkaProxyNetworkPolicy` is fully `Accepted: True` with every target explicitly covered. A reviewer who sees one `KafkaProtocolFilter` entry with a tight `allowEgress` to, say, just its KMS can't tell from that entry alone whether it does anything: that depends on every other target on the same proxy also lacking an `allow-all` rule for egress. `status.effectivelyUnrestrictedIngress`/`effectivelyUnrestrictedEgress` (see [Status conditions](#status-conditions)) surfaces this at the proxy level — `true` if any generated policy for the proxy has, in that direction, an empty/absent peer list or an `ipBlock` spanning the whole address space (`0.0.0.0/0`/`::/0`) — but a reviewer still has to consult that field rather than reading it off any single `NetworkPolicy`, and it can't say *which* target's rule is the one making others redundant. (It doesn't attempt to catch a full range reconstructed from multiple narrower `ipBlock`s — a deliberately obscure case not worth the detection cost.)
 
 #### `ownerReferences`
 
@@ -314,7 +323,9 @@ The core proxy itself only requires egress for DNS — any other egress is more 
 We use `allowEgressToClusterDns` as a shorthand, rather than having `NetworkPolicy`-style arrays of egress rules (which would always need the same rule for talking to the cluster DNS server). 
 `spec.kafkaProxy.allowIngressForMetrics` lacks a `ports` property: the proxy's metrics listening port is already known to the operator.
 
-Cluster DNS topology — which namespace and which `Pod` labels identify the DNS server — isn't part of the stable, cross-distribution Kubernetes API, so `allowEgressToClusterDns: true` can't resolve to one fixed selector. Instead the operator picks between a small number of known topologies based on the platform it's running on, reusing the same API-discovery-based detection it already needs for `openShiftRoute` ingress support (`IsOpenshiftRouteSupportedActivationCondition`, which checks `client.supports(Route.class)`): on a vanilla/kubeadm/GKE/EKS/AKS-style cluster it generates the `kube-system`/`k8s-app: kube-dns` rule shown below; on OpenShift it instead targets the `openshift-dns` namespace and `Pods` labelled `dns.operator.openshift.io/daemonset-dns: default` (OpenShift's DNS Operator-managed CoreDNS `DaemonSet`). A cluster with neither topology — for example, one where `Pods` only ever reach a `node-local-dns` instance, or a CoreDNS deployment relocated out of `kube-system` — isn't covered by either case; such a cluster needs to cover DNS egress itself, via a `KafkaProtocolFilter`-style explicit `allowEgress` entry targeting its actual DNS `Pods`, or fall back to a broader `defaultEgress`/`KROXYLICIOUS_KPNP_ABSENT` setting.
+Cluster DNS topology — which namespace and which `Pod` labels identify the DNS server — isn't part of the stable, cross-distribution Kubernetes API, so `allowEgressToClusterDns: true` can't resolve to one fixed selector. Instead the operator picks between a small number of known topologies based on the platform it's running on, reusing the same API-discovery-based detection it already needs for `openShiftRoute` ingress support (`IsOpenshiftRouteSupportedActivationCondition`, which checks `client.supports(Route.class)`): on a vanilla/kubeadm/GKE/EKS/AKS-style cluster it generates the `kube-system`/`k8s-app: kube-dns` rule shown below, unconditionally paired with a second peer matching `k8s-app: node-local-dns` in the same namespace — the conventional label for upstream NodeLocal DNSCache — since matching a label that happens not to be present costs nothing; on OpenShift it instead targets the `openshift-dns` namespace and `Pods` labelled `dns.operator.openshift.io/daemonset-dns: default` (OpenShift's DNS Operator-managed CoreDNS `DaemonSet`).
+
+**Known limitation:** this still isn't exhaustive, and the gap is no longer a rare one. AKS's own LocalDNS proxy (a distinct implementation from upstream NodeLocal DNSCache, under a label this proposal doesn't account for), a CoreDNS deployment relocated out of `kube-system`, or any other custom DNS layout fall outside both detected topologies — and some of these are now the *default*, not the exception: GKE Autopilot always runs NodeLocal DNSCache, and EKS Auto Mode and recent AKS node pools enable their own equivalents automatically. On such a cluster, `allowEgressToClusterDns: true` silently generates a rule that doesn't match the `Pods` DNS traffic actually reaches, while still reporting `Programmed: True`. The only remedies today are a `KafkaProtocolFilter`-style explicit `allowEgress` entry targeting the real DNS `Pods` directly (every generated `NetworkPolicy` for a proxy shares the same `podSelector`, so such an entry's rule takes effect regardless of which CR nominally owns it — see [`podSelector`](#podselector)), or falling back to a broader `defaultEgress`/`KROXYLICIOUS_KPNP_ABSENT` setting. We accept this as a known gap rather than attempt to enumerate every DNS topology in existence up front; see [Future work](#future-work) for a possible way to close it later.
 
 Generated `NetworkPolicies` for the above example on a vanilla/kubeadm-style cluster:
 
@@ -353,6 +364,12 @@ spec:
           podSelector:
             matchLabels:
               k8s-app: kube-dns
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: node-local-dns
       ports:
         - protocol: UDP
           port: 53
@@ -707,7 +724,7 @@ There are a number of sub-cases:
 * the given servers are external IPv4 or IPv6 addresses
 * the given servers are external DNS names (e.g. `node12.kafka.example.com:9092`)
 
-but the operator will not attempt to distinguish between them, and instead just propagate the rules given in the `KafkaProxyNetworkPolicy` to the `NetworkPolicy`. Unlike `strimziKafkaRef`, there's no `ports`/`to` the operator can compute on the user's behalf here — both are always required, for every entry.
+but the operator will not attempt to distinguish between them, and instead just propagate the rules given in the `KafkaProxyNetworkPolicy` to the `NetworkPolicy`. Unlike `strimziKafkaRef`, there's no `ports`/`to` the operator can compute on the user's behalf here — both are always required, for every entry. (Note: `to: []` means *unrestricted*, not denied, like with `NetworkPolicy`.)
 
 ```yaml
 ---
@@ -856,6 +873,8 @@ In the "watched resources" `ClusterRole` the operator will need:
 
 As a possible future development, we could add an IP-allowlist capability enforced in the proxy itself, and have the operator feed that with the `ipBlock` rules from the `KafkaProxyNetworkPolicy`.
 Crucially this could be done once the SNI host name is known, thus recovering the per-virtual-cluster isolation that `Service`-level CIDR restriction cannot provide when multiple `VirtualKafkaClusters` share one ingress's `Service` (see [the `loadBalancer` case](#the-loadbalancer-case)).
+
+Separately, the cluster-DNS-topology detection used by `allowEgressToClusterDns` (see [Policy for `KafkaProxy`](#policy-for-kafkaproxy)) could be made overridable by whoever installs the operator, for topologies it can't detect on its own. We've deliberately left this out of scope for now rather than guess at the right mechanism (an env var, a small cluster-scoped CRD, or something else) ahead of real-world demand.
 
 ## Affected/not affected projects
 
