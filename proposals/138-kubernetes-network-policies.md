@@ -60,12 +60,12 @@ Each `KafkaProxy` has at most one companion `KafkaProxyNetworkPolicy`, which dec
 * A single CR should be authoritative for a given `KafkaProxy`'s entire declared network policy, so that auditing a proxy's access doesn't require enumerating objects scattered elsewhere in the namespace.
 * Generate `NetworkPolicy` resources targeting the proxy's `Pods`, one per declared (or defaulted) ingress/service/filter, with descriptive `metadata.name`s, so that auditing why a particular rule exists doesn't require reading the content of every rule.
 * On fresh installs, generate `NetworkPolicy` resources for targets with no declared rules (`KROXYLICIOUS_KPNP_ABSENT` defaults to `allow-all`). On existing installations, never generate them by default (`KROXYLICIOUS_KPNP_ABSENT` defaults to `no-np`), so the operator never silently widens access a user may already have restricted with hand-written `NetworkPolicy`.
-* A gap in, or failure to resolve, one target's declared rules must never retract already-working enforcement for another target on the same proxy ("stale but safe" — see [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics)).
+* A gap in, or failure to resolve, one target's declared rules must never retract already-working enforcement for another target on the same proxy ("stale but safe" — see [`ownerReferences`](#ownerreferences)).
 
 ### New CRD: `KafkaProxyNetworkPolicy`
 
 A single new custom resource definition will be added: `KafkaProxyNetworkPolicy` (namespaced).
-This CRD lets whoever declares a proxy's network needs — e.g. a security/platform-per-tenant role, distinct from whoever owns the proxy's `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` resources — declare the ingress rules for every `KafkaProxyIngress`, and the egress rules for every `KafkaService` and `KafkaProtocolFilter`, belonging to one `KafkaProxy`.
+This CRD lets whoever declares a proxy's network needs — e.g. which may be a distinct role that whoever owns the proxy's `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` resources — declare the networking needs for one `KafkaProxy` and its related CRs.
 
 Each `KafkaProxy` may have **at most one** `KafkaProxyNetworkPolicy`, referencing it explicitly via `spec.kafkaProxy.proxyRef` — the same pattern used elsewhere in this API (e.g. `KafkaProxyIngress.spec.proxyRef`). 
 If a second `KafkaProxyNetworkPolicy` is created with a `proxyRef` to a `KafkaProxy` that already has one, the second is rejected: `Accepted: False`, reason `Conflicting`, pointing at the name of the one already in effect. 
@@ -77,107 +77,46 @@ kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-proxy-network-policy
 spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy
-    allowIngress:
-      - from: 
-          - namespaceSelector:
-              matchLabels:
-                kubernetes.io/metadata.name: prometheus
-    allowEgress:
-      - ports: 
-          - protocol: UDP
-            port: 53
-          - protocol: TCP
-            port: 53
-        to: 
-          - namespaceSelector:
-              matchLabels:
-                kubernetes.io/metadata.name: kube-system
-            podSelector:
-              matchLabels:
-                k8s-app: kube-dns
-  kafkaProxyIngresses:
-    - ingressRef:
-        name: my-ingress
-      allowIngressFrom:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: my-kafka-app-ns
-        - ipBlock:
-            cidr: 203.0.113.0/24
-            except:
-              - 203.0.113.128/27
-    - ingressRef:
-        name: my-other-ingress
-      allowIngressFrom: [...]
-  kafkaServices:
-    - serviceRef:
-        name: my-strimzi
-    - serviceRef:
-        name: my-external-kafka-cluster
-      allowEgress:
-        - ports:
-            - protocol: TCP
-              port: 9092
-          to:
-            - ipBlock:
-                cidr: 198.51.100.0/24
-  kafkaProtocolFilters:
-    - filterRef:
-        name: my-encryption-filter
-      allowEgress:
-        - ports:
-            - protocol: TCP
-              port: 8200
-          to:
-            - namespaceSelector:
-                matchLabels:
-                  kubernetes.io/metadata.name: vault
+  defaultIngress: allow-all               # required
+  defaultEgress: allow-all                # required
+  kafkaProxy:                             # required
+    proxyRef:                             # required
+      name: my-proxy                      # required
+    ...
+  kafkaProxyIngresses:                    # required, may be []
+    - ingressRef:                         # required
+        name: my-ingress                  # required
+      ...
+    - ingressRef:                         # required
+        name: my-other-ingress            # required
+      ...
+  kafkaServices:                          # required, may be []
+    - serviceRef:                         # required
+        name: my-strimzi                  # required
+    - serviceRef:                         # required
+        name: my-external-kafka-cluster   # required
+      ...
+  kafkaProtocolFilters:                   # required, may be []
+    - filterRef:                          # required
+        name: my-encryption-filter        # required
+      ...
 ```
 
-* `spec.kafkaProxy.proxyRef` identifies the `KafkaProxy` this `KafkaProxyNetworkPolicy` governs. It resolves only within the same namespace — there is no cross-namespace form.
-* `spec.kafkaProxy` also declares the rules needed for the proxy itself. The above example shows egress to the cluster DNS and ingress from a Prometheus instance.
-* `spec.kafkaProxyIngresses[]` declares, per `ingressRef`, the `from` peers allowed to reach that ingress. There is no `ports` field here: the port(s) are always the ingress's own listening port(s), which the operator already knows — see [Ports](#ports) for why this differs from the other two lists.
-* `spec.kafkaServices[]` declares, per `serviceRef`, zero or more `{ports, to}` rules for egress to that `KafkaService`. An entry with no `allowEgress` at all is valid — see [The `strimziKafkaRef` case](#the-strimzikafkaref-case) for why, and [Ports](#ports) for what an entry's own omitted `ports` means.
-* `spec.kafkaProtocolFilters[]` declares, per `filterRef`, zero or more `{ports, from}` rules under `allowIngress` and/or zero or more `{ports, to}` rules under `allowEgress`. Unlike the other two lists, `ports` is **required** on every entry here — see [Ports](#ports).
+The `defaultIngress` and `defaultEgress` specify how the operator handles missing references. These will be explained in later sections.
 
+The elipsis for each section of the CR represent some network rules which apply to that CR. For example an object with a `filterRef` has other properties which are used to describe the network ingress and egress needs of that filter. 
 
-Every generated `NetworkPolicy` shares a common `podSelector`, `ownerReferences` rule, and naming scheme — see [Common structure of generated `NetworkPolicy` resources](#common-structure-of-generated-networkpolicy-resources) below.
+### Resolution
 
-#### Ports
-
-Whether `ports` may, must, or must never be specified follows directly from whether the operator has any other way to know the right answer:
-
-| List | `ports` allowed? | Rationale |
-| --- | --- | --- |
-| `kafkaProxy.allowIngress`/`allowEgress` | **Required** | The proxy's metrics listening port and external destinations are not automatically known to the operator; both must be explicitly declared. |
-| `kafkaProxyIngresses[].allowIngressFrom` | Never (no field at all) | The ingress's own listening port(s) are already known to the operator from the targeted `KafkaProxyIngress`, and there's no sensible reason to allow a narrower subset of your own listener's port. |
-| `kafkaServices[].allowEgress` (via `strimziKafkaRef`) | Optional, additive only | The broker listener port is already known precisely from the referenced Strimzi `Kafka` resource — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case). An entry's `ports`/`to` here can only add further destinations, never replace the auto-derived rule. |
-| `kafkaServices[].allowEgress` (via `bootstrapServers`) | Optional; omitted means **all ports** | `bootstrapServers` gives the bootstrap port, but Kafka allows individual brokers to advertise arbitrary other combinations of ports and brokers, so the bootstrap port isn't guaranteed to be the only port the proxy ends up dialling once broker topology is discovered. The operator cannot safely narrow this on the user's behalf; a user who knows their cluster's brokers all share one port may narrow it explicitly. |
-| `kafkaProtocolFilters[].allowIngress`/`allowEgress` | **Required** | A filter's destination is arbitrary and plugin-defined; the operator has no mechanism to infer a port the way it can for an ingress or a Strimzi-backed service. |
-
-
-### Resolution, exhaustiveness, and generation semantics
-
-`spec.kafkaProxy.proxyRef`, `ingressRef`, `serviceRef`, and `filterRef` are all resolved by the operator, which updates `status` accordingly (see [Status conditions](#status-conditions)). A reference is only considered resolved if:
+The operator resolves each of the referenced CRs (`spec.kafkaProxy.proxyRef`, `ingressRef`, `serviceRef`, and `filterRef`) to determine whether the KPNP is well-formed and acceptable, updating the `status` with the result. A reference is only considered resolved if:
 
 * the referenced CR exists 
 * **and** the referenced CR has `ResolvedRefs: True`
 * **and** the referenced CR, directly or transitively, resolves to the same `KafkaProxy` named by this `KafkaProxyNetworkPolicy`'s own `spec.kafkaProxy.proxyRef` — e.g. a `serviceRef` pointing at a `KafkaService` that isn't actually attached to this proxy's `VirtualKafkaCluster`(s) does not resolve.
 
-**Exhaustiveness.** A `KafkaProxyNetworkPolicy` is only `Accepted: True` if, in addition to every listed ref resolving, the reverse also holds: every `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` that resolves to this proxy has a corresponding entry in the relevant list of the `KafkaProxyNetworkPolicy`. This means there's no way for some targets on a proxy to have declared rules while others silently don't, and a filter can never get a "free ride" on a sibling's broad rule without an explicit entry of its own making that visible.
+A `KafkaProxyNetworkPolicy` is only `Accepted: True` if, in addition to every listed ref resolving, the reverse also holds: every `KafkaProxyIngress`, `KafkaService`, and `KafkaProtocolFilter` that resolves to this proxy has a corresponding entry in the relevant list of the `KafkaProxyNetworkPolicy`. This means there's no way for a CR related to the `KafkaProxy` to get a "free ride" on a sibling's broad network access rule without an explicit entry of its own making that visible.
 
-**Generation is per-target.** Each `ingressRef`/`serviceRef`/`filterRef` entry is resolved and validated, and used to generate (or update) its own `NetworkPolicy` independently:
-
-* An entry that resolves and validates generates/updates its `NetworkPolicy` from its declared rules, regardless of the state of any other entry.
-* A target with **no** entry in the `KafkaProxyNetworkPolicy` (e.g. a `KafkaProtocolFilter` just added to the proxy, before its owner has updated the shared CR) is treated according to the `KROXYLICIOUS_KPNP_ABSENT` environment variable: if set to `allow-all`, an allow-everywhere `NetworkPolicy` is generated; if set to `deny-all`, a `NetworkPolicy` with no rules is generated; if set to `no-np`, no `NetworkPolicy` is generated. These fallback policies are labelled `kroxylicious.io/default-policy` (see [Naming](#naming)). The fallback for one target does not affect any other, already-declared target. This is what keeps exhaustiveness from becoming a cliff-edge: a `KafkaProxyNetworkPolicy` that's `Accepted: False` because of one missing entry still has every other entry's precise, declared rules in full effect.
-* An entry that previously resolved and validated, but no longer does (e.g. its ref now names a deleted `KafkaProtocolFilter`), leaves its **previously generated `NetworkPolicy` untouched** — "stale but safe". The operator does not delete it, and does not fall back to `KROXYLICIOUS_KPNP_ABSENT` for it, since either of those would change what's enforced based on an error condition rather than a deliberate choice. The entry is reported as unresolved in `status` (see below) until it's fixed or removed.
-
-This means `Accepted` on the `KafkaProxyNetworkPolicy` itself is primarily a human-facing signal — "is every target for this proxy explicitly and validly declared?" — rather than a gate on whether generation happens at all.
-
-### Status conditions
+#### Status conditions
 
 `KafkaProxyNetworkPolicy` reports three standard roll-up conditions in `status.conditions`, consistent with the existing `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` CRs, plus per-entry status for each list item (following the same per-item status convention as e.g. the Gateway API's `HTTPRoute.status.parents[]`):
 
@@ -221,13 +160,57 @@ Roll-up conditions:
 | `Programmed` | `False` | `UpdateFailed` | The operator attempted to create/update at least one target's `NetworkPolicy` and the write failed. |
 | `Programmed` | `Unknown` | — | Reconciliation hasn't reached the generation step yet, or the last attempt failed before getting there. |
 
-Per-entry conditions use the same `ResolvedRefs`/`Accepted`/`Programmed` vocabulary, scoped to that one entry, so a user can tell at a glance which specific target is holding back the roll-up `Accepted: True` — and, per [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics), which targets are currently relying on a stale or default-generated `NetworkPolicy` rather than their own declared rules. A "stale but safe" entry keeps `Programmed: True` even once `ResolvedRefs`/`Accepted` flips to `False`, since its existing `NetworkPolicy` still correctly reflects the last spec that did resolve.
+Per-entry conditions use the same `ResolvedRefs`/`Accepted`/`Programmed` vocabulary, scoped to that one entry, so a user can tell at a glance which specific target is holding back the roll-up `Accepted: True` — and, per [Generation](#generation), which targets are currently relying on a stale or default-generated `NetworkPolicy` rather than their own declared rules. A "stale but safe" entry keeps `Programmed: True` even once `ResolvedRefs`/`Accepted` flips to `False`, since its existing `NetworkPolicy` still correctly reflects the last spec that did resolve.
 
 Because this validation happens on the reconciler's own schedule rather than at `kubectl apply` time (except for the schema-level constraints noted in [`KafkaProxyNetworkPolicy`](#kafkaproxynetworkpolicy), e.g. `ports` being absent/required per list), a `KafkaProxyNetworkPolicy` can be admitted and only later found to be rejected. GitOps/CI pipelines applying these CRs should therefore wait on both the `Accepted` and `Programmed` conditions explicitly, e.g. `kubectl wait --for=condition=Accepted --for=condition=Programmed kafkaproxynetworkpolicy/<name>`, rather than treating a successful `kubectl apply` as confirmation that every entry took effect.
+
+
+### Generation
+
+The operator also generates up to two `NetworkPolicies` (one for ingress and/or one for egress) for each of the referenced CRs.
+Every generated `NetworkPolicy` shares a common `podSelector`, `ownerReferences` rule, and naming scheme.
+
+* An entry that resolves and validates always generates/updates its `NetworkPolicy` from its declared rules, regardless of the state of any other entry.
+* A target with **no** entry in the `KafkaProxyNetworkPolicy` (e.g. a `KafkaProtocolFilter` just added to the proxy, before `KafkaProxyNetworkPolicy` is updated) is treated according to the `spec.defaultIngress` or `spec.defaultEgress`: if set to `allow-all`, an allow-everywhere `NetworkPolicy` is generated; if set to `deny-all`, a `NetworkPolicy` with no rules is generated. These fallback policies are labelled `kroxylicious.io/default-policy` (see [Naming](#naming)). The fallback for one target does not affect any other, already-declared target. This is what keeps exhaustiveness from becoming a cliff-edge: a `KafkaProxyNetworkPolicy` that's `Accepted: False` because of one missing entry still has every other entry's precise, declared rules in full effect.
+* An entry that previously resolved and validated, but no longer does because its referenced CR has been deleted, needs no special handling: that `NetworkPolicy` is owned by the referenced CR (see [`ownerReferences`](#ownerreferences)), so it's garbage-collected along with it. An entry that stops resolving for any other reason (e.g. its referenced CR still exists, but no longer resolves to this proxy) leaves its previously generated `NetworkPolicy` untouched under its existing owner — "stale but safe". The entry is reported as unresolved in `status` (see below) until it's fixed or removed.
+
+This means `Accepted` on the `KafkaProxyNetworkPolicy` is primarily a human-facing signal — "is every target for this proxy explicitly and validly declared?". It is not a gate on whether generation happens at all.
+
 
 ### Common structure of generated `NetworkPolicy` resources
 
 Every `NetworkPolicy` the operator generates — a default (no rule declared for that target), or the result of a declared entry, whether user-specified or, for a `strimziKafkaRef`-based `KafkaService`, auto-derived — shares the same `podSelector`, the same `ownerReferences` rule, and is named using the same scheme. This section defines all three once; the sections below describe only what's specific to each target kind: the shape of the `from`/`to` peers and `ports` in the generated `ingress`/`egress` rule.
+
+#### Naming
+
+Each generated `NetworkPolicy`'s `metadata.name` is `${token}.${name}`, where `${name}` is copied verbatim from the `metadata.name` of the `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` that entry targets, and `${token}` identifies the direction/role:
+
+| Token | Generated for |
+| --- | --- |
+| `kafkaproxy-ingress` | A `KafkaProxy` entry's `allowIngress` (or default) |
+| `kafkaproxy-egress` | A `KafkaProxy` entry's `allowEgress` (or default) |
+| `kafkaproxyingress-ingress` | A `KafkaProxyIngress` entry (or default) |
+| `kafkaservice-egress` | A `KafkaService` entry (or default), including the `strimziKafkaRef` auto-derived rule |
+| `kafkaprotocolfilter-ingress` | A `KafkaProtocolFilter` entry's `allowIngress` (or default) |
+| `kafkaprotocolfilter-egress` | A `KafkaProtocolFilter` entry's `allowEgress` (or default) |
+
+This is collision-free by construction, without needing any constraint on `metadata.name` beyond what each of these CRDs already allows. `${token1}.${name1}` can only equal `${token2}.${name2}` if `token1 == token2` — and since each token maps to exactly one source kind, that in turn requires `name1 == name2`, which can't happen for two distinct objects of the same kind in the same namespace. This holds regardless of what characters `name` itself contains, including `.`.
+
+Length is a separate concern from collision, and needs separate handling: `KafkaProxyIngress` and `KafkaService` impose no `maxLength` on `metadata.name` today, so a name can be as long as the API server's generic 253-character default. Tightening that retroactively isn't available as an option — see [Rejected alternatives](#rejected-alternatives) — so when the computed `${token}.${name}` would exceed `NetworkPolicy`'s own 253-character limit, the operator instead generates `${token}.${name-prefix}-${hash}`, where `name-prefix` is the first 229 characters of `name` and `hash` is 8 lowercase hex characters derived from a stable hash of the full, untruncated `name`. This only ever applies once `name` exceeds 238 characters, already a pathological outlier, and makes a collision between two different overly-long names vanishingly unlikely rather than structurally impossible — the same trade-off as a `git` short hash.
+
+
+#### Labels
+
+Whether a given generated `NetworkPolicy` came from a declared entry or via the `spec.defaultIngress`, `spec.defaultEgress` or `KROXYLICIOUS_KPNP_ABSENT` fallbacks, is recorded as a label, not in the name:
+
+```yaml
+metadata:
+  labels:
+    kroxylicious.io/default-policy: allow-all # or: deny-all
+```
+
+This label is present whenever a `NetworkPolicy` was generated via the `spec.defaultIngress`, `spec.defaultEgress` or `KROXYLICIOUS_KPNP_ABSENT` fallback, or (see [Generation](#generation)), letting all such rules be selected independent of target kind, e.g. `kubectl get networkpolicy -l kroxylicious.io/default-policy=allow-all`. It's absent once an entry's own declared rules are in effect — including the `strimziKafkaRef` auto-derived rule, which is itself only generated once an entry exists — since that's not driven by `KROXYLICIOUS_KPNP_ABSENT`.
+
 
 #### `podSelector`
 
@@ -245,46 +228,107 @@ Because this `podSelector` is identical on every `NetworkPolicy` generated for a
 
 #### `ownerReferences`
 
-Every `NetworkPolicy` generated for a `KafkaProxy`'s targets — whether from a declared entry (auto-derived, for a `strimziKafkaRef`-based `KafkaService`) or the `KROXYLICIOUS_KPNP_ABSENT` fallback — is owned by that `KafkaProxy` itself, regardless of whether a `KafkaProxyNetworkPolicy` exists for it. Ownership is uniform: deleting a `KafkaProxy` cleans up every generated `NetworkPolicy` via normal garbage collection, with no special case for whether a `KafkaProxyNetworkPolicy` was involved.
+A generated `NetworkPolicy` is owned by whatever resolved to produce its content:
 
-Deleting a `KafkaProxyNetworkPolicy` does not, by itself, delete any generated `NetworkPolicy` — the objects stay in place, still owned by the `KafkaProxy`. Instead, the reconciler, already watching `KafkaProxyNetworkPolicy` and triggered by its deletion, rewrites each affected target's `NetworkPolicy` content back to the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT`. This is the same create-or-update logic the reconciler already applies whenever a declared entry's rules change; a deleted `KafkaProxyNetworkPolicy` is just another change in a target's effective source of truth, not a special case.
+* One generated from a declared, resolved entry — including the `strimziKafkaRef` auto-derived rule — is owned by the `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` that entry targets.
+* One generated for `spec.kafkaProxy`, and one generated via the `KROXYLICIOUS_KPNP_ABSENT` fallback for a target with no entry, is owned by the `KafkaProxy` itself — there's no more specific CR to attribute either of these to.
 
-#### Naming
+This makes cleanup automatic rather than something the reconciler has to implement: deleting a `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` that has a declared entry garbage-collects its `NetworkPolicy` along with it. Deleting the `KafkaProxy` cleans up everything regardless of ownership.
 
-Each generated `NetworkPolicy`'s `metadata.name` is `${token}.${name}`, where `${name}` is copied verbatim from the `metadata.name` of the `KafkaProxyIngress`/`KafkaService`/`KafkaProtocolFilter` that entry targets, and `${token}` identifies the direction/role:
+Deleting a `KafkaProxyNetworkPolicy`, or removing one of its entries while the entry's target CR still exists, changes that target's effective source of truth from a declared entry back to the `KROXYLICIOUS_KPNP_ABSENT` fallback. The reconciler's usual create-or-update logic handles this the same way it handles any other spec change, including re-pointing `ownerReferences` from the target CR to the `KafkaProxy`.
 
-| Token | Generated for |
-| --- | --- |
-| `kafkaproxy-ingress` | A `KafkaProxy` entry's `allowIngress` (or default) |
-| `kafkaproxy-egress` | A `KafkaProxy` entry's `allowEgress` (or default) |
-| `kafkaproxyingress-ingress` | A `KafkaProxyIngress` entry (or default) |
-| `kafkaservice-egress` | A `KafkaService` entry (or default), including the `strimziKafkaRef` auto-derived rule |
-| `kafkaprotocolfilter-ingress` | A `KafkaProtocolFilter` entry's `allowIngress` (or default) |
-| `kafkaprotocolfilter-egress` | A `KafkaProtocolFilter` entry's `allowEgress` (or default) |
-
-This is collision-free by construction, without needing any constraint on `metadata.name` beyond what each of these CRDs already allows. `${token1}.${name1}` can only equal `${token2}.${name2}` if `token1 == token2` — and since each token maps to exactly one source kind, that in turn requires `name1 == name2`, which can't happen for two distinct objects of the same kind in the same namespace. This holds regardless of what characters `name` itself contains, including `.`.
-
-Whether a given generated `NetworkPolicy` came from a declared entry or from the `KROXYLICIOUS_KPNP_ABSENT` fallback is recorded as a label, not in the name:
+<!--
+----------------------------------------------------------------------------------------------------
 
 ```yaml
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyNetworkPolicy
 metadata:
-  labels:
-    kroxylicious.io/default-policy: allow-all # or: deny-all
+  name: my-proxy-network-policy
+spec:
+  kafkaProxy:
+    proxyRef:
+      name: my-proxy
+    allowIngress:
+      - ports: 
+          - protocol: TCP
+            port: 9190
+        from: 
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: prometheus
+    allowEgressToClusterDns: true
+  kafkaProxyIngresses:
+    - ingressRef:
+        name: my-ingress
+      allowIngressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: my-kafka-app-ns
+        - ipBlock:
+            cidr: 203.0.113.0/24
+            except:
+              - 203.0.113.128/27
+    - ingressRef:
+        name: my-other-ingress
+      allowIngressFrom: [...]
+  kafkaServices:
+    - serviceRef:
+        name: my-strimzi
+    - serviceRef:
+        name: my-external-kafka-cluster
+      allowEgress:
+        - ports:
+            - protocol: TCP
+              port: 9092
+          to:
+            - ipBlock:
+                cidr: 198.51.100.0/24
+  kafkaProtocolFilters:
+    - filterRef:
+        name: my-encryption-filter
+      allowEgress:
+        - ports:
+            - protocol: TCP
+              port: 8200
+          to:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: vault
 ```
 
-This label is present whenever a `NetworkPolicy` was generated via the `KROXYLICIOUS_KPNP_ABSENT` fallback (see [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics)), letting all such rules be selected independent of target kind, e.g. `kubectl get networkpolicy -l kroxylicious.io/default-policy=allow-all`. It's absent once an entry's own declared rules are in effect — including the `strimziKafkaRef` auto-derived rule, which is itself only generated once an entry exists — since that's not driven by `KROXYLICIOUS_KPNP_ABSENT`.
 
-Length is a separate concern from collision, and needs separate handling: `KafkaProxyIngress` and `KafkaService` impose no `maxLength` on `metadata.name` today, so a name can be as long as the API server's generic 253-character default. Tightening that retroactively isn't available as an option — see [Rejected alternatives](#rejected-alternatives) — so when the computed `${token}.${name}` would exceed `NetworkPolicy`'s own 253-character limit, the operator instead generates `${token}.${name-prefix}-${hash}`, where `name-prefix` is the first 229 characters of `name` and `hash` is 8 lowercase hex characters derived from a stable hash of the full, untruncated `name`. This only ever applies once `name` exceeds 238 characters, already a pathological outlier, and makes a collision between two different overly-long names vanishingly unlikely rather than structurally impossible — the same trade-off as a `git` short hash.
+
+* `spec.kafkaProxy.proxyRef` identifies the `KafkaProxy` governed by this `KafkaProxyNetworkPolicy`. It resolves only within the same namespace.
+* `spec.kafkaProxy` also declares the rules needed for the proxy itself. The above example shows egress to the cluster DNS and ingress from a Prometheus instance.
+* `spec.kafkaProxyIngresses[]` declares, per `ingressRef`, the `from` peers allowed to reach that ingress. There is no `ports` field here: the port(s) are always the ingress's own listening port(s), which the operator already knows — see [Ports](#ports) for why this differs from the other two lists.
+* `spec.kafkaServices[]` declares, per `serviceRef`, zero or more `{ports, to}` rules for egress to that `KafkaService`. An entry with no `allowEgress` at all is valid — see [The `strimziKafkaRef` case](#the-strimzikafkaref-case) for why, and [Ports](#ports) for what an entry's own omitted `ports` means.
+* `spec.kafkaProtocolFilters[]` declares, per `filterRef`, zero or more `{ports, from}` rules under `allowIngress` and/or zero or more `{ports, to}` rules under `allowEgress`. Unlike the other two lists, `ports` is **required** on every entry here — see [Ports](#ports).
+
+#### Ports
+
+Whether `ports` may, must, or must never be specified follows directly from whether the operator has any other way to know the right answer:
+
+| List | `ports` allowed? | Rationale |
+| --- | --- | --- |
+| `kafkaProxy.allowIngress`/`allowEgress` | **Required** | The proxy's metrics listening port and external destinations are not automatically known to the operator; both must be explicitly declared. |
+| `kafkaProxyIngresses[].allowIngressFrom` | Never (no field at all) | The ingress's own listening port(s) are already known to the operator from the targeted `KafkaProxyIngress`, and there's no sensible reason to allow a narrower subset of your own listener's port. |
+| `kafkaServices[].allowEgress` (via `strimziKafkaRef`) | Optional, additive only | The broker listener port is already known precisely from the referenced Strimzi `Kafka` resource — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case). An entry's `ports`/`to` here can only add further destinations, never replace the auto-derived rule. |
+| `kafkaServices[].allowEgress` (via `bootstrapServers`) | Optional; omitted means **all ports** | `bootstrapServers` gives the bootstrap port, but Kafka allows individual brokers to advertise arbitrary other combinations of ports and brokers, so the bootstrap port isn't guaranteed to be the only port the proxy ends up dialling once broker topology is discovered. The operator cannot safely narrow this on the user's behalf; a user who knows their cluster's brokers all share one port may narrow it explicitly. |
+| `kafkaProtocolFilters[].allowIngress`/`allowEgress` | **Required** | A filter's destination is arbitrary and plugin-defined; the operator has no mechanism to infer a port the way it can for an ingress or a Strimzi-backed service. |
+
+----------------------------------------------------------------------------------------------------
+-->
 
 ### Policy for `KafkaProxy`
 
-Unlike `KafkaProxyIngress`, which has externally-facing clients that the user must explicitly allow, the proxy itself generates ingress and egress traffic that the operator must account for.
-The proxy needs:
+The proxy itself usually generates ingress and egress traffic that the operator must account for:
 
-* **Ingress** to allow metric scraping by a Prometheus instance (or similar metrics collector). This requires knowing where the metrics instance lives, something the operator cannot infer on its own.
-* **Egress** to DNS (to resolve hostnames in `KafkaService.spec.bootstrapServers` and elsewhere) and to the target Kafka clusters, filters, and other external services.
+* **Egress** to DNS (to resolve hostnames used in `KafkaService.spec.bootstrapServers`, and elsewhere).
+* **Ingress** to allow metric scraping by a Prometheus instance (or similar metrics collector). This requires knowing where the metrics instance lives which the operator cannot infer on its own.
 
-For a `KafkaProxy` with no entry in `spec.kafkaProxy` (whether because no `KafkaProxyNetworkPolicy` exists at all, or because an existing one doesn't include a `spec.kafkaProxy` section), the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies independently to ingress and egress directions, generating `NetworkPolicy` resources named `kafkaproxy-ingress.${proxy-name}` and `kafkaproxy-egress.${proxy-name}` (see [Naming](#naming)). Here's the `allow-all` case for egress:
+Should a `KafkaProxy` lack a `KafkaProxyNetworkPolicy` entirely, the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies independently to ingress and egress directions. 
+Here's the `allow-all` case for egress:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -313,8 +357,7 @@ spec:
   egress: []  # deny all egress
 ```
 
-When an entry targets the `KafkaProxy` (via `spec.kafkaProxy`), the same `NetworkPolicy` names are used, now built from `allowIngress` and/or `allowEgress`. The proxy is a target type just like the others: if an entry exists, its declared rules are used; if no entry exists, the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies; if an entry does exist but fails to resolve or validate, `Accepted: False` is reported for that entry (see [Status conditions](#status-conditions)).
-
+When a `KafkaProxyNetworkPolicy` exists which targets the `KafkaProxy` via `spec.kafkaProxy`, the same `NetworkPolicy` are built using the given rules. 
 An example `KafkaProxyNetworkPolicy` entry:
 
 ```yaml
@@ -325,35 +368,22 @@ kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-proxy-network-policy
 spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy
-    allowIngress:
+  kafkaProxy:                      # required
+    proxyRef:                      # required
+      name: my-proxy               # required
+    allowEgressToClusterDns: true  # required
+    allowIngress:                  # required, but may be []  
       - from:
           - namespaceSelector:
               matchLabels:
                 kubernetes.io/metadata.name: prometheus
-        ports:
-          - protocol: TCP
-            port: 8080  # the proxy's metrics port
-    allowEgress:
-      - ports:
-          - protocol: UDP
-            port: 53
-          - protocol: TCP
-            port: 53
-        to:
-          - namespaceSelector:
-              matchLabels:
-                kubernetes.io/metadata.name: kube-system
-            podSelector:
-              matchLabels:
-                k8s-app: kube-dns
 ```
 
-Note that unlike `KafkaProxyIngress` (which does not allow a `ports` field — the ingress's own port is already known), the proxy entry **requires** `ports` for both `allowIngress` and `allowEgress` — the proxy's metrics listening port is not automatically known to the operator, and egress destinations vary widely depending on target Kafka clusters and filters. This keeps the entry explicit and readable.
+The core proxy itself only requires egress for DNS — any other egress is more accurately associated with a `KafkaService` or `KafkaProtocolFilter`. 
+We use `allowEgressToClusterDns` as a shorthand, rather than having `NetworkPolicy`-style arrays of egress rules (which would always need the same rule for talking to the cluster DNS server). 
+`spec.kafkaProxy.allowIngress` lacks a `ports` property: the proxy's metrics listening port is already known to the operator.
 
-Generated `NetworkPolicy` for the above example:
+Generated `NetworkPolicies` for the above example:
 
 ```yaml
 ---
@@ -362,7 +392,7 @@ kind: NetworkPolicy
 metadata:
   name: kafkaproxy-ingress.my-proxy
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ...
   policyTypes:
     - Ingress
   ingress:
@@ -372,14 +402,14 @@ spec:
               kubernetes.io/metadata.name: prometheus
       ports:
         - protocol: TCP
-          port: 8080
+          port: 9190
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: kafkaproxy-egress.my-proxy
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ...
   policyTypes:
     - Egress
   egress:
@@ -399,15 +429,19 @@ spec:
 
 ### Policy for `KafkaProxyIngress`
 
-For a `KafkaProxyIngress` with no entry in `spec.kafkaProxyIngresses` (whether because no `KafkaProxyNetworkPolicy` exists at all, or because an existing one doesn't include an entry for this ingress), the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies, generating a `NetworkPolicy` named `kafkaproxyingress-ingress.${ingress-name}` (see [Naming](#naming)). Here's the `allow-all` case:
+When no `KafkaProxyNetworkPolicy` for the `KafkaProxyIngress`'s proxy exists the fallback is controlled by `KROXYLICIOUS_KPNP_ABSENT`.
+When a `KafkaProxyNetworkPolicy` exists for the `KafkaProxyIngress`'s proxy the fallback is controlled by the `spec.defaultIngress`.
+Here's the `allow-all` case:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: kafkaproxyingress-ingress.my-loadbalancer-ingress
+  labels:
+    kroxylicious.io/default-policy: allow-all
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ...
   policyTypes:
     - Ingress
   ingress:
@@ -416,12 +450,16 @@ spec:
         port: <PORT_NUM> # for each port
 ```
 
-When an entry targets a given `KafkaProxyIngress`, the same `NetworkPolicy` name is used, now built from `allowIngressFrom`. The exact content depends on the ingress mechanism.
+When an entry targets a given `KafkaProxyIngress` the behaviour of the operator depends on the ingress mechanism.
 The `KafkaProxyIngress` CR supports three ingress mechanisms:
 
 * `clusterIP` for access from Kafka clients running in the same Kubernetes cluster
 * `loadBalancer` for access from Kafka clients running outside the Kubernetes cluster
 * `openShiftRoute` for access from Kafka clients running outside the OpenShift cluster
+
+In all cases the user does not specify any `ports` in the `KafkaProxyNetworkPolicy`, because the ports are already known to the operator.
+
+For `loadBalancer` and `openShiftRoute`, `allowIngressFrom` only accepts `ipBlock` peers: external clients carry no Kubernetes namespace/Pod identity for a `namespaceSelector`/`podSelector` to match against. `ipBlock.except` is rejected for both, too — neither `Service.spec.loadBalancerSourceRanges` nor the OpenShift `Route`'s `ip_whitelist` annotation (see [the `openShiftRoute` case](#the-openshiftroute-case)) has a way to express a subtracted sub-range, so there'd be no correct way to carry one through to the generated `Service`/`Route`.
 
 #### The `clusterIP` case
 
@@ -447,13 +485,14 @@ kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-proxy-network-policy
 spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy-cr
-  kafkaProxyIngresses:
-    - ingressRef:
-        name: my-ingress
-      allowIngressFrom:
+  kafkaProxy:                      # required
+    proxyRef:                      # required
+      name: my-proxy-cr            # required
+    ...
+  kafkaProxyIngresses:             # required, may be []
+    - ingressRef:                  # required
+        name: my-ingress           # required
+      allowIngressFrom:            # required
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: my-kafka-app-ns
@@ -474,7 +513,7 @@ metadata:
   name: kafkaproxyingress-ingress.my-ingress
   namespace: my-proxy-ns
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ...
   policyTypes:
     - Ingress
   ingress:
@@ -523,7 +562,7 @@ metadata:
   name: kafkaproxyingress-ingress.my-loadbalancer-ingress
   namespace: my-proxy-ns
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ... 
   policyTypes:
     - Ingress
   ingress: # The rules will be copied verbatim
@@ -549,13 +588,37 @@ To restrict access by client CIDR with an OpenShift `Route`, we must restrict tr
 
 ```yaml
 ---
+# Example network policy restricting access to the given CIDRs
+apiVersion: kroxylicious.io/v1alpha1
+kind: KafkaProxyNetworkPolicy
+metadata:
+  name: my-proxy-network-policy
+spec:
+  kafkaProxy:                      # required
+    proxyRef:                      # required
+      name: my-proxy-cr            # required
+    ...
+  kafkaProxyIngresses:             # required, may be []
+    - ingressRef:                  # required
+        name: my-route-ingress     # required
+      allowIngressFrom:            # required
+        - ipBlock:
+            cidr: 203.0.113.0/24
+        - ipBlock:
+            cidr: 198.51.100.10/32
+```
+
+This produces both the `Route`'s `ip_whitelist` annotation and the accompanying `NetworkPolicy`:
+
+```yaml
+---
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: my-proxy-cr-my-ingress
   namespace: my-proxy-ns
   annotations:
-    # Space-separated list of allowed CIDRs or IP addresses, taken from the KafkaProxyNetworkPolicy
+    # Space-separated list of allowed CIDRs or IP addresses, taken from allowIngressFrom
     haproxy.router.openshift.io/ip_whitelist: "203.0.113.0/24 198.51.100.10/32"
 spec:
   host: my-app.example.com
@@ -571,10 +634,10 @@ metadata:
   name: kafkaproxyingress-ingress.my-route-ingress
   namespace: my-proxy-ns
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ... 
   policyTypes:
     - Ingress
-  ingress: # The rules target the pod running the Router network proxy.
+  ingress: # The rules target the pod running the Router network proxy, not the declared allowIngressFrom peers.
     - from:
         - namespaceSelector:
             matchLabels:
@@ -584,17 +647,23 @@ spec:
           port: 9092
 ```
 
+The declared `ipBlock` CIDRs only ever reach the `Route`'s `ip_whitelist` annotation — the `NetworkPolicy`'s `from` is always the Router's own namespace, regardless of what's declared. Every client's traffic arrives at the proxy's `Pod` by way of the Router, so the `Pod`-level `NetworkPolicy` never sees the original client CIDR and can't restrict by it; that restriction is enforced entirely at the `Route`/HAProxy layer instead. This means reviewing the generated `NetworkPolicy` alone is not enough to know who can reach an `openShiftRoute` ingress — the `Route`'s own annotation has to be read too.
+
 ### Policy for `KafkaService`
 
-For a `KafkaService` using `bootstrapServers` with no entry in `spec.kafkaServices` (whether because no `KafkaProxyNetworkPolicy` exists at all, or because an existing one doesn't include an entry for this service), the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies, generating a `NetworkPolicy` named `kafkaservice-egress.${kafka-service-name}` (see [Naming](#naming)). This applies identically to a `KafkaService` using `strimziKafkaRef` that has no entry — see [the `strimziKafkaRef` case](#the-strimzikafkaref-case) below for what it gets once one exists. Here's the `allow-all` case:
+When no `KafkaProxyNetworkPolicy` for the `KafkaService`'s proxy exists the fallback is controlled by `KROXYLICIOUS_KPNP_ABSENT`.
+When a `KafkaProxyNetworkPolicy` exists for the `KafkaService`'s proxy, but has no entry for this service, the fallback is controlled by `spec.defaultEgress`.
+Here's the `allow-all` case:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: kafkaservice-egress.my-target-cluster
+  labels:
+    kroxylicious.io/default-policy: allow-all
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ... 
   policyTypes:
     - Egress
   egress:
@@ -609,9 +678,9 @@ The `KafkaService` CR supports two ways to express a target cluster:
 
 #### The `strimziKafkaRef` case
 
-`strimziKafkaRef` is a very special case: we already know the namespace of the `Kafka` cluster, and the `Pod` labels, and hence selectors, are a published part of the Strimzi API, so the operator can always compute the exact egress rule itself once a `KafkaProxyNetworkPolicy` entry exists for it, without needing an `allowEgress` entry at all.
+`strimziKafkaRef` is a very special case: we already know the namespace of the `Kafka` cluster, and the `Pod` labels, and hence selectors, are a published part of the Strimzi API, so the operator can always compute the exact egress rule itself once a `KafkaProxyNetworkPolicy` entry exists for it. No `allowEgress` is needed, or accepted, for this case.
 
-As with `bootstrapServers` above, a `strimziKafkaRef`-based `KafkaService` with no entry gets the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT`. Once a `- serviceRef: {name: ...}` entry exists — with or without `allowEgress` — the operator instead generates the precise rule itself, since a correct answer is already available for free and there's no reason to ask the user to supply `to`/`ports` manually. This entry is also what the [exhaustiveness](#resolution-exhaustiveness-and-generation-semantics) check requires for `Accepted: True`.
+As with `bootstrapServers` above, a `strimziKafkaRef`-based `KafkaService` with no entry gets the same fallback described above. Once a bare `- serviceRef: {name: ...}` entry exists, the operator instead generates the precise rule itself, since a correct answer is already available for free and there's no reason to ask the user to supply `to`/`ports` manually. This entry is also what the [exhaustiveness](#resolution) check requires for `Accepted: True`.
 
 ```yaml
 ---
@@ -631,15 +700,16 @@ kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-proxy-network-policy
 spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy-cr
-  kafkaServices:
-    - serviceRef:
-        name: strimzi-target
+  kafkaProxy:                 # required
+    proxyRef:                 # required
+      name: my-proxy-cr       # required
+    ...
+  kafkaServices:              # required, may be []
+    - serviceRef:             # required
+        name: strimzi-target  # required
 ```
 
-A bare entry like this, with no `allowEgress`, is enough to generate a `NetworkPolicy` named `kafkaservice-egress.${kafka-service-name}` (see [Naming](#naming)):
+A bare entry like this, with no `allowEgress`, is enough to generate a `NetworkPolicy`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -647,7 +717,7 @@ kind: NetworkPolicy
 metadata:
   name: kafkaservice-egress.strimzi-target
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ... 
   policyTypes:
     - Egress
   egress:
@@ -665,92 +735,30 @@ spec:
               strimzi.io/broker-role: "true"
 ```
 
-An `allowEgress` entry can still be added for a `strimziKafkaRef`-based `KafkaService` if needed — for example to grant egress to some additional destination beyond the Strimzi brokers themselves. Its rules are additive with the auto-derived rule above (see [Current situation](#current-situation)), rather than replacing it. The same additivity applies across *other* targets on the same proxy, not just within this one — see [`podSelector`](#podselector) for why a precise rule like this one offers no enforcement guarantee if a sibling `KafkaService` on the same `KafkaProxy` ends up with a broader rule on the same port.
-
 #### The `bootstrapServers` case
 
 `bootstrapServers` allows any kind of host address to be specified.
-Supporting it involves a number of sub-cases:
+There are a number of sub-cases:
 
 * the given servers are internal IPv4 or IPv6 addresses
 * the given servers are internal DNS names (e.g. `my-kafka-cluster-kafka-bootstrap.my-ns.svc.cluster.local`, a Strimzi bootstrap `Service` DNS name)
 * the given servers are external IPv4 or IPv6 addresses
 * the given servers are external DNS names (e.g. `node12.kafka.example.com:9092`)
 
-The use of internal IP addresses will not be supported.
-`KafkaService` resources with `bootstrapServers` including any internal IP address will be rejected using an `Accepted` condition with a suitable message.
-There is no good reason users should be using IP addresses to specify an internal Kafka cluster; IP addresses in Kubernetes are very dynamic.
+but the operator will not attempt to distinguish between them, and instead just propagate the rules given in the `KafkaProxyNetworkPolicy` to the `NetworkPolicy`.
 
-##### Internal DNS names
-
-Strimzi's bootstrap `Service` for a listener is named `<cluster-name>-kafka-bootstrap` (or `<cluster-name>-kafka-<listener-name>-bootstrap` for a named listener), giving an internal DNS name of the form `<cluster-name>-kafka-bootstrap.<namespace>.svc.<cluster-domain>`.
-This is the form `bootstrapServers` should expect: it's derived only from the `Kafka` resource's name, so it stays stable across broker scaling and `KafkaNodePool` changes.
-Strimzi also makes individual broker pods addressable via a headless `Service` (`<cluster-name>-kafka-<broker-id>.<cluster-name>-kafka-brokers.<namespace>.svc.<cluster-domain>`), but with `KafkaNodePool`s in use the `<broker-id>` portion depends on node pool naming and can change as pools are scaled or renamed, so it's not a reliable choice for a `bootstrapServers` entry.
-
-```yaml
----
-kind: KafkaService
-metadata:
-  namespace: my-proxy-ns
-  name: internal-dns
-spec:
-  bootstrapServers: my-kafka-cluster-kafka-bootstrap.my-ns.svc.cluster.local:9092
----
-# Example network policy restricting access to the given namespace
-kind: KafkaProxyNetworkPolicy
-metadata:
-  name: my-proxy-network-policy
-spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy-cr
-  kafkaServices:
-    - serviceRef:
-        name: internal-dns
-      allowEgress:
-        - to:
-            - namespaceSelector:
-                matchLabels:
-                  kubernetes.io/metadata.name: my-ns
-```
-
-##### External DNS names and external IP addresses
-
-When the bootstrap servers list is entirely composed of external DNS names and/or external IP addresses, each `allowEgress` entry's `to` property uses `ipBlock` rules.
-
-```yaml
----
-kind: KafkaService
-metadata:
-  namespace: my-proxy-ns
-  name: external-cluster
-spec:
-  bootstrapServers: kafka1.example.com:9092,kafka2.example.com:9092
----
-kind: KafkaProxyNetworkPolicy
-metadata:
-  name: my-proxy-network-policy
-spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy-cr
-  kafkaServices:
-    - serviceRef:
-        name: external-cluster
-      allowEgress:
-        - to:
-            - ipBlock:
-                cidr: 198.51.100.0/24
-```
 
 ### Policy for `KafkaProtocolFilter`
 
 The `KafkaProtocolFilter` CR is used to configure filters.
 It is common for filters, or their plugins, to require network egress.
 It's also not forbidden for filters to require network ingress.
-In the most general case, a filter or its plugin would require rules for both; a single entry can set both `allowIngress` and `allowEgress`, generating two `NetworkPolicy` resources — one per direction (see [Naming](#naming)).
+In the most general case, a filter or its plugin would require rules for both; a single entry can set both `allowIngress` and `allowEgress`, generating two `NetworkPolicy` resources — one per direction.
 
-For a `KafkaProtocolFilter` with no entry in `spec.kafkaProtocolFilters` (whether because no `KafkaProxyNetworkPolicy` exists at all, or because an existing one doesn't include an entry for this filter), the fallback controlled by `KROXYLICIOUS_KPNP_ABSENT` applies per direction, generating `NetworkPolicy` resources named `kafkaprotocolfilter-ingress.${kafka-filter-name}` and/or `kafkaprotocolfilter-egress.${kafka-filter-name}` (see [Naming](#naming)). Unlike `KafkaProxyIngress`/`KafkaService`, which always need *some* access just to function, a `KafkaProtocolFilter` may need none at all — but the same `allow-all`/`deny-all` choice and reasoning applies regardless.
+When no `KafkaProxyNetworkPolicy` for the `KafkaProtocolFilter`'s proxy exists the fallback is controlled by `KROXYLICIOUS_KPNP_ABSENT`, per direction.
+When a `KafkaProxyNetworkPolicy` exists for the `KafkaProtocolFilter`'s proxy, but has no entry for this filter, the fallback is controlled by `spec.defaultIngress`/`spec.defaultEgress`, per direction.
+Unlike `KafkaProxyIngress`/`KafkaService`, which always need *some* access just to function, a `KafkaProtocolFilter` may need none at all — but the same `allow-all`/`deny-all` choice and reasoning applies regardless.
+The user will need to define `allowIngress: []` (or `allowEgress: []`) in order to produce a NetworkPolicy that disallows ingress (or egress).
 
 Here's an example for the `RecordEncryption` filter, which only needs egress:
 
@@ -777,13 +785,15 @@ kind: KafkaProxyNetworkPolicy
 metadata:
   name: my-proxy-network-policy
 spec:
-  kafkaProxy:
-    proxyRef:
-      name: my-proxy-cr
-  kafkaProtocolFilters:
-    - filterRef:
-        name: encryption
-      allowEgress:
+  kafkaProxy:                 # required
+    proxyRef:                 # required
+      name: my-proxy-cr       # required
+  ...
+  kafkaProtocolFilters:       # required, may be []
+    - filterRef:              # required
+        name: encryption      # required
+      allowIngress: []        # required, may be []
+      allowEgress:            # required, may be []
         - ports:
             - protocol: TCP
               port: 8200
@@ -793,7 +803,7 @@ spec:
                   kubernetes.io/metadata.name: vault
 ```
 
-And the resulting `NetworkPolicy`:
+And the resulting egress `NetworkPolicy`:
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -801,7 +811,7 @@ kind: NetworkPolicy
 metadata:
   name: kafkaprotocolfilter-egress.encryption
 spec:
-  podSelector: ... # see Common structure above
+  podSelector: ... 
   policyTypes:
     - Egress
   egress:
@@ -814,7 +824,7 @@ spec:
               kubernetes.io/metadata.name: vault
 ```
 
-A filter needing egress to more than one kind of destination for different reasons (e.g. a `SaslTermination` filter using OAUTHBEARER tokens plus a `SaslSubjectBuilder` plugin doing LDAP lookups) expresses that as multiple entries in its `allowEgress` list — both still feed the one generated `kafkaprotocolfilter-egress.${name}` `NetworkPolicy`, which can have multiple rules.
+A filter needing egress to more than one kind of destination for different reasons (e.g. a `SaslTermination` filter using OAUTHBEARER tokens plus a `SaslSubjectBuilder` plugin doing LDAP lookups) expresses that as multiple entries in its `allowEgress` list: the one generated `kafkaprotocolfilter-egress.${name}` `NetworkPolicy`, will have multiple rules.
 
 ### Operator RBAC changes
 
@@ -838,7 +848,7 @@ This affects the `kroxylicious/kroxylicious` repo.
 
 The proposed changes are backwards compatible. The `KROXYLICIOUS_KPNP_ABSENT` environment variable defaults to `no-np` on upgrade (no `NetworkPolicy` generation), so nothing changes for an existing install. On fresh installs, it defaults to `allow-all`, allowing a new `KafkaProxy` to pass traffic immediately. 
 Targets with no declared `KafkaProxyNetworkPolicy` entry get a default policy based on `KROXYLICIOUS_KPNP_ABSENT`, with descriptive names and `kroxylicious.io/default-policy` labels, so administrators can audit and tighten rules on their own schedule. 
-The "stale but safe" generation semantics (see [Resolution, exhaustiveness, and generation semantics](#resolution-exhaustiveness-and-generation-semantics)) ensure that once a target has a working, explicitly declared rule, a later mistake elsewhere in the `KafkaProxyNetworkPolicy` cannot retract it.
+The "stale but safe" generation semantics (see [`ownerReferences`](#ownerreferences)) ensure that once a target has a working, explicitly declared rule, a later mistake elsewhere in the `KafkaProxyNetworkPolicy` cannot retract it.
 
 ## Rejected alternatives
 
