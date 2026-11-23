@@ -1,4 +1,4 @@
-# <PR-NUMBER> - Rules for anonymous clients in the ACL authorizer
+# 155 - Rules for anonymous clients in the ACL authorizer
 
 The ACL authorizer has no way to write a rule for a client that has not authenticated.
 This proposal adds `anonymous` to the ACL rules format, selecting exactly those clients, and records where it deliberately departs from [proposal 009](./009-authorizer.md).
