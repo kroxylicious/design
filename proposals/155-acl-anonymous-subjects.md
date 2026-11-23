@@ -63,7 +63,7 @@ Proposal 009 is not changed; this proposal records the difference.
 
 - Existing rules files keep their meaning: none can contain an `anonymous` rule today.
 - `anonymous` becomes a keyword of the rules format.
-  A file that uses `anonymous` as the alias of an imported type (`import User as anonymous`) needs another alias.
+  A file that uses `anonymous` as a name, for example as the alias of an imported type (`import User as anonymous`), needs another one.
 - If principals that are not about identity are ever added to subjects, for example the client's network address, unauthenticated clients would no longer have an empty subject, and `anonymous` rules would stop matching them.
   This proposal ties `anonymous` to `Subject.anonymous()` so that such a change has to decide, in one place, what anonymous means.
 
