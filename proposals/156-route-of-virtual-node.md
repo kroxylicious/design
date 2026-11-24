@@ -1,4 +1,4 @@
-# 000 - Expose the route of a VirtualNode to Routers
+# 156 - Expose the route of a VirtualNode to Routers
 
 Add `Optional<String> routeOf(VirtualNode)` to `RouterContext` so a `Router` can learn which of its routes a `VirtualNode` belongs to, while keeping `VirtualNode` opaque.
 
