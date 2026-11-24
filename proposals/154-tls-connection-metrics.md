@@ -6,7 +6,7 @@ It addresses [kroxylicious#5197](https://github.com/kroxylicious/kroxylicious/is
 
 ## Current situation
 
-A client's traffic through the proxy passes over two separate connections, and each can use its own TLS settings:
+A client's traffic through the proxy passes over at least two separate connections, and each can use its own TLS settings:
 
 - **Client to proxy:** the client connects to a *gateway*, a network entry point of a virtual cluster.
   The proxy acts as the TLS server.
@@ -14,6 +14,7 @@ A client's traffic through the proxy passes over two separate connections, and e
 - **Proxy to server:** the proxy connects to the real Kafka cluster named in the virtual cluster's `target.cluster`.
   The proxy acts as the TLS client.
   The settings come from that cluster's `tls`.
+  When the virtual cluster uses a router, the proxy may connect to several target clusters, each with its own `tls`.
 
 ```yaml
 clusters:
@@ -40,16 +41,18 @@ Today, the only way to see them is to raise the TLS debug level and read the tra
 
 ## Motivation
 
-Administrators need to confirm that their TLS configuration has taken effect, for example:
+Administrators who plan to tighten their TLS configuration, for example by dropping TLS 1.2 or an old cipher suite, need to know the impact before making the change:
 
-- Are all connections using TLS 1.3?
-- Are all connections using the cipher suites I allowed?
+- Which protocols, cipher suites and named groups are clients and brokers actually using?
+- Which allowed settings are no longer used, and can be removed?
+- Which applications still rely on a setting that is about to be removed, so that their owners can be asked to upgrade?
 
-When the answer is no, they need to find the clients responsible, so that the owners of those applications can upgrade them.
-
-A misconfigured gateway or cluster is easy to miss without this.
-[Proposal 144](https://github.com/kroxylicious/design/blob/main/proposals/144-pqc-support.md) (post-quantum cryptography support) makes this more important, as administrators tighten protocols, cipher suites and named groups and need to see that clients and brokers comply.
+[Proposal 144](https://github.com/kroxylicious/design/blob/main/proposals/144-pqc-support.md) (post-quantum cryptography support) makes this more important, as administrators move towards stricter protocols, cipher suites and named groups.
 Metrics make this visible on a dashboard or in an alert, without debug logging.
+
+The metrics only see connections whose TLS handshake succeeded.
+A client rejected because it shares no protocol or cipher suite with the proxy does not appear, so the metrics show what is in use among the allowed settings, not which clients are failing.
+Failed connections are out of scope for this proposal.
 
 ## Proposal
 
@@ -111,7 +114,7 @@ An explicit `unsupported` value is clearer in queries and aggregations than a mi
 The named group is part of this design, but reading it is deferred.
 The first implementation can report `unsupported` for every connection; detecting the API and reporting the real group can be added later, by any contributor, without a new proposal.
 
-### Finding the clients behind a count
+### Identifying clients
 
 The metrics show that some connections use, say, TLS 1.2, but not which clients made them.
 For that, the proxy logs one line for every connection once it is established, whether or not it uses TLS:
@@ -135,6 +138,10 @@ INFO  io.kroxylicious.proxy.connection - Client connection established {clientAd
 
 The level is `INFO` because Kafka client connections are long-lived.
 By the time an administrator sees an unexpected value in the metrics, the connection has usually already been established, so a line logged at a lower level would be missed until the client reconnects.
+
+The line is written once, when a connection is established, so the logs only show clients that connected within the log retention window.
+Metrics are usually kept for longer, and Kafka connections can stay open for weeks, so a counted connection may no longer have a matching log line.
+Keeping these lines for longer, for example in their own file, reduces this gap.
 
 By default, the lines go to standard output with the other proxy logs, including on Kubernetes.
 On bare metal, setting the `KROXYLICIOUS_CONNECTION_LOG_FILE` environment variable writes them to that file instead, in the style of an nginx `access.log`.
