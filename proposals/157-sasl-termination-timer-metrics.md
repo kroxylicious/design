@@ -11,7 +11,7 @@ PROPOSAL WORKFLOW:
 See proposals/README.md for complete instructions.
 -->
 
-# 000 - Granular Timer Metrics for SASL Termination
+# 157 - Granular Timer Metrics for SASL Termination
 
 This proposal adds component-level latency timers and outcome tagging to the SASL Termination filter so operators can isolate slow external dependencies during authentication.
 
