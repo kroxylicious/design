@@ -4,6 +4,9 @@ Add support for operator-generated [`NetworkPolicy`](https://kubernetes.io/docs/
 
 ## Current situation
 
+Currently the Kroxylicious operator for Kubernetes does not generate `NetworkPolicy` resources at all.
+So Kroxylicious users have needed to write NP for the proxy in order to work within Kubernetes's tiered model.
+
 Originally Kubernetes supported only `NetworkPolicy` (NP), which got used by both Kubernetes admins and application developers/tenants.
 Due to the friction this caused, since about 2022 Kubernetes has supported a tiered model:
 * The Kubernetes admin-owned `AdminNetworkPolicy` is evaluated before NPs, and provides non-negotiable rules (e.g., "Nobody can talk to the kube-system namespace").
@@ -21,8 +24,6 @@ It's worth calling out some important aspects of the `NetworkPolicy` API in Kube
 * Same-kubernetes-cluster rules can be expressed in terms of namespace and pod selectors (e.g. you can say "allow connections to pods matching _this_ selector in namespaces matching _that_ selector"). Moreover, it is considered bad practice to use an `ipBlock` to allow access to/from a pod in the same cluster.
 
 Users of the Kroxylicious operator are assumed to fall into the "developers/tenants" bucket, rather than also being Kubernetes admins.
-Currently the Kroxylicious operator for Kubernetes does not generate `NetworkPolicy` resources at all.
-So Kroxylicious users have needed to write NP for the proxy in order to work within Kubernetes's tiered model.
 
 ## Motivation
 
@@ -551,6 +552,8 @@ spec:
           port: <PORT_NUM>
 ```
 
+The operator will create a `Accepted: False` condition if `externalTrafficPolicy` is not `Local`.
+
 Proposal #134 gives each `loadBalancer`-type `KafkaProxyIngress` its own dedicated `Service`, so an entry's CIDRs apply directly to that ingress's own `Service.spec.loadBalancerSourceRanges` and pod-level `NetworkPolicy`, with no cross-ingress CIDR union to construct.
 
 Sharing hasn't disappeared entirely, though: multiple `VirtualKafkaClusters` can still reference the same ingress, addressed by SNI on that ingress's one `Service` — this is what delivers the per-load-balancer cost saving proposal #134 preserves.
@@ -627,6 +630,8 @@ spec:
 The declared `ipBlock` CIDRs only ever reach the `Route`'s `ip_whitelist` annotation — the `NetworkPolicy`'s `from` is always the Router's own namespace, regardless of what's declared. Every client's traffic arrives at the proxy's `Pod` by way of the Router, so the `Pod`-level `NetworkPolicy` never sees the original client CIDR and can't restrict by it; that restriction is enforced entirely at the `Route`/HAProxy layer instead. This means reviewing the generated `NetworkPolicy` alone is not enough to know who can reach an `openShiftRoute` ingress — the `Route`'s own annotation has to be read too.
 
 **Known limitation:** this is a real exception to this proposal's own goal of letting a generated `NetworkPolicy` be audited on its own terms (see [Goals](#goals)) — for every other ingress mechanism, the `NetworkPolicy`'s `from` *is* the actual restriction; for `openShiftRoute` it structurally cannot be, and nothing on either object points a reader from one to the other. A user who opens `kafkaproxyingress-ingress.my-route-ingress` first, without already knowing this mechanism's limitation, will see only "from the Router's namespace" and have no indication that a separate, unrelated-looking `Route` annotation is where the real client restriction lives. We accept this as an inherent consequence of how OpenShift `Route`s work rather than something this proposal can fix: there's no cross-reference between the two objects, so finding the `Route` requires already knowing to look for it (e.g. via this document, or the `KafkaProxyIngress`'s own generated `Route`, which is named after the ingress in the same way).
+
+Users already have a way of setting annotations on the `Route`, via `spec.infrastructure.annotations` on the `KafkaProxyIngress`. The operator will ensure that the IP address ranges given explicitly via a `haproxy.router.openshift.io/ip_whitelist` annotations in `spec.infrastructure.annotations` are the same as those given in the `KafkaProxyNetworkPolicy`, and create an `Accepted: False` condition when this is not the case. Resolving the ambiguity will be left to the user.
 
 ### Policy for `KafkaService`
 
